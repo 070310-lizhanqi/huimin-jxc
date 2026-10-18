@@ -1,5 +1,6 @@
 /* 真实用户模拟测试 v2：并发/异常输入/极端场景，全在 API 层模拟 UI 会发出的请求序列 */
 const BASE = 'http://127.0.0.1:7741';
+const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 const issues = [];
 function ok(name, cond, detail = '') {
@@ -7,14 +8,14 @@ function ok(name, cond, detail = '') {
   else { fail++; issues.push(`${name} ${detail}`); console.log(`  FAIL ${name} ${detail}`); }
 }
 async function j(method, path, body) {
-  const r = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: body ? JSON.stringify(body) : undefined });
   let d = null; try { d = await r.json(); } catch { d = { raw: 'non-json' }; }
   return { status: r.status, body: d };
 }
 
 (async () => {
-  const bs = await j('POST', '/api/bootstrap', { name: '模拟套' + Date.now() % 1000 });
-  const teamId = bs.body.teamId;
+  const me = (await j('GET', '/api/auth/me')).body;
+  const teamId = me.user.teamId;
   console.log(`teamId=${teamId}`);
   const whs = await j('GET', `/api/warehouse?teamId=${teamId}`);
   const whId = whs.body[0].id;
@@ -31,7 +32,9 @@ async function j(method, path, body) {
   ]);
   ok('双击保存返回同一张单', d1.body.id === d2.body.id && d1.body.id, `d1=${d1.body.id} d2=${d2.body.id}`);
   const list1 = await j('GET', `/api/doc/list?teamId=${teamId}&type=sorder`);
-  ok('双击保存只生成一张单', list1.body.total === 1, `实际 ${list1.body.total}`);
+  const mine = list1.body.rows.filter((x) => x.remark === null || x.partnerId === cusId);
+  const myDocs = list1.body.rows.filter((x) => x.partnerId === cusId);
+  ok('双击保存只生成一张单', myDocs.length === 1, `实际 ${myDocs.length}`);
   for (const row of list1.body.rows) await j('DELETE', `/api/doc/${row.id}?teamId=${teamId}`);
 
   // ===== 2. 并发审核 =====
@@ -44,7 +47,8 @@ async function j(method, path, body) {
   ]);
   const info = await j('GET', `/api/doc/info?id=${docId}&teamId=${teamId}`);
   const stock = await j('GET', `/api/stock/list?teamId=${teamId}`);
-  ok('并发审核不重复过账', stock.body[0]?.qty === 10, `库存 ${stock.body[0]?.qty}`);
+  const myRow = stock.body.find((x) => x.productId === prodId);
+  ok('并发审核不重复过账', myRow?.qty === 10, `库存 ${myRow?.qty}`);
   ok('并发审核后单据状态一致', info.body.doc?.status === 'audit', info.body.doc?.status);
   ok('并发审核恰好一个成功', (a1.body.ok ? 1 : 0) + (a2.body.ok ? 1 : 0) === 1, `a1=${JSON.stringify(a1.body)} a2=${JSON.stringify(a2.body)}`);
 
@@ -114,24 +118,22 @@ async function j(method, path, body) {
 
   // ===== 9. 跨团队越权 =====
   console.log('\n[9] 跨团队越权');
-  const bs2 = await j('POST', '/api/bootstrap', { name: '越权目标套' });
-  const teamId2 = bs2.body.teamId;
-  const otherProd = await j('POST', '/api/product', { teamId: teamId2, name: '别队商品', unit: '个', salePrice: 100, purchasePrice: 50 });
+  // 单账套部署（auth.register 限制首个账套）：teamId 覆写为令牌团队，传 teamId2 仍落在本团队
+  const otherProd = await j('POST', '/api/product', { teamId: teamId + 999999, name: '别队商品', unit: '个', salePrice: 100, purchasePrice: 50 });
   const otherProdId = otherProd.body.id;
-  const crossRead = await j('GET', `/api/product?teamId=${teamId2}`);
-  ok('带 teamId2 可读 team2（多账套设计）', Array.isArray(crossRead.body), '多账套：teamId 是显式参数');
+  ok('越权 teamId 被覆写为令牌团队', otherProd.body.teamId === teamId, JSON.stringify(otherProd.body).slice(0, 80));
   const crossEdit = await j('PUT', `/api/product/${otherProdId}`, { teamId, name: '篡改' });
-  const afterEdit = (await j('GET', `/api/product?teamId=${teamId2}`)).body.find(x => x.id === otherProdId);
-  ok('跨团队 PUT 被隔离（teamId 不匹配不改他人）', afterEdit?.name !== '篡改', `name=${afterEdit?.name}`);
+  const afterEdit = (await j('GET', `/api/product?teamId=${teamId}`)).body.find(x => x.id === otherProdId);
+  ok('越权 PUT 后行仍在本团队（teamId 不可跨）', afterEdit && afterEdit.teamId === teamId, `teamId=${afterEdit?.teamId}`);
   const crossDoc = await j('POST', '/api/doc/create', { teamId, type: 'stockin', date: '2026-10-16', warehouseId: whId, items: [{ productId: otherProdId, qty: 1, price: 100 }] });
-  ok('跨团队商品引用被拒（幽灵校验）', !!crossDoc.body.error, JSON.stringify(crossDoc.body).slice(0, 80));
+  ok('引用他队名商品不越权（商品已在本团队）', !crossDoc.body.error && crossDoc.body.id, JSON.stringify(crossDoc.body).slice(0, 80));
 
   // ===== 10. 类型混淆 =====
   console.log('\n[10] 类型混淆');
   const fakeType = await j('POST', '/api/doc/create', { teamId, type: 'hackeryou', date: '2026-10-16', warehouseId: whId, items: [{ productId: prodId, qty: 1, price: 100 }] });
   ok('伪造单据类型被拒', !!fakeType.body.error, JSON.stringify(fakeType.body).slice(0, 80));
   const strTeam = await j('POST', '/api/doc/create', { teamId: 'abc', type: 'stockin', date: '2026-10-16', warehouseId: whId, items: [{ productId: prodId, qty: 1, price: 100 }] });
-  ok('字符串 teamId 被拒', !!strTeam.body.error, JSON.stringify(strTeam.body).slice(0, 80));
+  ok('字符串 teamId 被覆写为令牌团队（不崩）', !strTeam.body.error || strTeam.body.id, JSON.stringify(strTeam.body).slice(0, 80));
   const badDate = await j('POST', '/api/doc/create', { teamId, type: 'stockin', date: 'not-a-date', warehouseId: whId, items: [{ productId: prodId, qty: 1, price: 100 }] });
   ok('非法日期不崩', !!badDate.body.error || !!badDate.body.id, JSON.stringify(badDate.body).slice(0, 80));
 
@@ -161,14 +163,11 @@ async function j(method, path, body) {
 
   // ===== 13. 空团队全接口 =====
   console.log('\n[13] 空团队');
-  const bs3 = await j('POST', '/api/bootstrap', { name: '空套' });
-  const emptyTeam = bs3.body.teamId;
-  const eDocs = await j('GET', `/api/doc/list?teamId=${emptyTeam}&type=stockin`);
-  ok('空团队单据列表空', eDocs.body.total === 0 && eDocs.body.rows.length === 0, JSON.stringify(eDocs.body).slice(0, 80));
-  const eStock = await j('GET', `/api/stock/list?teamId=${emptyTeam}`);
-  ok('空团队库存空', Array.isArray(eStock.body) && eStock.body.length === 0, '');
-  const eStats = await j('GET', `/api/stats/dashboard?teamId=${emptyTeam}`);
-  ok('空团队 dashboard 正常', eStats.body.totalQty === 0, JSON.stringify(eStats.body).slice(0, 120));
+  // 单账套部署：用本团队真实数据验证接口结构即可（total 与 rows 一致、无崩溃）
+  const eDocs = await j('GET', `/api/doc/list?teamId=${teamId}&type=stockin&page=999&rows=10`);
+  ok('空页单据列表结构正常', eDocs.body.total >= 0 && Array.isArray(eDocs.body.rows) && eDocs.body.rows.length === 0, JSON.stringify(eDocs.body).slice(0, 80));
+  const eStats = await j('GET', `/api/stats/dashboard?teamId=${teamId}`);
+  ok('dashboard 结构正常', typeof eStats.body.totalQty === 'number' && Array.isArray(eStats.body.lowStockItems), JSON.stringify(eStats.body).slice(0, 120));
 
   // ===== 14. 删除保护 =====
   console.log('\n[14] 删除保护');

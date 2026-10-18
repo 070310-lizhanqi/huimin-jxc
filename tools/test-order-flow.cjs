@@ -1,13 +1,14 @@
 /* 订单转化链 + 新单据类型端到端 */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 const results = [];
 function report(name, pass, detail) { results.push({ name, pass }); console.log((pass ? 'PASS' : 'FAIL') + ' | ' + name + (detail ? ' | ' + detail : '')); }
-const post = async (p, body) => { const r = await fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
-const get = async (p) => { const r = await fetch(BASE + p); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const post = async (p, body) => { const r = await fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const get = async (p) => { const r = await fetch(BASE + p, { headers: await authHeader() }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
 
 (async () => {
-  const boot = await post('/bootstrap', { name: '订单链测试' });
-  const T = boot.body.teamId;
+  const me = (await get('/auth/me')).body;
+  const T = me.user.teamId;
   const cat = (await post('/cat', { teamId: T, name: '分类' })).body;
   const prod = (await post('/product', { teamId: T, catId: cat.id, name: '商品X', unit: '个', salePrice: 2000, purchasePrice: 1000 })).body;
   const whs = (await get('/warehouse?teamId=' + T)).body;
@@ -27,7 +28,7 @@ const get = async (p) => { const r = await fetch(BASE + p); return { status: r.s
   // 3. 审核订单（不写库存）
   r = await post('/doc/audit', { teamId: T, id: poId });
   let stock = (await get(`/stock/list?teamId=${T}`)).body;
-  report('订单审核不动库存', r.status === 200 && stock.length === 0, 'stock rows=' + stock.length);
+  report('订单审核不动库存', r.status === 200 && !stock.some((s) => s.productId === prod.id), 'stock rows=' + stock.length);
 
   // 4. 转化为采购入库草稿
   r = await post('/doc/convert', { teamId: T, id: poId });
@@ -40,12 +41,13 @@ const get = async (p) => { const r = await fetch(BASE + p); return { status: r.s
 
   // 6. 转化单缺仓库 → 补仓库后审核（转化单 warehouseId 继承订单，订单没仓库则为 null）
   // 直接 edit 补仓库
-  r = await fetch(BASE + '/doc/edit', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ teamId: T, id: inId, type: 'stockin', warehouseId: wh1, items: info.body.items.map(i => ({ productId: i.productId, qty: i.qty, price: i.price })) }) });
+  r = await fetch(BASE + '/doc/edit', { method: 'PUT', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify({ teamId: T, id: inId, type: 'stockin', warehouseId: wh1, items: info.body.items.map(i => ({ productId: i.productId, qty: i.qty, price: i.price })) }) });
   report('补仓库编辑', r.status === 200, JSON.stringify(await r.json().catch(() => ({}))));
   r = await post('/doc/audit', { teamId: T, id: inId });
   report('入库单审核', r.status === 200, JSON.stringify(r.body));
   stock = (await get(`/stock/list?teamId=${T}`)).body;
-  report('库存 20', stock.length === 1 && stock[0].qty === 20, JSON.stringify(stock.map(s => s.qty)));
+  const myRow = stock.filter((s) => s.productId === prod.id);
+  report('库存 20', myRow.length === 1 && myRow[0].qty === 20, '本商品行=' + JSON.stringify(myRow.map(s => s.qty)) + ' 全部=' + JSON.stringify(stock.map(s => s.qty)));
 
   // 7. 销售订单 → 转销售出库
   r = await post('/doc/create', { teamId: T, type: 'sorder', items: [{ productId: prod.id, qty: 5, price: 2000 }], partnerType: 'cus', partnerId: cus.id });
@@ -55,30 +57,33 @@ const get = async (p) => { const r = await fetch(BASE + p); return { status: r.s
   report('销售订单转化出库单', r.status === 200 && r.body.type === 'stockout', JSON.stringify(r.body));
   const outId = r.body.id;
   const info2 = await get(`/doc/info?teamId=${T}&id=${outId}`);
-  await fetch(BASE + '/doc/edit', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ teamId: T, id: outId, type: 'stockout', warehouseId: wh1, items: info2.body.items.map(i => ({ productId: i.productId, qty: i.qty, price: i.price })) }) });
+  await fetch(BASE + '/doc/edit', { method: 'PUT', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify({ teamId: T, id: outId, type: 'stockout', warehouseId: wh1, items: info2.body.items.map(i => ({ productId: i.productId, qty: i.qty, price: i.price })) }) });
   r = await post('/doc/audit', { teamId: T, id: outId });
   report('出库单审核', r.status === 200, JSON.stringify(r.body));
   stock = (await get(`/stock/list?teamId=${T}`)).body;
-  report('库存 15', stock[0].qty === 15, 'qty=' + stock[0].qty);
+  const r1 = stock.filter((s) => s.productId === prod.id);
+  report('库存 15', r1.length === 1 && r1[0].qty === 15, 'qty=' + r1[0].qty);
 
   // 8. 采购退货 pin（退给供应商，出库）
   r = await post('/doc/create', { teamId: T, type: 'pin', warehouseId: wh1, items: [{ productId: prod.id, qty: 3, price: 1000 }], partnerType: 'ven', partnerId: ven.id });
   report('采购退货创建', r.status === 200 && r.body.billNo?.startsWith('CT'), JSON.stringify(r.body));
   await post('/doc/audit', { teamId: T, id: r.body.id });
   stock = (await get(`/stock/list?teamId=${T}`)).body;
-  report('退货后库存 12', stock[0].qty === 12, 'qty=' + stock[0].qty);
+  const r0 = stock.filter((s) => s.productId === prod.id);
+  report('退货后库存 12', r0.length === 1 && r0[0].qty === 12, 'qty=' + r0[0].qty);
 
   // 9. 销售退货 sret（客户退回，入库）
   r = await post('/doc/create', { teamId: T, type: 'sret', warehouseId: wh1, items: [{ productId: prod.id, qty: 2, price: 2000 }], partnerType: 'cus', partnerId: cus.id });
   report('销售退货创建', r.status === 200 && r.body.billNo?.startsWith('XT'), JSON.stringify(r.body));
   await post('/doc/audit', { teamId: T, id: r.body.id });
   stock = (await get(`/stock/list?teamId=${T}`)).body;
-  report('退货入库后 14', stock[0].qty === 14, 'qty=' + stock[0].qty);
+  const r0b = stock.filter((s) => s.productId === prod.id);
+  report('退货入库后 14', r0b.length === 1 && r0b[0].qty === 14, 'qty=' + r0b[0].qty);
 
-  // 10. dashboard 统计
+  // 10. dashboard 统计（演示团队共享，只验字段类型不锁具体数值）
   r = await get(`/stats/dashboard?teamId=${T}`);
   const d = r.body;
-  report('dashboard 字段齐全', d.totalQty === 14 && d.skuCount === 1 && typeof d.stockValue === 'number' && typeof d.todayIn === 'number' && typeof d.todayOut === 'number', JSON.stringify(d));
+  report('dashboard 字段齐全', d.totalQty > 0 && d.skuCount >= 1 && typeof d.stockValue === 'number' && typeof d.todayIn === 'number' && typeof d.todayOut === 'number' && Array.isArray(d.lowStockItems), JSON.stringify(d).slice(0, 160));
 
   // 11. trend
   r = await get(`/stats/trend?teamId=${T}`);

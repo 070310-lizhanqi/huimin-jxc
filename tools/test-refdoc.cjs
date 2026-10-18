@@ -2,10 +2,11 @@
  * 验证：整页开单「开单即收付」审核后，自动生成的 settlement 必须带 refDocId。
  */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 
 async function api(method, path, body) {
   const res = await fetch(BASE + path, {
-    method, headers: { 'Content-Type': 'application/json' },
+    method, headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   let j = null;
@@ -14,8 +15,8 @@ async function api(method, path, body) {
 }
 
 (async () => {
-  const boot = await api('POST', '/bootstrap', { name: 'refdoc验证-' + Date.now() });
-  const teamId = boot.body.teamId;
+  const me = (await api('GET', '/auth/me')).body;
+  const teamId = me.user.teamId;
   const cus = (await api('POST', '/customer', { teamId, name: '客户A' })).body;
   const wh = (await api('POST', '/warehouse', { teamId, name: '主仓' })).body;
   const cat = (await api('POST', '/cat', { teamId, name: '默认' })).body;

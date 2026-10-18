@@ -3,6 +3,7 @@
  * 关键不变量：任何操作后，账户余额与往来余额必须与流水推导值一致。
  */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 function ok(cond, name, detail) {
   if (cond) { pass++; console.log('PASS |', name, detail ?? ''); }
@@ -10,7 +11,7 @@ function ok(cond, name, detail) {
 }
 async function api(method, path, body) {
   const res = await fetch(BASE + path, {
-    method, headers: { 'Content-Type': 'application/json' },
+    method, headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   let j = null;
@@ -20,9 +21,8 @@ async function api(method, path, body) {
 const M = (c) => (c / 100).toFixed(2);
 
 (async () => {
-  // 独立团队，避免污染演示数据
-  const boot = await api('POST', '/bootstrap', { name: '结算改单测试-' + Date.now() });
-  const teamId = boot.body.teamId;
+  const me = (await api('GET', '/auth/me')).body;
+  const teamId = me.user.teamId;
 
   const cus = (await api('POST', '/customer', { teamId, name: '客户甲' })).body;
   const acc = (await api('POST', '/account', { teamId, name: '现金', type: 'cash', balance: 100000 })).body;
@@ -72,7 +72,8 @@ const M = (c) => (c / 100).toFixed(2);
   ok(await balOf('cus', cus.id) === 0, '客户余额回到 0', String(await balOf('cus', cus.id)));
   ok(await accBal(acc2.id) === 200000, '银行回到 2000', String(await accBal(acc2.id)));
   const list2 = (await api('GET', `/settlement/list?teamId=${teamId}`)).body;
-  ok(list2.length === 0, '流水已删除', String(list2.length));
+  const mySettles = Array.isArray(list2) ? list2.filter((x) => x.partnerId === cus.id) : list2.rows ?? [];
+  ok(mySettles.length === 0, '本客户流水已删除', String(mySettles.length));
 
   // ---- 5. 付款余额校验 ----
   const ven = (await api('POST', '/vendor', { teamId, name: '供应商乙' })).body;
@@ -123,9 +124,9 @@ const M = (c) => (c / 100).toFixed(2);
   const u8 = await api('PUT', `/settlement/${pid}`, { teamId, amount: -100 });
   ok(u8.status === 400, '金额负数被拦', JSON.stringify(u8.body));
 
-  // ---- 10. 跨团队隔离 ----
+  // ---- 10. teamId 由令牌注入：越权 teamId 被覆写，改单仍落本团队
   const u9 = await api('PUT', `/settlement/${pid}`, { teamId: 999999, amount: 100 });
-  ok(u9.status === 404, '跨团队改单 404', JSON.stringify(u9.body));
+  ok(u9.status === 200, '越权 teamId 被令牌覆写，改单成功', JSON.stringify(u9.body));
 
   console.log(`\n===== ${pass}/${pass + fail} PASS =====`);
   process.exit(fail ? 1 : 0);

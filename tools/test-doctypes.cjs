@@ -3,6 +3,7 @@
  * 用法：node tools/test-doctypes.cjs
  */
 const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741';
+const { authHeader } = require('./test-helpers.cjs');
 
 let pass = 0;
 let fail = 0;
@@ -14,7 +15,7 @@ function ok(cond, name, extra) {
 async function api(method, path, body) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await r.text();
@@ -29,8 +30,8 @@ const stockOf = async (teamId, whId, prodId) => {
 };
 
 (async () => {
-  const boot = await api('POST', '/api/bootstrap', { name: '单据类型测试账套' });
-  const teamId = boot.json.teamId;
+  const me = (await api('GET', '/api/auth/me')).json;
+  const teamId = me.user.teamId;
   console.log('账套 teamId =', teamId);
 
   const wh = (await api('POST', '/api/warehouse', { teamId, name: '主仓' })).json;

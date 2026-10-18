@@ -1,11 +1,12 @@
 // 多价格 + 客户价格等级实测
 const BASE = 'http://127.0.0.1:7741/api';
-const TEAM = 67;
+const { authHeader } = require('./test-helpers.cjs');
+let TEAM = null;
 
 async function api(path, method, body) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const t = await r.text();
@@ -22,13 +23,14 @@ function check(name, cond, extra) {
 }
 
 (async () => {
+  TEAM = (await get('/auth/me')).j.user.teamId;
   const uniq = Date.now().toString().slice(-6);
 
   // 0) 清理历史脏数据
   const cs = await get(`/customer?teamId=${TEAM}`);
   for (const c of cs.j) {
     if (/\?/.test(c.name)) {
-      await fetch(`${BASE}/customer/${c.id}?teamId=${TEAM}`, { method: 'DELETE' });
+      await fetch(`${BASE}/customer/${c.id}?teamId=${TEAM}`, { method: 'DELETE', headers: await authHeader() });
     }
   }
 

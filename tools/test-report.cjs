@@ -1,5 +1,6 @@
 /** 报表/单据复制/商品导入 三个新功能的端到端测试 */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 function ok(cond, label, extra = '') {
   if (cond) { pass++; console.log(`PASS ${label}`); }
@@ -8,7 +9,7 @@ function ok(cond, label, extra = '') {
 async function j(method, path, body) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   let data = null;
@@ -17,10 +18,9 @@ async function j(method, path, body) {
 }
 
 (async () => {
-  // 准备独立团队
-  const bs = await j('POST', '/bootstrap', { name: '报表测试套' });
-  const teamId = bs.body.teamId;
-  ok(bs.status === 200 && teamId > 0, 'bootstrap 建团队');
+  const me = (await j('GET', '/auth/me')).body;
+  const teamId = me.user.teamId;
+  ok(teamId > 0, '登录取 teamId', String(teamId));
 
   // 档案：商品2个 + 客户
   const p1 = await j('POST', '/product', { teamId, name: '报表商品A', unit: '个', purchasePrice: 300, salePrice: 500, lowQty: 0 });
@@ -41,13 +41,13 @@ async function j(method, path, body) {
   await j('POST', '/doc/audit', { teamId, id: sr.body.id });
 
   // ---- /report/sales ----
+  // 共享演示团队：只断言本脚本的客户行与结构，不锁全团队总额
   let r = await j('GET', `/report/sales?teamId=${teamId}&from=2026-10-01&to=2026-10-31`);
   ok(r.status === 200, 'report/sales 200');
   const t = r.body.totals;
-  ok(t.saleAmount === 4000 && t.retAmount === 1500, `sales totals 金额 sale=${t.saleAmount} ret=${t.retAmount}`, JSON.stringify(t));
-  ok(t.saleQty === 8 && t.retQty === 3, `sales totals 数量 sale=${t.saleQty} ret=${t.retQty}`);
-  ok(t.orderCount === 1, `orderCount=${t.orderCount}`);
-  ok(r.body.days.length === 2, `days 行数=${r.body.days.length}（10-22 与 10-23）`);
+  ok(t.saleAmount >= 4000 && t.retAmount >= 1500, `sales totals 含本脚本金额 sale=${t.saleAmount} ret=${t.retAmount}`, JSON.stringify(t));
+  ok(typeof t.orderCount === 'number' && t.orderCount >= 1, `orderCount=${t.orderCount}`);
+  ok(r.body.days.some((d) => d.day === '2026-10-22') && r.body.days.some((d) => d.day === '2026-10-23'), `days 含 10-22 与 10-23（共 ${r.body.days.length} 行）`);
   ok(r.body.from === '2026-10-01' && r.body.to === '2026-10-31', '返回请求范围');
 
   // 默认范围（本月）应能取到
@@ -58,9 +58,9 @@ async function j(method, path, body) {
   r = await j('GET', `/report/sales?teamId=${teamId}&from=2099-01-01&to=2099-12-31`);
   ok(r.body.days.length === 0 && r.body.totals.saleAmount === 0, '范围外为空');
 
-  // 缺 teamId → 400
+  // teamId 由令牌注入：缺参也能正常返回
   r = await j('GET', '/report/sales');
-  ok(r.status === 400, 'report/sales 缺 teamId 400');
+  ok(r.status === 200 && r.body.totals, 'report/sales 缺 teamId 仍正常（令牌注入）');
 
   // ---- /report/product ----
   r = await j('GET', `/report/product?teamId=${teamId}&from=2026-10-01&to=2026-10-31`);
@@ -119,11 +119,16 @@ async function j(method, path, body) {
   // 复制不存在的单 → 404
   r = await j('POST', '/doc/copy', { teamId, id: 99999999 });
   ok(r.status === 404, 'copy 不存在单 404');
-  // 跨团队 → 404
+  // 跨团队：teamId 被令牌覆写，副本仍落在本团队（单账套语义）
   r = await j('POST', '/doc/copy', { teamId: 1, id: so.body.id });
-  ok(r.status === 404, 'copy 跨团队 404');
+  ok(r.status === 200 && r.body.id, 'copy teamId 覆写为本团队');
 
   // ---- /product/import ----
+  // 先清掉历史同名/同条码残留，保证重复运行结果一致
+  const preList = await j('GET', `/product?teamId=${teamId}`);
+  for (const p of preList.body.filter((x) => x.name === '导入商品C' || x.name === '导入商品E' || x.barcode === '690001')) {
+    await j('DELETE', `/product/${p.id}?teamId=${teamId}`);
+  }
   r = await j('POST', '/product/import', { teamId, rows: [
     { name: '导入商品C', unit: '瓶', catName: '饮料', barcode: '690001', spec: '500ml', purchasePrice: '1.50', salePrice: '3', retailPrice: '3.5', lowQty: '10', remark: '进口' },
     { name: '报表商品A' },               // 重名 → 错误
@@ -161,6 +166,12 @@ async function j(method, path, body) {
   const big = Array.from({ length: 1001 }, () => ({ name: 'x' }));
   r = await j('POST', '/product/import', { teamId, rows: big });
   ok(r.status === 400, 'import 超 1000 行 400');
+
+  // 清理导入的商品与分类
+  const afterList = await j('GET', `/product?teamId=${teamId}`);
+  for (const p of afterList.body.filter((x) => x.name === '导入商品C' || x.name === '导入商品E' || x.barcode === '690001')) {
+    await j('DELETE', `/product/${p.id}?teamId=${teamId}`);
+  }
 
   console.log(`\n== ${pass} PASS / ${fail} FAIL ==`);
   process.exit(fail ? 1 : 0);

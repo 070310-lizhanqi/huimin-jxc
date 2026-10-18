@@ -1,5 +1,6 @@
 /* 出库申请单 + 生产任务 端到端测试 */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 const results = [];
 function ok(name, cond, detail) {
@@ -7,7 +8,7 @@ function ok(name, cond, detail) {
   else { fail++; results.push('FAIL | ' + name + (detail ? ' | ' + detail : '')); }
 }
 async function api(method, path, body) {
-  const opt = { method, headers: {} };
+  const opt = { method, headers: { ...(await authHeader()) } };
   if (body !== undefined) { opt.headers['content-type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(BASE + path, opt);
   let data = null;
@@ -18,10 +19,12 @@ const post = (p, b) => api('POST', p, b);
 const get = (p) => api('GET', p);
 
 (async () => {
-  // 建测试团队
-  const t = await post('/bootstrap', { name: '申请任务测试-' + Date.now() });
-  const teamId = t.body.teamId;
-  const catId = t.body.catId;
+  // 登录现有账套
+  const t = await get('/auth/me');
+  const teamId = t.body.user.teamId;
+  // 分类：用第一个已有分类
+  const cat = (await get('/cat?teamId=' + teamId)).body[0];
+  const catId = cat ? cat.id : null;
 
   const p1 = await post('/product', { teamId, catId, name: '原料A', unit: '个', salePrice: 1000, purchasePrice: 500 });
   const p2 = await post('/product', { teamId, catId, name: '成品B', unit: '个', salePrice: 3000, purchasePrice: 1500 });

@@ -1,16 +1,16 @@
 /* 边界用例回归：跑前先建新团队，逐步断言 */
 const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 const results = [];
 function report(name, pass, detail) { results.push({ name, pass, detail }); console.log((pass ? 'PASS' : 'FAIL') + ' | ' + name + (detail ? ' | ' + detail : '')); }
-const post = async (p, body) => { const r = await fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
-const put = async (p, body) => { const r = await fetch(BASE + p, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
-const get = async (p) => { const r = await fetch(BASE + p); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
-const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE' }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const post = async (p, body) => { const r = await fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const put = async (p, body) => { const r = await fetch(BASE + p, { method: 'PUT', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const get = async (p) => { const r = await fetch(BASE + p, { headers: await authHeader() }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
+const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE', headers: await authHeader() }); return { status: r.status, body: await r.json().catch(() => ({ error: 'non-json' })) }; };
 
 (async () => {
-  // 新团队
-  const boot = await post('/bootstrap', { name: '边界测试套' });
-  const T = boot.body.teamId;
+  const me = (await get('/auth/me')).body;
+  const T = me.user.teamId;
   const cat = (await post('/cat', { teamId: T, name: '测试分类' })).body;
   const prod = (await post('/product', { teamId: T, catId: cat.id, name: '边界商品', unit: '个', salePrice: 1000, purchasePrice: 500 })).body;
   const whs = (await get('/warehouse?teamId=' + T)).body;
@@ -83,7 +83,7 @@ const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE' })
     const au = await post('/doc/audit', { teamId: T, id: tr.body.id });
     stock = (await get(`/stock/list?teamId=${T}`)).body;
     const rows = stock.rows || stock;
-    const wh1qty = rows.filter(s => s.warehouseId === wh1).reduce((s, x) => s + x.qty, 0);
+    const wh1qty = rows.filter(s => s.warehouseId === wh1 && s.productId === prod.id).reduce((s, x) => s + x.qty, 0);
     report('调拨同仓库校验', au.body.error || wh1qty === 10, 'wh1qty=' + wh1qty + ' audit=' + JSON.stringify(au.body));
   } else {
     report('调拨同仓库拒绝', true, JSON.stringify(tr.body));
@@ -94,7 +94,7 @@ const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE' })
   await post('/doc/audit', { teamId: T, id: tr2.body.id });
   stock = (await get(`/stock/list?teamId=${T}`)).body;
   const rows2 = stock.rows || stock;
-  const q = (wh) => rows2.filter(s => s.warehouseId === wh).reduce((s, x) => s + x.qty, 0);
+  const q = (wh) => rows2.filter(s => s.warehouseId === wh && s.productId === prod.id).reduce((s, x) => s + x.qty, 0);
   report('正常调拨', q(wh1) === 7 && q(wh2) === 3, `wh1=${q(wh1)} wh2=${q(wh2)}`);
 
   // 14. settlement 金额 0 → 400
@@ -120,7 +120,7 @@ const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE' })
   r = await post('/doc/audit', { teamId: T, id: adj.body.id });
   stock = (await get(`/stock/list?teamId=${T}`)).body;
   const rows3 = stock.rows || stock;
-  report('盘盈+2', rows3.filter(s => s.warehouseId === wh1).reduce((s, x) => s + x.qty, 0) === 9, JSON.stringify(r.body));
+  report('盘盈+2', rows3.filter(s => s.warehouseId === wh1 && s.productId === prod.id).reduce((s, x) => s + x.qty, 0) === 9, JSON.stringify(r.body));
 
   // 20. 批次扣减：入库两批（A 先 B 后），出库不带批次 → FIFO 先扣最早入库的 NULL 行再扣 A
   const rkA = await post('/doc/create', { teamId: T, type: 'stockin', warehouseId: wh1, items: [{ productId: prod.id, qty: 5, price: 100, batchNo: 'A' }] });
@@ -134,8 +134,8 @@ const del = async (p) => { const r = await fetch(BASE + p, { method: 'DELETE' })
   r = await post('/doc/audit', { teamId: T, id: ck2.body.id });
   stock = (await get(`/stock/list?teamId=${T}`)).body;
   const rows4 = stock.rows || stock;
-  const batchA = rows4.find(s => s.batchNo === 'A' && s.warehouseId === wh1);
-  const nullRow = rows4.find(s => !s.batchNo && s.warehouseId === wh1);
+  const batchA = rows4.find(s => s.productId === prod.id && s.batchNo === 'A' && s.warehouseId === wh1);
+  const nullRow = rows4.find(s => s.productId === prod.id && !s.batchNo && s.warehouseId === wh1);
   const passFifo = !r.body.error && batchA && batchA.qty === 2 && (!nullRow || nullRow.qty === 0);
   report('FIFO 批次扣减（先 NULL 后 A，A 5→2）', passFifo, 'batchA=' + JSON.stringify(batchA) + ' null=' + JSON.stringify(nullRow) + ' audit=' + JSON.stringify(r.body));
 

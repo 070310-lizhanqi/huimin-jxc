@@ -1,15 +1,19 @@
 const B = 'http://127.0.0.1:7741/api';
-const T = 67;
-async function get(p) { const r = await fetch(B + p); return JSON.parse(await r.text()); }
-async function post(p, b) { const r = await fetch(B + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }); const t = await r.text(); try { return JSON.parse(t); } catch { return { error: 'non-json', raw: t.slice(0, 120) }; } }
-async function put(p, b) { const r = await fetch(B + p, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }); const t = await r.text(); try { return JSON.parse(t); } catch { return { error: 'non-json', raw: t.slice(0, 120) }; } }
+const { authHeader } = require('./test-helpers.cjs');
+let T = null;
+async function get(p) { const r = await fetch(B + p, { headers: await authHeader() }); return JSON.parse(await r.text()); }
+async function post(p, b) { const r = await fetch(B + p, { method: 'POST', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(b) }); const t = await r.text(); try { return JSON.parse(t); } catch { return { error: 'non-json', raw: t.slice(0, 120) }; } }
+async function put(p, b) { const r = await fetch(B + p, { method: 'PUT', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(b) }); const t = await r.text(); try { return JSON.parse(t); } catch { return { error: 'non-json', raw: t.slice(0, 120) }; } }
 let pass = 0, fail = 0;
 const ok = (n, c, e) => { if (c) { pass++; console.log(`PASS | ${n}${e ? ' | ' + e : ''}`); } else { fail++; console.log(`FAIL | ${n}${e ? ' | ' + e : ''}`); } };
 
 (async () => {
+  T = (await get('/auth/me')).user.teamId;
   const wh = (await get(`/warehouse?teamId=${T}`))[0];
   const prods = await get(`/product?teamId=${T}`);
   const prod = prods.find((p) => p.name === '红富士苹果') || prods[0];
+  const cus = await post('/customer', { teamId: T, name: '审批流客户' + (Date.now() % 10000) });
+  const CUS_ID = cus.id;
 
   // 备货
   const d0 = await post('/doc/create', { teamId: T, type: 'stockin', warehouseId: wh.id, remark: '审批流备货', items: [{ productId: prod.id, qty: 30, price: 5000 }] });
@@ -19,7 +23,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log(`PASS | ${n}${e ? ' | ' +
 
   // 1. 建草稿
   const d = await post('/doc/create', {
-    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: 72, warehouseId: wh.id, remark: '审批流用例',
+    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: CUS_ID, warehouseId: wh.id, remark: '审批流用例',
     items: [{ productId: prod.id, qty: 2, price: 8000 }],
   });
   ok('建草稿成功', !!d.id, d.billNo);
@@ -54,7 +58,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log(`PASS | ${n}${e ? ' | ' +
 
   // 7. 驳回后可编辑
   const ed2 = await put('/doc/edit', {
-    teamId: T, id: d.id, type: 'stockout', partnerType: 'cus', partnerId: 72, warehouseId: wh.id,
+    teamId: T, id: d.id, type: 'stockout', partnerType: 'cus', partnerId: CUS_ID, warehouseId: wh.id,
     remark: '审批流用例-改价', items: [{ productId: prod.id, qty: 2, price: 9000 }],
   });
   ok('驳回后可编辑', ed2.ok, JSON.stringify(ed2));
@@ -83,7 +87,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log(`PASS | ${n}${e ? ' | ' +
   const ids = [];
   for (let i = 0; i < 3; i++) {
     const x = await post('/doc/create', {
-      teamId: T, type: 'stockout', partnerType: 'cus', partnerId: 72, warehouseId: wh.id, remark: '批量提交' + i,
+      teamId: T, type: 'stockout', partnerType: 'cus', partnerId: CUS_ID, warehouseId: wh.id, remark: '批量提交' + i,
       items: [{ productId: prod.id, qty: 1, price: 8000 }],
     });
     ids.push(x.id);

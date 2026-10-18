@@ -1,7 +1,8 @@
-﻿const BASE = 'http://127.0.0.1:7741/api';
+const BASE = 'http://127.0.0.1:7741/api';
+const { authHeader } = require('./test-helpers.cjs');
 async function api(method, path, body) {
   const r = await fetch(BASE + path, {
-    method, headers: { 'content-type': 'application/json' },
+    method, headers: { 'content-type': 'application/json', ...(await authHeader()) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const t = await r.text();
@@ -9,7 +10,7 @@ async function api(method, path, body) {
   return { status: r.status, json: j, text: t };
 }
 (async () => {
-  const teamId = 67;
+  const teamId = (await api('GET', '/auth/me')).json.user.teamId;
   // 建客户
   const c = await api('POST', '/customer', { teamId, name: '账龄客户' + Date.now() % 10000 });
   const cusId = c.json.id;

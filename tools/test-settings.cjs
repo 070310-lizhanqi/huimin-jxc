@@ -1,11 +1,12 @@
 const B = 'http://127.0.0.1:7741/api';
-const T = 67;
+const { authHeader } = require('./test-helpers.cjs');
+let T = null;
 async function get(path) {
-  const r = await fetch(B + path);
+  const r = await fetch(B + path, { headers: await authHeader() });
   return JSON.parse(await r.text());
 }
 async function post(path, body) {
-  const r = await fetch(B + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch(B + path, { method: 'POST', headers: { 'content-type': 'application/json', ...(await authHeader()) }, body: JSON.stringify(body) });
   return JSON.parse(await r.text());
 }
 let pass = 0, fail = 0;
@@ -15,6 +16,7 @@ const ok = (name, cond, extra) => {
 };
 
 (async () => {
+  T = (await get('/auth/me')).user.teamId;
   // 1. 默认设置
   const s0 = await get(`/setting/get?teamId=${T}`);
   ok('读默认设置', s0.prefix && s0.prefix.stockout === 'CK' && s0.noMode === 'day', `prefix.stockout=${s0.prefix?.stockout} noMode=${s0.noMode}`);
@@ -32,6 +34,8 @@ const ok = (name, cond, extra) => {
   const wh = (await get(`/warehouse?teamId=${T}`))[0];
   const prods = await get(`/product?teamId=${T}`);
   const prod = prods.find((p) => p.name === '红富士苹果') || prods[0];
+  const cus = await post('/customer', { teamId: T, name: '设置测试客户' + (Date.now() % 10000) });
+  const CUS_ID = cus.id;
   // 先入库备货
   const d0 = await post('/doc/create', {
     teamId: T, type: 'stockin', warehouseId: wh.id, remark: '设置测试备货',
@@ -41,7 +45,7 @@ const ok = (name, cond, extra) => {
   await post('/doc/audit', { teamId: T, id: d0.id });
 
   const d1 = await post('/doc/create', {
-    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: 72, warehouseId: wh.id, remark: '设置测试出库',
+    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: CUS_ID, warehouseId: wh.id, remark: '设置测试出库',
     items: [{ productId: prod.id, qty: 1, price: 8000 }],
   });
   ok('出库单使用新前缀 SO', String(d1.billNo || '').startsWith('SO'), d1.billNo || JSON.stringify(d1));
@@ -51,7 +55,7 @@ const ok = (name, cond, extra) => {
   ok('保存编号重置=month', m1.ok && m1.noMode === 'month');
 
   const d2 = await post('/doc/create', {
-    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: 72, warehouseId: wh.id, remark: '按月编号测试',
+    teamId: T, type: 'stockout', partnerType: 'cus', partnerId: CUS_ID, warehouseId: wh.id, remark: '按月编号测试',
     items: [{ productId: prod.id, qty: 1, price: 8000 }],
   });
   // 应为 SO + YYYYMM + 序号
@@ -75,9 +79,9 @@ const ok = (name, cond, extra) => {
   ok('读回前缀', s2.prefix.stockout === 'SO' && s2.prefix.stockin === 'SI');
   ok('读回重置方式', s2.noMode === 'month');
 
-  // 9. 缺 teamId
+  // 9. 缺 teamId（由令牌注入，不报错且写入本团队）
   const e1 = await post('/setting/prefix', { prefix: { stockout: 'X' } });
-  ok('缺 teamId 被拒', !!e1.error, e1.error || '');
+  ok('缺 teamId 时令牌注入不报错', e1.ok && e1.prefix.stockout === 'X', JSON.stringify(e1).slice(0, 80));
 
   // 10. 恢复默认
   const r1 = await post('/setting/reset', { teamId: T, scope: 'all' });
@@ -87,7 +91,7 @@ const ok = (name, cond, extra) => {
 
   // 清理草稿
   for (const d of [d1, d2]) {
-    if (d.id) await fetch(`${B}/doc/${d.id}?teamId=${T}`, { method: 'DELETE' });
+    if (d.id) await fetch(`${B}/doc/${d.id}?teamId=${T}`, { method: 'DELETE', headers: await authHeader() });
   }
   // 出库备货回滚：作废刚才的入库单
   await post('/doc/void', { teamId: T, id: d0.id });
