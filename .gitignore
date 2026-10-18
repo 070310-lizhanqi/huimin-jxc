@@ -1,0 +1,89 @@
+# ===== 记忆库与本地工具数据（不入版本库）=====
+.dsh-meow/
+.acl-recovery/
+
+# ===== 逆向参考材料（含第三方安装包，不入库）=====
+orange-reverse/
+
+# pnpm 项目内 store（沙箱回退产生，不入库）
+.pnpm-store/
+
+# 依赖
+node_modules/
+
+# 构建产物（由 pnpm build 从 server/src 生成）
+dist/
+
+# 本地数据库（含演示数据，不入库；用 tools/rebuild-clean.cjs 可随时重建）
+data/
+
+# 运行日志
+*.log
+
+# 临时输出（历史调试留下的 stdout/err 落盘文件）
+tmp-*.txt
+_run*.txt
+_*.txt
+*-out.txt
+reg-out.txt
+seed-out.txt
+!server/src/schema.md
+
+# npm/pnpm 缓存（tools 下曾用过本地 npm-cache，属缓存不属源码）
+.npm-cache/
+
+# 项目统一用 pnpm，package-lock.json 是早期误用 npm 的残留，不入库
+package-lock.json
+
+# 早期大文件的临时拷贝
+docpage-old.txt
+
+# ===== 一次性调试脚本（历史迭代的补丁/注入/探查脚本，不属源码）=====
+tools/_tmp-*.cjs
+tools/tmp-*.cjs
+tools/dbg-*.cjs
+tools/diag-*.cjs
+tools/peek-*.cjs
+tools/probe-*.cjs
+tools/fix-*.cjs
+tools/add-*.cjs
+tools/clean-db.cjs
+tools/clean-demo*.cjs
+tools/seed-demo.cjs
+tools/seed-demo-pay.cjs
+tools/seed-refdoc-demo.cjs
+tools/patch-*.js
+tools/patch-*.cjs
+tools/find-pnpm-*.cjs
+tools/run-pnpm.cjs
+tools/list-jxc-routes.cjs
+tools/inspect-*.cjs
+tools/check-npm.cjs
+tools/check-pnpm.cjs
+tools/check-dirty.cjs
+tools/web-check.cjs
+tools/test-spawn.cjs
+tools/debug-*.cjs
+
+# web/ 下历史迭代的补丁与备份脚本
+web/fix-*.js
+web/inject-*.js
+web/patch-*.js
+web/_*.js
+web/_*.txt
+web/app2.js
+web/app3.js
+web/assemble.js
+web/check-classes.js
+web/dashboard-new.js
+web/diag-*.js
+web/docpage-new.js
+web/old-dashboard.js
+web/pages-*.js
+web/swap-dashboard.js
+web/*.bak
+web/docpage-old.txt
+
+# 界面截图（成品快照，不入版本库）
+web/*.png
+web/shot-*.png
