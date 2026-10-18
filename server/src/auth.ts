@@ -111,6 +111,38 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
+/* ---------------- 简单 IP 限速（防登录/注册爆破） ---------------- */
+
+/** 每个 IP 的失败记录：Map<ip, timestamps[]>，内存态，重启即清零 */
+const rateBucket = new Map<string, number[]>();
+/** 窗口时长 60s，窗口内失败 ≥ MAX_TRIES 次即拒绝，成功登录/注册不计数 */
+const RATE_WINDOW_MS = 60_000;
+const MAX_TRIES = 15;
+
+function tooManyFails(ip: string): boolean {
+  const now = Date.now();
+  const list = (rateBucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  rateBucket.set(ip, list);
+  return list.length >= MAX_TRIES;
+}
+
+function recordFail(ip: string): void {
+  const now = Date.now();
+  const list = (rateBucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  list.push(now);
+  rateBucket.set(ip, list);
+  // 简单内存回收：桶数量过大时清掉全空项
+  if (rateBucket.size > 1000) {
+    for (const [k, v] of rateBucket) {
+      if (v.every((t) => now - t >= RATE_WINDOW_MS)) rateBucket.delete(k);
+    }
+  }
+}
+
+function clientIp(req: Request): string {
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
 /* ---------------- 认证路由 ---------------- */
 
 interface UserRow {
@@ -121,22 +153,64 @@ interface UserRow {
   password: string | null;
 }
 
+/** 全局注册配置存 setting 表 teamId=0 行（单账套语义下的全局命名空间） */
+const GLOBAL_TEAM = 0;
+const REGISTER_KEY = 'global.register';
+/** 系统所有者 = 首个账套（自增 id 从 1 开始，team 永不删除，因此 teamId=1 恒定存在且稳定） */
+const OWNER_TEAM = 1;
+
+interface RegisterConf {
+  enabled: boolean;
+  inviteCode: string;
+}
+
+function loadRegisterConf(db: DatabaseSync): RegisterConf {
+  const row = db.prepare(`SELECT value FROM setting WHERE teamId = ? AND key = ?`).get(GLOBAL_TEAM, REGISTER_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return { enabled: false, inviteCode: '' };
+  try {
+    const parsed: unknown = JSON.parse(row.value);
+    if (parsed && typeof parsed === 'object') {
+      const p = parsed as Record<string, unknown>;
+      return { enabled: p.enabled === true, inviteCode: typeof p.inviteCode === 'string' ? p.inviteCode : '' };
+    }
+  } catch {
+    /* 脏数据回落 */
+  }
+  return { enabled: false, inviteCode: '' };
+}
+
+/** 定长比较，避免时序侧信道 */
+function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
 export function mountAuth(router: Router, db: DatabaseSync): void {
-  /** 注册：首个账号自动建团队；已有团队时需团队内无同名账号 */
+  /** 注册：首个账号自动建团队；已有团队时按全局注册开关走邀请码建「独立新账套」 */
   router.post('/auth/register', (req, res) => {
+    if (tooManyFails(clientIp(req))) {
+      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+    }
     const username = String(req.body.username ?? '').trim();
     const password = String(req.body.password ?? '');
     const teamName = String(req.body.teamName ?? '').trim();
-    if (!username || username.length < 2) return res.status(400).json({ error: '用户名至少 2 个字符' });
-    if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+    const fail = (status: number, error: string) => {
+      recordFail(clientIp(req));
+      return res.status(status).json({ error });
+    };
+    if (!username || username.length < 2) return fail(400, '用户名至少 2 个字符');
+    if (password.length < 6) return fail(400, '密码至少 6 位');
 
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username) as { id: number } | undefined;
-    if (dup) return res.status(400).json({ error: '该用户名已被使用' });
+    if (dup) return fail(400, '该用户名已被使用');
 
-    // 没有任何团队 → 首次部署，建团队并初始化默认档案
     const teamCount = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
     let teamId: number;
     if (teamCount === 0) {
+      // 没有任何团队 → 首次部署，建团队并初始化默认档案
       const startPeriod = String(req.body.startPeriod ?? new Date().toISOString().slice(0, 7).replace('-', ''));
       const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', startPeriod);
       teamId = Number(info.lastInsertRowid);
@@ -144,7 +218,20 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       db.prepare(`INSERT INTO account (teamId, name, type) VALUES (?, '现金', 'cash')`).run(teamId);
       db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, '默认分类')`).run(teamId);
     } else {
-      return res.status(400).json({ error: '系统已有账套，请由管理员在系统内添加用户' });
+      // 已有账套 → 开放注册默认关闭；开启后凭邀请码创建「独立新账套」（各用各的账套）
+      const conf = loadRegisterConf(db);
+      if (!conf.enabled) {
+        return fail(400, '注册未开放，请联系已有账套的管理员开启');
+      }
+      const invite = String(req.body.inviteCode ?? '').trim();
+      if (!invite || !conf.inviteCode || !safeEqual(invite, conf.inviteCode)) {
+        return fail(400, '邀请码不正确');
+      }
+      const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', new Date().toISOString().slice(0, 7).replace('-', ''));
+      teamId = Number(info.lastInsertRowid);
+      db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);
+      db.prepare(`INSERT INTO account (teamId, name, type) VALUES (?, '现金', 'cash')`).run(teamId);
+      db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, '默认分类')`).run(teamId);
     }
 
     const createdAt = new Date().toISOString();
@@ -157,11 +244,15 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
 
   /** 登录 */
   router.post('/auth/login', (req, res) => {
+    if (tooManyFails(clientIp(req))) {
+      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+    }
     const username = String(req.body.username ?? '').trim();
     const password = String(req.body.password ?? '');
     if (!username || !password) return res.status(400).json({ error: '请输入用户名和密码' });
     const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
     if (!row || !verifyPassword(password, row.password)) {
+      recordFail(clientIp(req));
       return res.status(401).json({ error: '用户名或密码错误' });
     }
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
@@ -199,6 +290,38 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     if (!row || !verifyPassword(oldPwd, row.password)) return res.status(400).json({ error: '原密码不正确' });
     db.prepare(`UPDATE "user" SET password = ? WHERE id = ?`).run(hashPassword(newPwd), u.userId);
     return res.json({ ok: true });
+  });
+
+  /** 读注册配置：仅系统所有者（首个账套）的 admin 可看，防止朋友账套的管理员改动全局开关 */
+  router.get('/auth/register-conf', requireAuth, (req, res) => {
+    const u = req.auth;
+    if (!u) return res.status(401).json({ error: '未登录' });
+    if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
+      return res.status(403).json({ error: '只有系统所有者（首个账套）的管理员可以管理注册配置' });
+    }
+    const conf = loadRegisterConf(db);
+    return res.json({ enabled: conf.enabled, inviteCode: conf.inviteCode });
+  });
+
+  /** 写注册配置：开启注册必须同时设置至少 6 位邀请码 */
+  router.post('/auth/register-conf', requireAuth, (req, res) => {
+    const u = req.auth;
+    if (!u) return res.status(401).json({ error: '未登录' });
+    if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
+      return res.status(403).json({ error: '只有系统所有者（首个账套）的管理员可以管理注册配置' });
+    }
+    const enabled = req.body.enabled === true;
+    const inviteCode = String(req.body.inviteCode ?? '').trim();
+    if (enabled) {
+      if (!/^[A-Za-z0-9-]{6,32}$/.test(inviteCode)) {
+        return res.status(400).json({ error: '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）' });
+      }
+    }
+    db.prepare(
+      `INSERT INTO setting (teamId, key, value) VALUES (?, ?, ?)
+       ON CONFLICT(teamId, key) DO UPDATE SET value = excluded.value`,
+    ).run(GLOBAL_TEAM, REGISTER_KEY, JSON.stringify({ enabled, inviteCode: enabled ? inviteCode : '' }));
+    return res.json({ ok: true, enabled, inviteCode: enabled ? inviteCode : '' });
   });
 
   /** 团队内用户列表（管理员用） */

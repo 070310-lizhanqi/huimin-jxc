@@ -3793,13 +3793,47 @@ const SettingsPage = {
     }
 
     const isAdmin = computed(() => auth.user?.role === 'admin');
+    /** 系统所有者 = 首个账套（teamId 1）；全局注册配置只有它可管理，与服务端 OWNER_TEAM 对应 */
+    const isOwner = computed(() => auth.user?.teamId === 1);
+
+    /* ---- 开放注册（邀请码）管理 ---- */
+    const regConf = reactive({ enabled: false, inviteCode: '' });
+    const regLoading = ref(false);
+    const regBusy = ref(false);
+
+    async function loadRegConf() {
+      if (!isOwner.value) return;
+      regLoading.value = true;
+      try {
+        const r = await api.get('/auth/register-conf');
+        regConf.enabled = !!r.enabled;
+        regConf.inviteCode = r.inviteCode || '';
+      } catch (e) { toast(e.message, 'error'); }
+      finally { regLoading.value = false; }
+    }
+
+    async function saveRegConf() {
+      if (regConf.enabled && !/^[A-Za-z0-9-]{6,32}$/.test(regConf.inviteCode.trim())) {
+        toast('邀请码需 6-32 位（字母/数字/短横线）', 'error');
+        return;
+      }
+      regBusy.value = true;
+      try {
+        const r = await api.post('/auth/register-conf', { enabled: regConf.enabled, inviteCode: regConf.inviteCode.trim() });
+        regConf.enabled = r.enabled;
+        regConf.inviteCode = r.inviteCode || '';
+        toast(regConf.enabled ? '已开放注册，请把邀请码发给需要开账套的人' : '已关闭注册');
+      } catch (e) { toast(e.message, 'error'); }
+      finally { regBusy.value = false; }
+    }
 
     onMounted(load);
     return {
       tab, loading, saving, prefix, noMode, print, defaults, rows, sample,
       savePrefix, saveNoMode, savePrint, reset, store,
-      auth, isAdmin, users, userLoading, userBusy, userDialog, userForm,
+      auth, isAdmin, isOwner, users, userLoading, userBusy, userDialog, userForm,
       pwdDialog, pwdForm, loadUsers, openUserDialog, saveUser, removeUser, openPwdDialog, savePassword,
+      regConf, regLoading, regBusy, loadRegConf, saveRegConf,
     };
   },
   template: `
@@ -3809,7 +3843,7 @@ const SettingsPage = {
       <div class="tabs">
         <span :class="['tab', { active: tab === 'prefix' }]" @click="tab = 'prefix'">单据编号</span>
         <span :class="['tab', { active: tab === 'print' }]" @click="tab = 'print'">打印抬头</span>
-        <span :class="['tab', { active: tab === 'user' }]" @click="tab = 'user'; loadUsers()">用户与权限</span>
+        <span :class="['tab', { active: tab === 'user' }]" @click="tab = 'user'; loadUsers(); loadRegConf()">用户与权限</span>
       </div>
       <div class="hd-right">
         <button class="btn" @click="reset('all')">恢复默认</button>
@@ -3918,6 +3952,28 @@ const SettingsPage = {
         </template>
         <span v-else class="muted" style="font-size:12.5px">仅管理员可管理用户</span>
       </div>
+
+      <!-- 开放注册（邀请码）：系统所有者允许其他人自建独立账套 -->
+      <template v-if="isOwner">
+        <div class="card-title" style="margin:24px 0 4px">开放注册（邀请码）</div>
+        <div class="muted" style="font-size:12.5px;margin-bottom:12px">
+          开启后，登录页「创建账套」将开放：对方凭你的邀请码即可自建一个<b>完全独立的新账套</b>（数据互不相通）。
+          适合把服务暴露到公网（内网穿透）后给朋友用；不开启时外人无法注册。
+        </div>
+        <div class="de-grid" style="grid-template-columns:auto 1fr;align-items:center;column-gap:12px;row-gap:8px">
+          <label style="font-weight:500">开放注册</label>
+          <div><el-switch v-model="regConf.enabled" @change="regConf.enabled ? null : saveRegConf()"/></div>
+          <label style="font-weight:500">邀请码</label>
+          <div style="display:flex;gap:8px;max-width:420px">
+            <input v-model="regConf.inviteCode" class="finp" style="flex:1;text-transform:none"
+                   placeholder="6-32 位（字母/数字/短横线）" maxlength="32" :disabled="!regConf.enabled"/>
+            <button class="btn primary" :disabled="regBusy || !regConf.enabled" @click="saveRegConf">{{ regBusy ? '保存中…' : '保存' }}</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px">
+          关闭注册会立即生效并清除已保存的邀请码；再次开启需重新设置邀请码。仅系统所有者（首个账套）可管理此项。
+        </div>
+      </template>
     </div>
 
     <!-- 添加用户弹窗 -->
@@ -4104,14 +4160,16 @@ const BRAND_SVG = `<svg viewBox="0 0 32 32" fill="none"><path d="M16 4c-1.2 0-2.
 const LoginPage = {
   setup() {
     const mode = ref('login'); // login | register
-    const form = reactive({ username: '', password: '', password2: '', teamName: '' });
+    const form = reactive({ username: '', password: '', password2: '', teamName: '', inviteCode: '' });
     const err = ref('');
     const busy = ref(false);
     const firstRun = ref(false); // 系统尚未初始化 → 默认注册并填账套名
+    const initialized = ref(false); // 已有账套 → 注册需要邀请码
 
     onMounted(async () => {
       try {
         const s = await api.get('/auth/status');
+        initialized.value = !!s.initialized;
         if (!s.initialized) { mode.value = 'register'; firstRun.value = true; }
       } catch { /* 探测失败就按登录处理 */ }
     });
@@ -4128,13 +4186,19 @@ const LoginPage = {
       if (mode.value === 'register') {
         if (form.password.length < 6) { err.value = '密码至少 6 位'; return; }
         if (form.password !== form.password2) { err.value = '两次输入的密码不一致'; return; }
+        if (initialized.value && !form.inviteCode.trim()) { err.value = '请输入管理员提供的邀请码'; return; }
       }
       busy.value = true;
       try {
         const path = mode.value === 'login' ? '/auth/login' : '/auth/register';
         const body = mode.value === 'login'
           ? { username: form.username.trim(), password: form.password }
-          : { username: form.username.trim(), password: form.password, teamName: form.teamName.trim() || '我的账套' };
+          : {
+              username: form.username.trim(),
+              password: form.password,
+              teamName: form.teamName.trim() || '我的账套',
+              ...(initialized.value ? { inviteCode: form.inviteCode.trim() } : {}),
+            };
         const r = await api.post(path, body);
         setToken(r.token);
         auth.user = r.user;
@@ -4148,7 +4212,7 @@ const LoginPage = {
       }
     }
 
-    return { mode, form, err, busy, firstRun, submit, switchMode, BRAND_SVG };
+    return { mode, form, err, busy, firstRun, initialized, submit, switchMode, BRAND_SVG };
   },
   template: `
   <div class="login-wrap">
@@ -4167,6 +4231,9 @@ const LoginPage = {
         </el-form-item>
         <el-form-item label="密码">
           <el-input v-model="form.password" type="password" size="large" placeholder="至少 6 位" show-password autocomplete="current-password" @keyup.enter="submit"/>
+        </el-form-item>
+        <el-form-item v-if="mode === 'register' && initialized" label="邀请码">
+          <el-input v-model="form.inviteCode" size="large" placeholder="请向已有账套的管理员索取" clearable @keyup.enter="submit"/>
         </el-form-item>
         <el-form-item v-if="mode === 'register'" label="确认密码">
           <el-input v-model="form.password2" type="password" size="large" placeholder="再次输入密码" show-password autocomplete="new-password" @keyup.enter="submit"/>
