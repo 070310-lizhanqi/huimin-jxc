@@ -247,9 +247,14 @@ api.get('/team/list', (req, res) => {
 
 app.use('/api', api);
 
-// 静态前端（web 目录）
+// 静态前端（web 目录）；vendor 前端库内容恒定，缓存 7 天减少重复下载
 import path from 'node:path';
-app.use(express.static(path.join(__dirname, '..', '..', 'web')));
+const WEB_ROOT = path.join(__dirname, '..', '..', 'web');
+app.use(
+  '/vendor',
+  express.static(path.join(WEB_ROOT, 'vendor'), { maxAge: '7d', immutable: true }),
+);
+app.use(express.static(WEB_ROOT));
 // 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', '..', 'web', 'index.html'));

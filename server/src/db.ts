@@ -230,4 +230,11 @@ export function migrate(db: DB): void {
   // 登录认证：密码哈希（scrypt）与创建时间
   addColumn('user', 'password', 'TEXT');
   addColumn('user', 'createdAt', 'TEXT');
+  // 热门查询索引：仪表盘/报表按 团队+状态+类型 过滤、对账单按往来单位过滤、成本估价按商品流水
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_doc_team_status_type ON doc(teamId, status, type);
+    CREATE INDEX IF NOT EXISTS idx_doc_team_partner ON doc(teamId, partnerId, status);
+    CREATE INDEX IF NOT EXISTS idx_settlement_team_partner ON settlement(teamId, partnerType, partnerId);
+    CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir ON stock_ledger(teamId, productId, direction);
+  `);
 }
