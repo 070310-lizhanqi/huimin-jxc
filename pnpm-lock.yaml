@@ -8,12 +8,6 @@ importers:
 
   .:
     dependencies:
-      body-parser:
-        specifier: ^2.3.0
-        version: 2.3.0
-      cookie-parser:
-        specifier: ^1.4.7
-        version: 1.4.7
       express:
         specifier: ^4.19.0
         version: 4.22.3
