@@ -2,6 +2,9 @@
 .dsh-meow/
 .acl-recovery/
 
+# 内网穿透工具与日志（55MB 二进制，不入库；tools/dl-cfd.cjs 可随时重下）
+.tools/
+
 # ===== 逆向参考材料（含第三方安装包，不入库）=====
 orange-reverse/
 
