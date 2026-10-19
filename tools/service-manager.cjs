@@ -100,12 +100,14 @@ function spawnDetached(cmd, args, logFile, pidFile) {
   return child.pid;
 }
 
-/** taskkill /T /F 杀进程树 */
+/** 杀进程：优先 Node 原生信号（不依赖外部命令，沙箱/受限环境也可用），再兜底 taskkill 杀进程树 */
 function killPid(pid) {
+  try { process.kill(Number(pid), 'SIGKILL'); } catch { /* 进程可能已退出 */ }
+  if (!pidAlive(pid)) return;
   try {
     const { execSync } = require('child_process');
     execSync(`taskkill /PID ${pid} /T /F`, { windowsHide: true, stdio: 'ignore' });
-  } catch { /* 进程可能已退出 */ }
+  } catch { /* 外部命令不可用或被拒时忽略 */ }
 }
 
 /** 状态汇总 */

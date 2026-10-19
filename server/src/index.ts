@@ -249,6 +249,7 @@ app.use('/api', api);
 
 // 静态前端（web 目录）；vendor 前端库内容恒定，缓存 7 天减少重复下载
 import path from 'node:path';
+import fs from 'node:fs';
 const WEB_ROOT = path.join(__dirname, '..', '..', 'web');
 app.use(
   '/vendor',
@@ -262,4 +263,11 @@ app.get(/^\/(?!api).*/, (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`orange-clone server listening on http://127.0.0.1:${PORT}`);
+  // 自写 pid 文件：不论服务器由谁启动（管理器 / 命令行 / 后台任务），
+  // 服务管理器都能据此识别进程并停止它，不必依赖 netstat/tasklist
+  try {
+    const runtimeDir = path.join(__dirname, '..', '..', '.tools');
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(runtimeDir, 'server.pid'), String(process.pid));
+  } catch { /* 无权限或目录不可写时忽略，不影响服务本身 */ }
 });
