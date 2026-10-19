@@ -17,6 +17,17 @@ import { mountSettings } from './settings';
 import { mountAuth, requireAuth } from './auth';
 import type { Router } from 'express';
 
+// 令牌签名密钥安全校验：单机自用可用内置密钥；公网/隧道暴露必须显式设置密钥。
+// 开启 ORANGE_REQUIRE_SECRET=1 且未设置 ORANGE_JWT_SECRET 时直接拒绝启动，防止误暴露。
+if (!process.env.ORANGE_JWT_SECRET) {
+  if (process.env.ORANGE_REQUIRE_SECRET === '1') {
+    console.error('[启动失败] 已设置 ORANGE_REQUIRE_SECRET=1 但未设置 ORANGE_JWT_SECRET。');
+    console.error('请先设置密钥再启动，PowerShell 示例：$env:ORANGE_JWT_SECRET="<32 位以上随机字符串>"');
+    process.exit(1);
+  }
+  console.warn('[安全提示] 未设置 ORANGE_JWT_SECRET，将使用内置本地密钥（仅限本机自用；请勿将服务直接暴露到公网）。');
+}
+
 const PORT = Number(process.env.PORT ?? 7741);
 const db = openDb();
 migrate(db);
@@ -42,6 +53,16 @@ app.use((req, res, next) => {
     res.sendStatus(204);
     return;
   }
+  next();
+});
+
+// 基线安全响应头。说明：前端是无构建的 Vue 3 global build（模板运行时编译依赖 new Function），
+// 严格 CSP 需放开 unsafe-eval 反而削弱其意义，故不引入 CSP；仅设置无副作用的基线安全头。
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   next();
 });
 

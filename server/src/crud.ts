@@ -50,12 +50,13 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     const id = Number(req.params.id);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const values: Value[] = cfg.fields.map((f) => normalize(req.body[f]));
-    db.prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`).run(
-      ...values,
-      id,
-      teamId,
-    );
-    const row = db.prepare(`SELECT * FROM ${cfg.table} WHERE id = ?`).get(id);
+    const info = db
+      .prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`)
+      .run(...values, id, teamId);
+    if (info.changes === 0) return res.status(404).json({ error: '记录不存在' });
+    const row = db
+      .prepare(`SELECT * FROM ${cfg.table} WHERE id = ? AND teamId = ?`)
+      .get(id, teamId);
     return res.json(row);
   });
 

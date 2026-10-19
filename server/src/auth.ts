@@ -8,6 +8,7 @@
  *   因此下游 47 条路由无需改造即实现团队隔离，客户端无法越权读写别的团队
  */
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 import type { NextFunction, Request, Response, Router } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -31,18 +32,20 @@ declare module 'express-serve-static-core' {
 
 /* ---------------- 密码哈希（scrypt） ---------------- */
 
-export function hashPassword(plain: string): string {
+const scrypt = promisify(crypto.scrypt) as (plain: string, salt: string, keylen: number) => Promise<Buffer>;
+
+export async function hashPassword(plain: string): Promise<string> {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(plain, salt, 32).toString('hex');
+  const hash = (await scrypt(plain, salt, 32)).toString('hex');
   return `scrypt$${salt}$${hash}`;
 }
 
-export function verifyPassword(plain: string, stored: string | null): boolean {
+export async function verifyPassword(plain: string, stored: string | null): Promise<boolean> {
   if (!stored) return false;
   const parts = stored.split('$');
   if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
   const [, salt, expect] = parts;
-  const actual = crypto.scryptSync(plain, salt, 32).toString('hex');
+  const actual = (await scrypt(plain, salt, 32)).toString('hex');
   // 定长比较，避免时序侧信道
   const a = Buffer.from(actual, 'hex');
   const b = Buffer.from(expect, 'hex');
@@ -188,9 +191,20 @@ function safeEqual(a: string, b: string): boolean {
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
+/** Express 4 不捕获 async 路由抛出的错误；包装后统一返回 500 JSON，避免未处理 rejection 导致请求挂起 */
+function safe(fn: (req: Request, res: Response) => unknown) {
+  return (req: Request, res: Response): void => {
+    Promise.resolve(fn(req, res)).catch((e) => {
+      console.error('[auth] 路由内部错误:', e);
+      if (!res.headersSent) res.status(500).json({ error: '服务器内部错误' });
+      else res.end();
+    });
+  };
+}
+
 export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 注册：首个账号自动建团队；已有团队时按全局注册开关走邀请码建「独立新账套」 */
-  router.post('/auth/register', (req, res) => {
+  router.post('/auth/register', safe(async (req, res) => {
     if (tooManyFails(clientIp(req))) {
       return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
     }
@@ -235,15 +249,16 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     }
 
     const createdAt = new Date().toISOString();
+    const hashed = await hashPassword(password);
     const info = db
       .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
-      .run(teamId, username, hashPassword(password), createdAt);
+      .run(teamId, username, hashed, createdAt);
     const user: AuthUser = { userId: Number(info.lastInsertRowid), teamId, role: 'admin', name: username };
     return res.json({ ok: true, token: issueToken(user), user, teamId, teamName: teamName || '我的账套' });
-  });
+  }));
 
   /** 登录 */
-  router.post('/auth/login', (req, res) => {
+  router.post('/auth/login', safe(async (req, res) => {
     if (tooManyFails(clientIp(req))) {
       return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
     }
@@ -251,7 +266,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const password = String(req.body.password ?? '');
     if (!username || !password) return res.status(400).json({ error: '请输入用户名和密码' });
     const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
-    if (!row || !verifyPassword(password, row.password)) {
+    if (!row || !(await verifyPassword(password, row.password))) {
       recordFail(clientIp(req));
       return res.status(401).json({ error: '用户名或密码错误' });
     }
@@ -260,7 +275,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       | undefined;
     const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name };
     return res.json({ ok: true, token: issueToken(user), user, team });
-  });
+  }));
 
   /** 当前登录信息（前端启动时校验令牌是否还有效） */
   router.get('/auth/me', requireAuth, (req, res) => {
@@ -280,17 +295,17 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   });
 
   /** 改密码（需登录） */
-  router.post('/auth/password', requireAuth, (req, res) => {
+  router.post('/auth/password', requireAuth, safe(async (req, res) => {
     const u = req.auth;
     if (!u) return res.status(401).json({ error: '未登录' });
     const oldPwd = String(req.body.oldPassword ?? '');
     const newPwd = String(req.body.newPassword ?? '');
     if (newPwd.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
     const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
-    if (!row || !verifyPassword(oldPwd, row.password)) return res.status(400).json({ error: '原密码不正确' });
-    db.prepare(`UPDATE "user" SET password = ? WHERE id = ?`).run(hashPassword(newPwd), u.userId);
+    if (!row || !(await verifyPassword(oldPwd, row.password))) return res.status(400).json({ error: '原密码不正确' });
+    db.prepare(`UPDATE "user" SET password = ? WHERE id = ?`).run(await hashPassword(newPwd), u.userId);
     return res.json({ ok: true });
-  });
+  }));
 
   /** 读注册配置：仅系统所有者（首个账套）的 admin 可看，防止朋友账套的管理员改动全局开关 */
   router.get('/auth/register-conf', requireAuth, (req, res) => {
@@ -335,7 +350,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   });
 
   /** 管理员新增同团队用户 */
-  router.post('/auth/users', requireAuth, (req, res) => {
+  router.post('/auth/users', requireAuth, safe(async (req, res) => {
     const u = req.auth;
     if (!u) return res.status(401).json({ error: '未登录' });
     if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以添加用户' });
@@ -346,11 +361,12 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
     if (dup) return res.status(400).json({ error: '该用户名已被使用' });
+    const hashed = await hashPassword(password);
     const info = db
       .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
-      .run(u.teamId, username, role, hashPassword(password), new Date().toISOString());
+      .run(u.teamId, username, role, hashed, new Date().toISOString());
     return res.json({ ok: true, id: Number(info.lastInsertRowid) });
-  });
+  }));
 
   /** 管理员删除同团队用户（不能删自己，避免把最后一个管理员删掉） */
   router.delete('/auth/users/:id', requireAuth, (req, res) => {

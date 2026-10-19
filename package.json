@@ -1,12 +1,14 @@
 {
   "name": "orange-clone",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "进销存系统（复刻橙子云 jxc 线核心业务）",
   "type": "commonjs",
   "scripts": {
     "build": "tsc -p server/tsconfig.json",
-    "dev:server": "ts-node server/src/index.ts"
+    "dev:server": "ts-node server/src/index.ts",
+    "serve": "node dist/server/index.js",
+    "test": "node tools/run-tests.cjs"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

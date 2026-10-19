@@ -10,6 +10,14 @@ import type { Request, Response, Router } from 'express';
 
 type Value = string | number | null;
 
+// 数量精度归一：金额以“分”为整数存储；数量以 4 位小数（万分之一）为准。
+// round 至固定小数位，消除 IEEE754 浮点累加误差（如 0.1 + 0.2 = 0.30000000000000004）。
+const QTY_DECIMALS = 4;
+const roundQty = (n: number): number => {
+  const f = 10 ** QTY_DECIMALS;
+  return Math.round((n + Number.EPSILON) * f) / f;
+};
+
 interface ItemInput {
   productId: number;
   qty: number;
@@ -294,7 +302,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const dup = dedupCreate(db, input);
     if (dup) return res.json(dup);
     const billNo = nextBillNo(db, input.teamId, input.type);
-    const totalQty = input.items.reduce((s, i) => s + i.qty, 0);
+    const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
     // 明细价格可缺省：调拨/盘点等纯库存单据不填价格，按 0 计
     const grossAmount = input.items.reduce((s, i) => s + Math.round(i.qty * Number(i.price ?? 0)), 0);
     const discount = Math.max(0, Math.round(Number(input.discount ?? 0)));
@@ -387,7 +395,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       remark: string | null;
     }>;
     const billNo = nextBillNo(db, teamId, toType);
-    const totalQty = items.reduce((s, i) => s + i.qty, 0);
+    const totalQty = roundQty(items.reduce((s, i) => s + i.qty, 0));
     const totalAmount = items.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
     const info = db
       .prepare(
@@ -484,7 +492,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (doc.status !== 'draft') return res.status(400).json({ error: '仅草稿可编辑' });
     const err = validate(db, input);
     if (err) return res.status(400).json({ error: err });
-    const totalQty = input.items.reduce((s, i) => s + i.qty, 0);
+    const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
     // 明细价格可缺省：调拨/盘点等纯库存单据不填价格，按 0 计
     const grossAmount = input.items.reduce((s, i) => s + Math.round(i.qty * Number(i.price ?? 0)), 0);
     const discount = Math.max(0, Math.round(Number(input.discount ?? 0)));
@@ -630,18 +638,32 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     return res.json({ ok: true });
   });
 
-  // 作废：反冲库存
+  // 作废：反冲库存与结算
   router.post('/doc/void', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const id = Number(req.body.id);
     const doc = db
       .prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`)
-      .get(id, teamId) as { status: string; type: string } | undefined;
+      .get(id, teamId) as
+      | {
+          id: number;
+          status: string;
+          type: string;
+          partnerType: string | null;
+          partnerId: number | null;
+          paidAmount: number | null;
+          deposit: number | null;
+          accountId: number | null;
+        }
+      | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'audit') return res.status(400).json({ error: '仅已审核单据可作废' });
     try {
       db.exec('BEGIN');
       if (COST_TYPES.has(doc.type)) postStock(db, id, true);
+      // 冲回审核时 settleOnAudit 生成的结算记录与账户/往来余额变动，
+      // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
+      reverseSettleOnVoid(db, teamId, doc);
       db.prepare(`UPDATE doc SET status='void' WHERE id=?`).run(id);
       db.exec('COMMIT');
     } catch (e) {
@@ -901,7 +923,7 @@ function fifoBatches(
     reservoirId: number | null;
     qty: number;
   }>;
-  const avail = rows.reduce((s, r) => s + r.qty, 0);
+  const avail = roundQty(rows.reduce((s, r) => s + r.qty, 0));
   if (avail < qty) {
     throw new StockError(`商品 ${productId} 库存不足：可用 ${avail}，需要 ${qty}`);
   }
@@ -911,7 +933,7 @@ function fifoBatches(
     if (remain <= 0) break;
     const take = Math.min(r.qty, remain);
     out.push({ batchNo: r.batchNo, reservoirId: r.reservoirId, qty: take });
-    remain -= take;
+    remain = roundQty(remain - take);
   }
   return out;
 }
@@ -977,7 +999,7 @@ function precheckStock(db: DatabaseSync, docId: number): string | null {
     const rows = db
       .prepare(`SELECT qty FROM stock WHERE ${where}`)
       .all(...(params as Value[])) as Array<{ qty: number }>;
-    const avail = rows.reduce((s, r) => s + r.qty, 0);
+    const avail = roundQty(rows.reduce((s, r) => s + r.qty, 0));
     if (avail < need) {
       const prod = db.prepare(`SELECT name FROM product WHERE id=?`).get(it.productId) as
         | { name: string }
@@ -1043,6 +1065,40 @@ function settleOnAudit(
   }
 }
 
+/** 作废时反冲 settleOnAudit 的三处影响：
+ *  1. 删除审核时自动生成的「开单即收付」结算记录（refDocId 指向本单）；
+ *  2. 往来余额按 paid + deposit 反向加回；
+ *  3. 资金账户按 paid 反向扣回。
+ *  注：若用户事后手工删除/修改过该自动结算记录，则删除影响 0 行，但余额冲回仍按原额执行。 */
+function reverseSettleOnVoid(
+  db: DatabaseSync,
+  teamId: number,
+  doc: {
+    id: number;
+    type: string;
+    partnerType: string | null;
+    partnerId: number | null;
+    paidAmount: number | null;
+    deposit: number | null;
+    accountId: number | null;
+  },
+): void {
+  const paid = Math.max(0, Number(doc.paidAmount ?? 0));
+  const dep = Math.max(0, Number(doc.deposit ?? 0));
+  if (paid + dep <= 0) return;
+  if (!doc.partnerType || !doc.partnerId) return;
+  const moneyType = doc.type === 'stockout' || doc.type === 'sret' ? 'receipt' : 'payment';
+  db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND remark='开单即收付'`).run(
+    teamId,
+    doc.id,
+  );
+  bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, paid + dep);
+  if (doc.accountId && paid > 0) {
+    const inc = moneyType === 'receipt' ? -paid : paid;
+    db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
+  }
+}
+
 /** 往来余额增减（不存在则插入） */
 function bumpPartnerBalance(
   db: DatabaseSync,
@@ -1082,7 +1138,7 @@ function moveStock(
   // 实际记账方向：作废冲回时取反
   const dirEff: 'in' | 'out' = reverse ? (direction === 'in' ? 'out' : 'in') : direction;
   // 实时库存增量：入库 +qty、出库 -qty；冲回再取反
-  const delta = (dirEff === 'in' ? 1 : -1) * qty;
+  const delta = roundQty((dirEff === 'in' ? 1 : -1) * qty);
   db.prepare(
     `INSERT INTO stock_ledger (teamId, productId, warehouseId, reservoirId, batchNo, direction, qty, unitCost, refDocId)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1096,7 +1152,7 @@ function moveStock(
     | { id: number; qty: number }
     | undefined;
   if (existing) {
-    db.prepare(`UPDATE stock SET qty = qty + ? WHERE id = ?`).run(delta, existing.id);
+    db.prepare(`UPDATE stock SET qty = ROUND(qty + ?, ${QTY_DECIMALS}) WHERE id = ?`).run(delta, existing.id);
   } else {
     db.prepare(
       `INSERT INTO stock (teamId, productId, warehouseId, reservoirId, batchNo, qty) VALUES (?, ?, ?, ?, ?, ?)`,

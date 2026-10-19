@@ -1,0 +1,60 @@
+'use strict';
+/* web/js/18-root.js —— 由 app.js 拆分（lines 2901-2958） */
+/* ================= 根应用 ================= */
+/* 顶部导航分组：对齐橙子云（工作台 / 销售 / 采购 / 库存 / 资料 / 设置） */
+const MENU = [
+  { label: '工作台', page: 'dashboard' },
+  { label: '待审核', page: 'approval' },
+  { label: '销售', items: [
+    { label: '报价单', page: 'doc/sale?type=quo' },
+    { label: '销售订单', page: 'doc/sale?type=sorder' },
+    { label: '销售出库', page: 'doc/sale?type=stockout' },
+    { label: '销售退货', page: 'doc/sale?type=sret' },
+    { label: '销售收款', page: 'finance' },
+    { label: '订单统计', page: 'report?tab=order' },
+    { label: '出库统计', page: 'report?tab=out' },
+    { label: '收款统计', page: 'report?tab=receipt' },
+    { label: '毛利统计', page: 'report?tab=product' },
+    { label: '客户对账单', page: 'statement?mode=ar' },
+    { label: '客户欠款账龄', page: 'aging?mode=ar' },
+  ] },
+  { label: '采购', items: [
+    { label: '采购订单', page: 'doc/purchase?type=porder' },
+    { label: '采购入库', page: 'doc/purchase?type=stockin' },
+    { label: '采购退货', page: 'doc/purchase?type=pin' },
+    { label: '采购付款', page: 'finance' },
+    { label: '采购统计', page: 'jxcstat' },
+    { label: '供应商对账单', page: 'statement?mode=ap' },
+    { label: '供应商欠款账龄', page: 'aging?mode=ap' },
+  ] },
+  { label: '库存', items: [
+    { label: '期初库存', page: 'doc/inventory?type=stockinit' },
+    { label: '其它入库', page: 'doc/inventory?type=otherin' },
+    { label: '其它出库', page: 'doc/inventory?type=otherout' },
+    { label: '生产组装', page: 'doc/inventory?type=assembly' },
+    { label: '转仓调拨', page: 'doc/inventory?type=transfer' },
+    { label: '库存调整', page: 'doc/inventory?type=adjust' },
+    { label: '库存盘点', page: 'doc/inventory?type=stocktake' },
+    { label: '出库申请单', page: 'doc/apply?type=outapply' },
+    { label: '生产任务', page: 'doc/apply?type=prodtask' },
+    { label: '库存查询', page: 'stock' },
+    { label: '进销存明细', page: 'ledger' },
+    { label: '进销存统计', page: 'jxcstat' },
+    { label: '库存账龄', page: 'aging?mode=stock' },
+    { label: '库存预估', page: 'forecast' },
+  ] },
+  { label: '资料', items: [
+    { label: '客户', page: 'partner?tab=cus' },
+    { label: '供应商', page: 'partner?tab=ven' },
+    { label: '商品', page: 'product' },
+    { label: '商品单位', page: 'base?tab=unit' },
+    { label: '商品分类', page: 'base?tab=cat' },
+    { label: '客户价格', page: 'price' },
+    { label: '基础档案', page: 'base' },
+  ] },
+  { label: '设置', items: [
+    { label: '功能设置', page: 'settings' },
+    { label: '收付款账户', page: 'base?tab=account' },
+    { label: '使用帮助', page: 'help' },
+  ] },
+];
