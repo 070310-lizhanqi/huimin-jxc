@@ -181,7 +181,8 @@ const server = http.createServer(async (req, res) => {
       if (!fs.existsSync(CLOUDFLARED)) {
         return send(res, 500, { ok: false, message: '找不到 cloudflared.exe（.tools/cloudflared.exe）' });
       }
-      spawnDetached(CLOUDFLARED, ['tunnel', '--url', `http://${HOST}:${APP_PORT}`, '--no-autoupdate'], LOG_TUNNEL, PID_TUNNEL);
+      // http2 走 TCP：Clash 等代理开 TUN 模式时 QUIC(UDP) 被劫持，隧道会一直断连
+      spawnDetached(CLOUDFLARED, ['tunnel', '--url', `http://${HOST}:${APP_PORT}`, '--no-autoupdate', '--protocol', 'http2'], LOG_TUNNEL, PID_TUNNEL);
       return send(res, 200, { ok: true, message: '隧道启动中，网址几秒后显示' });
     }
 
