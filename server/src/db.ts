@@ -227,6 +227,9 @@ export function migrate(db: DB): void {
   addColumn('doc', 'deposit', 'INTEGER DEFAULT 0');
   // 盘点单过账差额：审核前固化「实盘 - 账面」，作废时据此反向冲回
   addColumn('doc_item', 'postQty', 'REAL');
+  // Excel 导入：外部原始单号（用于重复导入幂等跳过）
+  addColumn('doc', 'srcBillNo', 'TEXT');
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo)`);
   // 登录认证：密码哈希（scrypt）与创建时间
   addColumn('user', 'password', 'TEXT');
   addColumn('user', 'createdAt', 'TEXT');

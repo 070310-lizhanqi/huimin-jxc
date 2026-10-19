@@ -90,3 +90,9 @@ web/docpage-old.txt
 # 界面截图（成品快照，不入版本库）
 web/*.png
 web/shot-*.png
+
+.dsh-check.txt
+.dsh-mint.cjs
+.dsh-mint.log
+.dsh-token.txt
+web/__dsh_tok.json

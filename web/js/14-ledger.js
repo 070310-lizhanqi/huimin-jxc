@@ -6,13 +6,19 @@ const LedgerPage = {
   setup() {
     const productId = ref(null);
     const list = ref([]);
+    const loading = ref(true);
     const viewerId = ref(null);
 
     async function load() {
-      list.value = await api.get('/stock/ledger', { teamId: store.teamId, productId: productId.value });
+      loading.value = true;
+      try {
+        list.value = await api.get('/stock/ledger', { teamId: store.teamId, productId: productId.value });
+      } finally {
+        loading.value = false;
+      }
     }
     onMounted(load);
-    return { productId, list, viewerId, load, store, fmtMoney };
+    return { productId, list, loading, viewerId, load, store, fmtMoney };
   },
   template: `
   <div>
@@ -30,7 +36,8 @@ const LedgerPage = {
         <span class="muted">共 {{ list.length }} 条</span>
       </div>
       <div class="tbl-wrap">
-        <table class="tbl">
+        <sk-table v-if="loading && !list.length" :rows="8" :cols="8"/>
+        <table class="tbl" v-else>
           <thead><tr><th>时间</th><th>商品</th><th>仓库</th><th>批次</th><th>方向</th><th class="r">数量</th><th class="r">成本单价</th><th>关联单据</th></tr></thead>
           <tbody>
             <tr v-if="!list.length"><td colspan="8"><div class="empty">暂无流水</div></td></tr>

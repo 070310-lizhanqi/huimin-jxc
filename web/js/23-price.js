@@ -83,7 +83,8 @@ const PricePage = {
         <span class="muted" style="font-size:12.5px;margin-left:6px">共 {{ rows.length }} 条</span>
       </div>
 
-      <table class="tbl">
+      <sk-table v-if="loading && !rows.length" :rows="8" :cols="11"/>
+      <table class="tbl" v-else>
         <thead><tr>
           <th style="width:52px" class="r">#</th>
           <th>客户</th><th>商品</th><th>规格</th><th>单位</th>

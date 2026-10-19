@@ -124,6 +124,19 @@ const App = {
     const switchTo = ref(null);
     const openMenu = ref(-1);
 
+    /* 顶栏激活项滑动指示条：测量 .nav-link.on 相对 .topnav 的位置并移动下划线 */
+    const navInd = ref(null);
+    function moveNavInd() {
+      nextTick(() => requestAnimationFrame(() => {
+        const bar = document.querySelector('.topnav');
+        const el = bar && bar.querySelector('.nav-link.on');
+        if (!bar || !el) { navInd.value = { opacity: 0 }; return; }
+        const b = bar.getBoundingClientRect();
+        const r = el.getBoundingClientRect();
+        navInd.value = { opacity: 1, width: r.width + 'px', transform: `translateX(${r.left - b.left}px)` };
+      }));
+    }
+
     async function boot() {
       if (!auth.token) {
         auth.ready = true;
@@ -162,6 +175,8 @@ const App = {
       const qs = keys.length ? '?' + keys.map((k) => k + '=' + route.q[k]).join('&') : '';
       return route.page + (route.sub ? '/' + route.sub : '') + qs;
     });
+    watch(curKey, moveNavInd);
+    watch(ready, moveNavInd);
 
     const pageComp = computed(() => PAGES[route.page] || DashboardPage);
     const pageTitle = computed(() => {
@@ -187,6 +202,9 @@ const App = {
     }
     onMounted(() => document.addEventListener('click', onDocClick));
     onBeforeUnmount(() => document.removeEventListener('click', onDocClick));
+    onMounted(moveNavInd);
+    window.addEventListener('resize', moveNavInd);
+    onBeforeUnmount(() => window.removeEventListener('resize', moveNavInd));
 
     async function onSwitchTeam(id) {
       if (!id || id === store.teamId) return;
@@ -200,12 +218,13 @@ const App = {
       toast('已退出登录');
     }
 
-    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, BRAND_SVG };
+    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, BRAND_SVG, navInd };
   },
   template: `
   <login-page v-if="auth.ready && !auth.token"/>
   <div class="shell" v-else-if="auth.token">
     <header class="topnav">
+      <span class="nav-ind" :style="navInd"></span>
       <div class="brand" @click="nav('#/dashboard')">
         <span class="brand-mark" v-html="BRAND_SVG"></span>
         <span class="brand-txt">橙子进销存</span>
@@ -237,7 +256,9 @@ const App = {
     <div class="body">
       <div class="content">
         <div v-if="!ready" style="padding:80px;text-align:center" class="muted">加载中…</div>
-        <component v-else :is="pageComp" :key="pageKey" :group="route.sub"/>
+        <transition v-else name="page" mode="out-in">
+          <component :is="pageComp" :key="pageKey" :group="route.sub"/>
+        </transition>
       </div>
     </div>
   </div>

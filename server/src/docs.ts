@@ -113,6 +113,16 @@ const COST_TYPES = new Set([
 /** 出库方向会消耗库存的单据类型 */
 const DEDUCT_TYPES = new Set(['stockout', 'transfer', 'adjust', 'pin', 'stocktake', 'otherout']);
 
+/** 退货类单据：销售退货（退款给客户）/ 采购退货（收回供应商货款） */
+const RET_TYPES = new Set(['sret', 'pin']);
+/** 各单据类型「开单即收付」的资金流向：receipt=钱进我方账户 / payment=钱出我方账户 */
+const MONEY_FLOW: Record<string, 'receipt' | 'payment'> = {
+  stockout: 'receipt', // 销售出库：收货款
+  stockin: 'payment', // 采购入库：付货款
+  sret: 'payment', // 销售退货：退款给客户
+  pin: 'receipt', // 采购退货：收回供应商退款
+};
+
 /** 纯库存单据：只动库存，不涉及往来单位与收付款，跳过结算金额校验 */
 const NO_SETTLE_TYPES = new Set(['transfer', 'stocktake', 'assembly', 'adjust', 'otherin', 'otherout']);
 /** 类型元信息：中文名 + 过账方向 + 单据性质 */
@@ -287,10 +297,29 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.get('/doc/info', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const id = Number(req.query.id);
-    const doc = db.prepare('SELECT * FROM doc WHERE id = ? AND teamId = ?').get(id, teamId);
+    const doc = db.prepare('SELECT * FROM doc WHERE id = ? AND teamId = ?').get(id, teamId) as
+      | { type: string }
+      | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     const items = db.prepare('SELECT * FROM doc_item WHERE docId = ? ORDER BY id').all(id);
-    return res.json({ doc, items });
+    // 订单类单据附带履约进度：每个商品已转出 / 剩余数量（供前端展示与部分转单）
+    let fulfillment: Array<{ productId: number; ordered: number; converted: number; remain: number }> | null = null;
+    if (ORDER_TYPES.has(doc.type)) {
+      const converted = db
+        .prepare(
+          `SELECT i.productId, COALESCE(SUM(i.qty), 0) AS qty
+           FROM doc_item i JOIN doc d ON d.id = i.docId
+           WHERE d.refOrderId = ? AND d.teamId = ? AND d.status <> 'void'
+           GROUP BY i.productId`,
+        )
+        .all(id, teamId) as Array<{ productId: number; qty: number }>;
+      const convMap = new Map<number, number>(converted.map((r) => [r.productId, r.qty]));
+      fulfillment = (items as Array<{ productId: number; qty: number }>).map((it) => {
+        const c = convMap.get(it.productId) ?? 0;
+        return { productId: it.productId, ordered: it.qty, converted: c, remain: roundQty(it.qty - c) };
+      });
+    }
+    return res.json({ doc, items, fulfillment });
   });
 
   // 创建单据（草稿）
@@ -394,9 +423,29 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       reservoirId: number | null;
       remark: string | null;
     }>;
+    // 履约数量跟踪：统计该订单已转出的子单（含草稿/待审/已审，作废不计）按商品汇总的数量，
+    // 只允许转出「剩余未履约数量」，全部转完则拦截，杜绝同一订单重复超额转单。
+    const fulfilledRows = db
+      .prepare(
+        `SELECT i.productId, COALESCE(SUM(i.qty), 0) AS qty
+         FROM doc_item i JOIN doc d ON d.id = i.docId
+         WHERE d.refOrderId = ? AND d.teamId = ? AND d.status <> 'void'
+         GROUP BY i.productId`,
+      )
+      .all(id, teamId) as Array<{ productId: number; qty: number }>;
+    const fulfilled = new Map<number, number>(fulfilledRows.map((r) => [r.productId, r.qty]));
+    const remainItems = items
+      .map((it) => {
+        const remain = roundQty(it.qty - (fulfilled.get(it.productId) ?? 0));
+        return { ...it, qty: remain };
+      })
+      .filter((it) => it.qty > 0);
+    if (!remainItems.length) {
+      return res.status(400).json({ error: '该订单已全部转单，没有可转出的剩余数量' });
+    }
     const billNo = nextBillNo(db, teamId, toType);
-    const totalQty = roundQty(items.reduce((s, i) => s + i.qty, 0));
-    const totalAmount = items.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
+    const totalQty = roundQty(remainItems.reduce((s, i) => s + i.qty, 0));
+    const totalAmount = remainItems.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
     const info = db
       .prepare(
         `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
@@ -418,12 +467,30 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         id,
       );
     const newId = Number(info.lastInsertRowid);
-    const stmt = db.prepare(
+    const insStmt = db.prepare(
       `INSERT INTO doc_item (docId, productId, qty, price, amount, batchNo, reservoirId, remark)
-       SELECT ?, productId, qty, price, amount, batchNo, reservoirId, remark FROM doc_item WHERE docId = ?`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    stmt.run(newId, id);
-    return res.json({ id: newId, billNo, type: toType });
+    for (const it of remainItems) {
+      insStmt.run(
+        newId,
+        it.productId,
+        it.qty,
+        it.price,
+        Math.round(it.qty * it.price),
+        it.batchNo,
+        it.reservoirId,
+        it.remark,
+      );
+    }
+    // 回传本次实际转出明细与剩余，便于前端提示「部分转单」
+    return res.json({
+      id: newId,
+      billNo,
+      type: toType,
+      partial: remainItems.length < items.length,
+      items: remainItems.map((i) => ({ productId: i.productId, qty: i.qty })),
+    });
   });
 
   // 单据复制：任意状态单据 → 生成同类型草稿（日期=今天，新单号）
@@ -613,7 +680,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       return res.status(400).json({ error: '仅草稿或待审核单据可审核' });
     }
     try {
-      db.exec('BEGIN');
+      // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
+      db.exec('BEGIN IMMEDIATE');
       if (COST_TYPES.has(doc.type)) {
         // 盘点单：先把「实盘 - 账面」固化成 postQty，后续过账与作废都基于这个差额
         if (doc.type === 'stocktake') snapshotStocktake(db, id);
@@ -659,7 +727,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'audit') return res.status(400).json({ error: '仅已审核单据可作废' });
     try {
-      db.exec('BEGIN');
+      db.exec('BEGIN IMMEDIATE');
       if (COST_TYPES.has(doc.type)) postStock(db, id, true);
       // 冲回审核时 settleOnAudit 生成的结算记录与账户/往来余额变动，
       // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
@@ -1032,8 +1100,13 @@ function settleOnAudit(
   const dep = Math.max(0, Number(doc.deposit ?? 0));
   if (paid + dep <= 0) return;
   if (!doc.partnerType || !doc.partnerId) throw new StockError('填写了收款/订金，但单据没有关联往来单位');
-  // 出库类单据收钱（receipt），入库/退货类单据付钱（payment）
-  const moneyType = doc.type === 'stockout' || doc.type === 'sret' ? 'receipt' : 'payment';
+  // 资金流向：
+  //   销售出库=收货款（receipt）；采购入库=付货款（payment）；
+  //   销售退货=退款给客户（payment）；采购退货=收回供应商货款（receipt）。
+  const moneyType = MONEY_FLOW[doc.type] ?? 'payment';
+  // 往来余额方向：普通进销单据收/付都减少「对方欠我方/我方欠对方」；
+  // 退货单据的退款/回款是冲减「我方欠对方/对方欠我方」，方向相反。
+  const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
   if (doc.accountId && paid > 0) {
     const acc = db.prepare(`SELECT id FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as
       | { id: number }
@@ -1056,8 +1129,8 @@ function settleOnAudit(
       doc.id,
     );
   }
-  // 往来余额冲减（收款/付款都减少「对方欠我方」或「我方欠对方」）
-  bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, -(paid + dep));
+  // 往来余额冲减（普通单据收付款减少往来；退货退款/回款反向）
+  bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, balanceSign * (paid + dep));
   // 资金账户变动：收款加、付款减
   if (doc.accountId && paid > 0) {
     const inc = moneyType === 'receipt' ? paid : -paid;
@@ -1087,12 +1160,14 @@ function reverseSettleOnVoid(
   const dep = Math.max(0, Number(doc.deposit ?? 0));
   if (paid + dep <= 0) return;
   if (!doc.partnerType || !doc.partnerId) return;
-  const moneyType = doc.type === 'stockout' || doc.type === 'sret' ? 'receipt' : 'payment';
+  const moneyType = MONEY_FLOW[doc.type] ?? 'payment';
+  const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
   db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND remark='开单即收付'`).run(
     teamId,
     doc.id,
   );
-  bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, paid + dep);
+  // 反向加回审核时的往来冲减
+  bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, -balanceSign * (paid + dep));
   if (doc.accountId && paid > 0) {
     const inc = moneyType === 'receipt' ? -paid : paid;
     db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
@@ -1152,8 +1227,23 @@ function moveStock(
     | { id: number; qty: number }
     | undefined;
   if (existing) {
-    db.prepare(`UPDATE stock SET qty = ROUND(qty + ?, ${QTY_DECIMALS}) WHERE id = ?`).run(delta, existing.id);
+    if (dirEff === 'out') {
+      // 原子扣减：WHERE qty >= 扣减量，并发审核时第二个事务直接 0 行命中 → 拒绝过账，杜绝负库存
+      const r = db
+        .prepare(`UPDATE stock SET qty = ROUND(qty - ?, ${QTY_DECIMALS}) WHERE id = ? AND qty >= ?`)
+        .run(qty, existing.id, qty);
+      if (r.changes === 0) {
+        throw new StockError(
+          `商品 ${productId} 库存不足：可用 ${existing.qty}，需要扣减 ${qty}（并发审核冲突，请刷新后重试）`,
+        );
+      }
+    } else {
+      db.prepare(`UPDATE stock SET qty = ROUND(qty + ?, ${QTY_DECIMALS}) WHERE id = ?`).run(delta, existing.id);
+    }
   } else {
+    if (dirEff === 'out') {
+      throw new StockError(`商品 ${productId} 库存不足：可用 0，需要扣减 ${qty}`);
+    }
     db.prepare(
       `INSERT INTO stock (teamId, productId, warehouseId, reservoirId, batchNo, qty) VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(doc.teamId, productId, warehouseId, reservoirId, batchNo ?? null, delta);

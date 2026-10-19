@@ -23,6 +23,14 @@
   --head-bg: #f7f9fb;
   --success: #52a552;
   --danger: #e85656;
+  /* 视觉精化：圆角 + 三级投影 + 品牌投影 */
+  --radius: 6px;
+  --radius-lg: 8px;
+  --shadow-1: 0 1px 2px rgba(31,45,61,.05), 0 1px 3px rgba(31,45,61,.05);
+  --shadow-2: 0 6px 16px rgba(31,45,61,.10), 0 1px 3px rgba(31,45,61,.06);
+  --shadow-3: 0 12px 32px rgba(31,45,61,.14), 0 2px 6px rgba(31,45,61,.06);
+  --brand-shadow: 0 4px 12px rgba(242,111,33,.28);
+  --ease: cubic-bezier(.4, 0, .2, 1);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 13px; }
@@ -47,6 +55,32 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .nav-icon { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; color: var(--nav-text); cursor: pointer; border-radius: 4px; font-size: 17px; }
 .nav-icon:hover { background: var(--nav-hover); color: #fff; }
 
+/* 顶栏激活项滑动指示条 */
+.nav-ind {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  background: var(--brand);
+  border-radius: 2px 2px 0 0;
+  transition: transform .3s var(--ease), width .3s var(--ease), opacity .2s;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 21;
+}
+
+/* 页面切换过渡（配合 <Transition name="page" mode="out-in">） */
+.page-enter-active { transition: opacity .24s var(--ease), transform .24s var(--ease); }
+.page-leave-active { transition: opacity .16s var(--ease), transform .16s var(--ease); }
+.page-enter-from { opacity: 0; transform: translateY(10px); }
+.page-leave-to { opacity: 0; transform: translateY(-6px); }
+@media (prefers-reduced-motion: reduce) {
+  .page-enter-active, .page-leave-active { transition: none; }
+  .page-enter-from, .page-leave-to { opacity: 1; transform: none; }
+  .nav-ind { transition: none; }
+}
+
 /* 试用提示条 */
 .tipbar { height: 34px; background: #fff6f0; border-bottom: 1px solid #ffe4d0; display: flex; align-items: center; justify-content: center; font-size: 12.5px; color: var(--brand); gap: 4px; flex-shrink: 0; }
 .tipbar .lnk { color: var(--brand); text-decoration: underline; cursor: pointer; }
@@ -57,8 +91,8 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .content { padding: 12px; }
 
 /* 页面卡片容器 */
-.page-card { background: var(--card); border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.page-head { display: flex; align-items: center; height: 46px; padding: 0 16px; border-bottom: 1px solid var(--border-light); position: relative; }
+.page-card { background: var(--card); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
+.page-head { display: flex; align-items: center; height: 46px; padding: 0 16px; border-bottom: 1px solid var(--border-light); position: sticky; top: 0; z-index: 6; background: rgba(255,255,255,.86); -webkit-backdrop-filter: saturate(180%) blur(10px); backdrop-filter: saturate(180%) blur(10px); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
 .page-title, .hd-title { font-size: 16px; font-weight: 600; color: var(--text); }
 .page-head .tabs { position: absolute; left: 50%; transform: translateX(-50%); display: flex; gap: 26px; }
 .page-head .tabs .tb { font-size: 14px; color: var(--text-sub); cursor: pointer; padding: 12px 0 11px; border-bottom: 2px solid transparent; }
@@ -96,7 +130,18 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .tbl tfoot .sum-row td { background: #fbfcfd; font-weight: 600; color: var(--text-sub); border-top: 1px solid var(--border); }
 .ellip { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tbl-wrap { padding: 0 0 2px; overflow-x: auto; }
-.empty { padding: 60px 0; text-align: center; color: var(--muted); font-size: 13px; }
+.empty { padding: 56px 0; text-align: center; color: var(--muted); font-size: 13px; }
+.empty::before { content: ""; display: block; width: 72px; height: 72px; margin: 0 auto 14px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72' fill='none'%3E%3Cpath d='M12 24 L36 42 L60 24' stroke='%23dcdfe6' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12 24 L12 52 Q12 56 16 56 L56 56 Q60 56 60 52 L60 24' stroke='%23dcdfe6' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='50' cy='50' r='11' fill='%23fff' stroke='%23c0c4cc' stroke-width='2.5'/%3E%3Cpath d='M58 58 L64 64' stroke='%23c0c4cc' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat; opacity: .9; }
+
+/* 骨架屏（加载占位，配合 <sk-table>/<sk-chart> 组件） */
+@keyframes sk-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+.sk { background: linear-gradient(90deg, #eef0f3 25%, #f6f7f9 37%, #eef0f3 63%); background-size: 200% 100%; animation: sk-shimmer 1.3s ease infinite; border-radius: 4px; }
+.sk-table { padding: 6px 0; }
+.sk-row { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--border-light); }
+.sk-cell { height: 12px; flex: 1 1 0; min-width: 0; }
+.sk-block { height: 14px; border-radius: 4px; }
+.sk-chart { height: 186px; margin: 8px 2px 4px; }
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
 .muted { color: var(--muted); }
 .money::before { content: "¥"; font-size: .78em; margin-right: 1px; color: var(--muted); }
 .billno { font-family: Consolas, Menlo, monospace; color: var(--brand); font-size: 12.5px; }
@@ -112,9 +157,10 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 
 /* 按钮 */
 .btn { height: 32px; border: 1px solid #dcdfe6; background: #fff; border-radius: 3px; padding: 0 15px; font-size: 13px; cursor: pointer; color: var(--text-sub); transition: all .15s; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
-.btn:hover { border-color: #c0c4cc; color: var(--brand); }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
-.btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); color: #fff; }
+.btn:hover { border-color: #c0c4cc; color: var(--brand); transform: translateY(-1px); }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; box-shadow: 0 1px 3px rgba(242,111,33,.22); }
+.btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); color: #fff; box-shadow: var(--brand-shadow); }
+.btn:active { transform: translateY(0); }
 .btn.danger { color: var(--danger); border-color: #fbc4c4; }
 .btn.danger:hover { background: #fef0f0; }
 .btn.sm { height: 26px; padding: 0 9px; font-size: 12px; }
@@ -125,7 +171,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 /* 卡片 */
-.card { background: var(--card); border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); overflow: hidden; }
+.card { background: var(--card); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); overflow: hidden; }
 .card-pad { padding: 14px 16px; }
 .card-title { font-size: 14px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
 .card-hd { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-light); }
@@ -135,7 +181,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 
 /* 统计卡（工作台） */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 12px; }
-.stat { background: var(--card); border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); padding: 16px; display: flex; gap: 12px; align-items: center; }
+.stat { background: var(--card); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); padding: 16px; display: flex; gap: 12px; align-items: center; transition: box-shadow .2s var(--ease), transform .2s var(--ease); }
 .stat .ico { width: 40px; height: 40px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 19px; flex-shrink: 0; }
 .stat .num { font-size: 21px; font-weight: 600; line-height: 1.15; color: var(--text); font-variant-numeric: tabular-nums; }
 .stat .lbl { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
@@ -217,7 +263,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 /* 快捷开单 */
 .quick-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; }
 .quick-btn { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #fff; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 13px; color: var(--text-sub); transition: all .15s; }
-.quick-btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-light); }
+.quick-btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-light); transform: translateY(-1px); box-shadow: var(--shadow-1); }
 .quick-btn .el-icon { font-size: 16px; }
 
 /* 帮助页 */
@@ -429,8 +475,8 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 }
 .chart-card {
   background: var(--card);
-  border-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
   padding: 0 14px 12px;
   min-width: 0;
   display: flex;
@@ -487,10 +533,10 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 /* 常用功能快捷入口 */
 .quick-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; padding: 4px 2px 2px; }
 .quick-grid .qk {
-  display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 4px;
-  font-size: 13px; color: var(--text); cursor: pointer; transition: background .15s, color .15s;
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--radius);
+  font-size: 13px; color: var(--text); cursor: pointer; transition: background .15s, color .15s, transform .18s var(--ease), box-shadow .18s var(--ease);
 }
-.quick-grid .qk:hover { background: #fff6f0; color: var(--brand); }
+.quick-grid .qk:hover { background: #fff6f0; color: var(--brand); transform: translateY(-2px); box-shadow: var(--shadow-1); }
 .quick-grid .qk-icon { font-size: 16px; color: var(--brand); }
 @media (max-width: 1280px) { .quick-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 900px) { .quick-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

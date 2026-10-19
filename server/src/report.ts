@@ -86,36 +86,102 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   });
 
   // 商品销售排行（含加权平均入库成本与毛利估算）
+  // 口径说明：销售额按「明细行金额 - 分摊整单折扣」计，与按日/客户报表的 d.totalAmount（已扣折扣）一致；
+  // 折扣按行金额占比分摊，单内尾差归该单金额最大的行，保证 Σ行分摊 = 整单折扣。
   router.get('/report/product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const { from, to } = rangeOf(req);
-    const rows = db
+    // 按 (单据, 商品) 聚合，并带上整单折扣与单据明细总额用于分摊
+    const lines = db
       .prepare(
-        `SELECT i.productId, p.name AS prodName, p.unit, p.spec, p.purchasePrice,
-                SUM(CASE WHEN d.type = 'stockout' THEN i.qty ELSE 0 END) AS saleQty,
-                SUM(CASE WHEN d.type = 'sret' THEN i.qty ELSE 0 END) AS retQty,
-                SUM(CASE WHEN d.type = 'stockout' THEN i.amount ELSE 0 END) AS saleAmount,
-                SUM(CASE WHEN d.type = 'sret' THEN i.amount ELSE 0 END) AS retAmount
+        `SELECT i.docId, i.productId, d.type, d.discount,
+                p.name AS prodName, p.unit, p.spec, p.purchasePrice,
+                SUM(i.qty) AS qty, SUM(i.amount) AS amount,
+                (SELECT SUM(x.amount) FROM doc_item x WHERE x.docId = i.docId) AS docGross
          FROM doc_item i
          JOIN doc d ON d.id = i.docId
          JOIN product p ON p.id = i.productId
          WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ('stockout', 'sret')
            AND d.date >= ? AND d.date <= ?
-         GROUP BY i.productId
-         ORDER BY saleAmount DESC, retAmount DESC`,
+         GROUP BY i.docId, i.productId`,
       )
       .all(teamId, from, to) as Array<{
+      docId: number;
       productId: number;
+      type: string;
+      discount: number;
       prodName: string;
       unit: string | null;
       spec: string | null;
       purchasePrice: number;
-      saleQty: number;
-      retQty: number;
-      saleAmount: number;
-      retAmount: number;
+      qty: number;
+      amount: number;
+      docGross: number;
     }>;
+    // 单据级折扣分摊：每张单独立算，尾差归最大行
+    const byDoc = new Map<number, typeof lines>();
+    for (const l of lines) {
+      const arr = byDoc.get(l.docId) ?? [];
+      arr.push(l);
+      byDoc.set(l.docId, arr);
+    }
+    /** 行实际销售额（扣掉分摊折扣） */
+    const netLineAmount = new Map<string, number>();
+    for (const arr of byDoc.values()) {
+      const discount = Math.max(0, Math.round(Number(arr[0].discount ?? 0)));
+      const gross = arr.reduce((s, l) => s + l.amount, 0);
+      if (discount <= 0 || gross <= 0) {
+        for (const l of arr) netLineAmount.set(`${l.docId}:${l.productId}`, l.amount);
+        continue;
+      }
+      let allocated = 0;
+      let maxLine = arr[0];
+      for (const l of arr) {
+        const share = Math.round((discount * l.amount) / gross);
+        netLineAmount.set(`${l.docId}:${l.productId}`, l.amount - share);
+        allocated += share;
+        if (l.amount > maxLine.amount) maxLine = l;
+      }
+      // 尾差补给金额最大的行，保证单内 Σ分摊 = 整单折扣
+      const tail = discount - allocated;
+      if (tail !== 0) {
+        const k = `${maxLine.docId}:${maxLine.productId}`;
+        netLineAmount.set(k, (netLineAmount.get(k) ?? maxLine.amount) - tail);
+      }
+    }
+    // 按商品汇总
+    const prodMeta = new Map<
+      number,
+      { prodName: string; unit: string | null; spec: string | null; purchasePrice: number }
+    >();
+    const aggMap = new Map<
+      number,
+      { saleQty: number; retQty: number; saleAmount: number; retAmount: number }
+    >();
+    for (const l of lines) {
+      if (!prodMeta.has(l.productId)) {
+        prodMeta.set(l.productId, {
+          prodName: l.prodName,
+          unit: l.unit,
+          spec: l.spec,
+          purchasePrice: l.purchasePrice,
+        });
+      }
+      const a = aggMap.get(l.productId) ?? { saleQty: 0, retQty: 0, saleAmount: 0, retAmount: 0 };
+      const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
+      if (l.type === 'stockout') {
+        a.saleQty += l.qty;
+        a.saleAmount += net;
+      } else {
+        a.retQty += l.qty;
+        a.retAmount += net;
+      }
+      aggMap.set(l.productId, a);
+    }
+    const rows = [...aggMap.entries()]
+      .map(([pid, a]) => ({ productId: pid, ...prodMeta.get(pid)!, ...a }))
+      .sort((x, y) => y.saleAmount - x.saleAmount || y.retAmount - x.retAmount);
     // 加权平均入库成本：仅统计已审核采购入库单的入库流水
     // （作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
     const costs = db

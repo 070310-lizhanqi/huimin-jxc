@@ -1,6 +1,6 @@
 {
   "name": "orange-clone",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "进销存系统（复刻橙子云 jxc 线核心业务）",
   "type": "commonjs",

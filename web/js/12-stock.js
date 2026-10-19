@@ -11,15 +11,21 @@ const StockPage = {
     const warehouseId = ref(null);
     const ifShowZero = ref(true);
     const list = ref([]);
+    const loading = ref(true);
     /** detail=按库位明细（原始行）；prod=按商品汇总（同商品多仓多库位合并） */
     const view = ref('prod');
 
     async function load() {
-      list.value = await api.get('/stock/list', {
-        teamId: store.teamId, kw: kw.value,
-        warehouseId: warehouseId.value,
-        ifShowZero: ifShowZero.value ? '' : '0',
-      });
+      loading.value = true;
+      try {
+        list.value = await api.get('/stock/list', {
+          teamId: store.teamId, kw: kw.value,
+          warehouseId: warehouseId.value,
+          ifShowZero: ifShowZero.value ? '' : '0',
+        });
+      } finally {
+        loading.value = false;
+      }
     }
     onMounted(load);
     const totalQty = computed(() => list.value.reduce((s, r) => s + r.qty, 0));
@@ -91,7 +97,7 @@ const StockPage = {
       ]);
     }
     return {
-      kw, warehouseId, ifShowZero, list, load, totalQty, isLow, resvName, doExport, lowQtyMap, store,
+      kw, warehouseId, ifShowZero, list, loading, load, totalQty, isLow, resvName, doExport, lowQtyMap, store,
       view, summary, isLowSum, lowCount, drillTo,
     };
   },
@@ -121,7 +127,8 @@ const StockPage = {
           <b style="color:#e6a23c">{{ lowCount }} 项低库存</b></template></span>
       </div>
       <div class="tbl-wrap">
-        <table class="tbl" v-if="view === 'prod'">
+        <sk-table v-if="loading && !list.length" :rows="8" :cols="8"/>
+        <table class="tbl" v-else-if="view === 'prod'">
           <thead><tr>
             <th>商品</th><th>规格</th><th>单位</th><th>所在仓库</th><th class="r">库存行数</th>
             <th class="r">合计数量</th><th class="r">安全库存</th><th></th>

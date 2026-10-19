@@ -15,6 +15,7 @@ import { mountJxcReports } from './jxc-report';
 import { mountPriceMemory } from './price';
 import { mountSettings } from './settings';
 import { mountAuth, requireAuth } from './auth';
+import { mountDocImport } from './docimport';
 import type { Router } from 'express';
 
 // 令牌签名密钥安全校验：单机自用可用内置密钥；公网/隧道暴露必须显式设置密钥。
@@ -156,6 +157,8 @@ mountCrud(api, db, {
 
 // 单据与库存
 mountDocs(api, db);
+// 单据 Excel/CSV 智能导入（raw body 上传）
+mountDocImport(api, db);
 mountStockQueries(api, db);
 mountSettlements(api, db);
 mountReports(api, db);

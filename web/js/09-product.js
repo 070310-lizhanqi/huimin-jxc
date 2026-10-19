@@ -5,10 +5,16 @@ const ProductPage = {
   setup() {
     const kw = ref('');
     const list = ref([]);
+    const loading = ref(true);
     const editor = reactive({ open: false, id: null, form: {} });
 
     async function load() {
-      list.value = await api.get('/product', { teamId: store.teamId, kw: kw.value });
+      loading.value = true;
+      try {
+        list.value = await api.get('/product', { teamId: store.teamId, kw: kw.value });
+      } finally {
+        loading.value = false;
+      }
     }
     onMounted(load);
 
@@ -89,7 +95,7 @@ const ProductPage = {
       return Array.from(new Set([...fromStore, ...builtin]));
     });
 
-    return { kw, list, editor, load, openNew, openEdit, save, del, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, doImport, unitOpts };
+    return { kw, list, loading, editor, load, openNew, openEdit, save, del, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, doImport, unitOpts };
   },
   template: `
   <div>
@@ -112,7 +118,8 @@ const ProductPage = {
         <span class="fb-gap"></span>
         <span class="muted">共 {{ list.length }} 条</span>
       </div>
-      <table class="tbl">
+      <sk-table v-if="loading && !list.length" :rows="8" :cols="12"/>
+      <table class="tbl" v-else>
         <thead><tr><th>名称</th><th>规格</th><th>分类</th><th>条码</th><th>单位</th><th class="r">进价</th><th class="r">售价</th><th class="r">批发价</th><th class="r">零售价</th><th class="r">安全库存</th><th>备注</th><th style="width:130px">操作</th></tr></thead>
         <tbody>
           <tr v-if="!list.length"><td colspan="12"><div class="empty">暂无商品</div></td></tr>

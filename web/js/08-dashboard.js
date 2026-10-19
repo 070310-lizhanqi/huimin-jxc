@@ -96,11 +96,11 @@ const DashboardPage = {
       const s = sales.value;
       if (!s) return [];
       return [
-        { label: '订单', val: String(s.orderCount ?? 0), unit: '张', sub: fmtMoney(s.orderAmount) + ' 元' },
-        { label: '出库', val: String(s.outCount ?? 0), unit: '张', sub: fmtMoney(s.outAmount) + ' 元' },
-        { label: '收款', val: String(s.receiptCount ?? 0), unit: '笔', sub: fmtMoney(s.receiptAmount) + ' 元' },
+        { label: '订单', num: Number(s.orderCount ?? 0), decimals: 0, unit: '张', sub: fmtMoney(s.orderAmount) + ' 元' },
+        { label: '出库', num: Number(s.outCount ?? 0), decimals: 0, unit: '张', sub: fmtMoney(s.outAmount) + ' 元' },
+        { label: '收款', num: Number(s.receiptCount ?? 0), decimals: 0, unit: '笔', sub: fmtMoney(s.receiptAmount) + ' 元' },
         // 毛利是金额不是张数：加 ¥ 前缀并降一号字，避免和上面三个计数挤在同一视觉层级
-        { label: '毛利', val: fmtMoney(s.grossProfit), unit: '', prefix: '¥', sub: '净销售额 − 成本', money: true },
+        { label: '毛利', num: Number(s.grossProfit || 0) / 100, decimals: 2, unit: '', prefix: '¥', sub: '净销售额 − 成本', money: true },
       ];
     });
 
@@ -422,20 +422,26 @@ const DashboardPage = {
                :class="['ct-op', { on: range === r.k }]" @click="range = r.k; reloadAll()">{{ r.t }}</a>
           </span>
         </div>
-        <div class="kpi4">
+        <div class="kpi4" v-if="kpis.length">
           <div class="kpi" v-for="k in kpis" :key="k.label">
             <div class="kpi-label">{{ k.label }}</div>
             <div class="kpi-val" :class="{ 'kpi-amt': k.money }">
-              <i class="kpi-cur" v-if="k.prefix">{{ k.prefix }}</i>{{ k.val }}<i class="kpi-unit" v-if="k.unit">{{ k.unit }}</i>
+              <i class="kpi-cur" v-if="k.prefix">{{ k.prefix }}</i><count-up :value="k.num" :decimals="k.decimals"/><i class="kpi-unit" v-if="k.unit">{{ k.unit }}</i>
             </div>
             <div class="kpi-sub">{{ k.sub }}</div>
           </div>
         </div>
+        <div class="kpi4" v-else>
+          <div class="kpi" v-for="n in 4" :key="n">
+            <div class="kpi-label sk sk-block" style="width:52%;margin:0 auto 10px"></div>
+            <div class="sk sk-block" style="width:72%;height:24px;margin:0 auto"></div>
+          </div>
+        </div>
         <div class="dash-mini">
-          <div class="dmi"><span>库存总量</span><b>{{ stats?.totalQty ?? 0 }}</b></div>
-          <div class="dmi"><span>库存货值</span><b>{{ fmtMoney(stats?.stockValue) }}</b></div>
-          <div class="dmi"><span>待处理草稿</span><b>{{ stats?.draftCount ?? 0 }}</b></div>
-          <div class="dmi" :class="{ warn: (stats?.lowStockCount ?? 0) > 0 }"><span>低库存预警</span><b>{{ stats?.lowStockCount ?? 0 }}</b></div>
+          <div class="dmi"><span>库存总量</span><b><count-up :value="Number(stats?.totalQty ?? 0)"/></b></div>
+          <div class="dmi"><span>库存货值</span><b><count-up :value="Number(stats?.stockValue ?? 0) / 100" :decimals="2"/></b></div>
+          <div class="dmi"><span>待处理草稿</span><b><count-up :value="Number(stats?.draftCount ?? 0)"/></b></div>
+          <div class="dmi" :class="{ warn: (stats?.lowStockCount ?? 0) > 0 }"><span>低库存预警</span><b><count-up :value="Number(stats?.lowStockCount ?? 0)"/></b></div>
         </div>
       </div>
 
