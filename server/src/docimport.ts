@@ -16,6 +16,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
+import { localDate } from './db';
 import type { SheetData } from './xlsxlite';
 
 /** 与 docs.ts 的上限保持一致 */
@@ -520,7 +521,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
 
         bills.push({
           type: first.type!,
-          date: first.date ?? new Date().toISOString().slice(0, 10),
+          date: first.date ?? localDate(),
           srcBillNo: first.srcBillNo,
           partnerName,
           partnerId,
@@ -613,7 +614,7 @@ function nextBillNoForImport(db: DatabaseSync, teamId: number, type: string): st
     assembly: 'ZZ', stockinit: 'QCQ', quo: 'BJ', outapply: 'SQ', prodtask: 'SC',
   };
   const prefix = PREFIX[type] ?? 'NO';
-  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const datePart = localDate().replace(/-/g, '');
   const key = `${teamId}:${prefix}:${datePart}`;
   db.prepare(
     `INSERT INTO bill_seq (k, seq) VALUES (?, 1)

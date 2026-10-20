@@ -6,6 +6,12 @@ import path from 'node:path';
 
 export type DB = DatabaseSync;
 
+/** 本地时区 YYYY-MM-DD：不能用 toISOString（UTC，东八区 0-8 点会差一天） */
+export function localDate(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export function openDb(dbPath?: string): DB {
   const p = dbPath ?? path.join(process.cwd(), 'data', 'orange-clone.db');
   const fs = require('node:fs') as typeof import('node:fs');

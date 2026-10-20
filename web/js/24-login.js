@@ -156,6 +156,10 @@ const App = {
         // 令牌失效已在 req 中清理并跳登录
         if (auth.token) toast('登录状态校验失败：' + e.message, 'error');
         ready.value = false;
+        // 校验失败（非 401，如网络抖动/500）时不让页面永久卡「加载中…」，回登录页可重试
+        setToken('');
+        auth.user = null; auth.team = null;
+        if (location.hash !== '#/login') location.hash = '#/login';
       } finally {
         auth.ready = true;
         booting.value = false;

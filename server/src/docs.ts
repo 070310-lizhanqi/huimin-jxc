@@ -6,6 +6,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { rememberPrices } from './price';
 import { loadNoMode, loadPrefix } from './settings';
+import { localDate } from './db';
 import type { Request, Response, Router } from 'express';
 
 type Value = string | number | null;
@@ -356,7 +357,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         input.teamId,
         billNo,
         input.type,
-        input.date ?? new Date().toISOString().slice(0, 10),
+        input.date ?? localDate(),
         input.partnerType ?? null,
         input.partnerId ?? null,
         input.clerkId ?? null,
@@ -455,7 +456,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         teamId,
         billNo,
         toType,
-        new Date().toISOString().slice(0, 10),
+        localDate(),
         doc.partnerType,
         doc.partnerId,
         doc.clerkId,
@@ -531,7 +532,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         teamId,
         billNo,
         doc.type,
-        new Date().toISOString().slice(0, 10),
+        localDate(),
         doc.partnerType,
         doc.partnerId,
         doc.clerkId,
@@ -579,7 +580,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
                       receiverName=?, receiverMobile=?, receiverAddress=?, discount=?, paidAmount=?, accountId=?, deposit=?
        WHERE id=?`,
     ).run(
-      input.date ?? new Date().toISOString().slice(0, 10),
+      input.date ?? localDate(),
       input.partnerType ?? null,
       input.partnerId ?? null,
       input.clerkId ?? null,
@@ -682,6 +683,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     try {
       // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
       db.exec('BEGIN IMMEDIATE');
+      // 写锁内二次校验状态：预检在锁外，并发请求可能已抢先过账，防重复结算/双扣库存
+      const freshAudit = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        | { status: string }
+        | undefined;
+      if (!freshAudit || (freshAudit.status !== 'draft' && freshAudit.status !== 'pending')) {
+        throw new Error('单据状态已变化，请刷新后重试');
+      }
       if (COST_TYPES.has(doc.type)) {
         // 盘点单：先把「实盘 - 账面」固化成 postQty，后续过账与作废都基于这个差额
         if (doc.type === 'stocktake') snapshotStocktake(db, id);
@@ -728,6 +736,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (doc.status !== 'audit') return res.status(400).json({ error: '仅已审核单据可作废' });
     try {
       db.exec('BEGIN IMMEDIATE');
+      // 写锁内二次校验状态：预检在锁外，并发作废可能已抢先提交，防重复冲回
+      const freshVoid = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        | { status: string }
+        | undefined;
+      if (!freshVoid || freshVoid.status !== 'audit') {
+        throw new Error('单据状态已变化，请刷新后重试');
+      }
       if (COST_TYPES.has(doc.type)) postStock(db, id, true);
       // 冲回审核时 settleOnAudit 生成的结算记录与账户/往来余额变动，
       // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
@@ -816,7 +831,7 @@ function nextBillNo(db: DatabaseSync, teamId: number, type: string): string {
   // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）
   const prefix = loadPrefix(db, teamId)[type] ?? BILL_PREFIX[type] ?? 'NO';
   const mode = loadNoMode(db, teamId);
-  const full = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const full = localDate().replace(/-/g, '');
   const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
   // 独立序号表：删除草稿后序号不复用，保证 billNo 永不重复
   const key = `${teamId}:${prefix}:${datePart}`;

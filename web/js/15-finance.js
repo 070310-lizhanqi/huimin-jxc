@@ -49,7 +49,7 @@ const FinancePage = {
       editor.form = {
         type, partnerType: type === 'receipt' ? 'cus' : 'ven', partnerId: null,
         accountId: store.accounts[0]?.id ?? null, amount: 0,
-        date: new Date().toISOString().slice(0, 10), remark: '',
+        date: todayStr(), remark: '',
       };
       editor.open = true;
     }

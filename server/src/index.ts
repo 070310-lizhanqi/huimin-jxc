@@ -139,6 +139,8 @@ mountCrud(api, db, {
 mountCrud(api, db, {
   table: 'account',
   fields: ['name', 'type', 'balance'],
+  // 期初余额仅创建时可设；余额只能由收付款/单据结算变动，防止任意登录用户直接篡改资金
+  createOnlyFields: ['balance'],
   deleteGuard: (_d, id) =>
     exists(`SELECT COUNT(*) AS c FROM settlement WHERE accountId = ?`, id) ? '账户已被收付款引用，不能删除' : null,
 });

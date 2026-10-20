@@ -303,44 +303,52 @@ const DashboardPage = {
     }
 
     async function reloadAll() {
-      const [s, sum] = await Promise.all([
-        api.get('/stats/dashboard', { teamId: store.teamId }),
-        api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
-      ]);
-      stats.value = s;
-      sales.value = sum;
-      await loadAllRanks();
+      try {
+        const [s, sum] = await Promise.all([
+          api.get('/stats/dashboard', { teamId: store.teamId }),
+          api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
+        ]);
+        stats.value = s;
+        sales.value = sum;
+        await loadAllRanks();
+      } catch (e) {
+        toast('工作台数据加载失败：' + e.message, 'error');
+      }
     }
 
     function onResize() { for (const c of charts) c.resize(); }
 
 
     onMounted(async () => {
-      const [s, sum, t, d, ar, ap, sa] = await Promise.all([
-        api.get('/stats/dashboard', { teamId: store.teamId }),
-        api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
-        api.get('/stats/trend', { teamId: store.teamId }),
-        api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
-        api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
-        api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
-        api.get('/report/stock-aging', { teamId: store.teamId }),
-      ]);
-      stats.value = s; sales.value = sum; trend.value = t; recent.value = d;
-      arAging.value = ar; apAging.value = ap; stockAging.value = sa;
-      const [art, apt] = await Promise.all([
-        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
-        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
-      ]);
-      arTop.value = art.rows || [];
-      apTop.value = apt.rows || [];
-      await nextTick();
-      renderTrend();
-      donut(arEl.value, ar.totals, '元', '应收未结');
-      donut(apEl.value, ap.totals, '元', '应付未结');
-      donut(stockEl.value, sa.totals, '元', '库存货值');
-      barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
-      barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
-      await loadAllRanks();
+      try {
+        const [s, sum, t, d, ar, ap, sa] = await Promise.all([
+          api.get('/stats/dashboard', { teamId: store.teamId }),
+          api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
+          api.get('/stats/trend', { teamId: store.teamId }),
+          api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
+          api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
+          api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
+          api.get('/report/stock-aging', { teamId: store.teamId }),
+        ]);
+        stats.value = s; sales.value = sum; trend.value = t; recent.value = d;
+        arAging.value = ar; apAging.value = ap; stockAging.value = sa;
+        const [art, apt] = await Promise.all([
+          api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
+          api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
+        ]);
+        arTop.value = art.rows || [];
+        apTop.value = apt.rows || [];
+        await nextTick();
+        renderTrend();
+        donut(arEl.value, ar.totals, '元', '应收未结');
+        donut(apEl.value, ap.totals, '元', '应付未结');
+        donut(stockEl.value, sa.totals, '元', '库存货值');
+        barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
+        barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
+        await loadAllRanks();
+      } catch (e) {
+        toast('工作台数据加载失败：' + e.message, 'error');
+      }
       window.addEventListener('resize', onResize);
     });
     onBeforeUnmount(() => {

@@ -20,7 +20,7 @@ const DocViewer = {
       if (!w) return toast('浏览器拦截了打印窗口，请允许弹出窗口', 'error');
       const items = d.items.map((it) => `<tr>
         <td>${escapeHtml(prodLabel(it.productId))}</td>
-        <td style="text-align:right">${it.qty}</td>
+        <td style="text-align:right">${escapeHtml(String(it.qty))}</td>
         <td style="text-align:right">${fmtMoney(it.price)}</td>
         <td style="text-align:right">${fmtMoney(it.amount)}</td>
         <td>${escapeHtml(it.batchNo || '')}</td>
@@ -65,7 +65,7 @@ const DocViewer = {
         </tr></table>
         <table class="items"><thead><tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th><th>批次</th><th>调往仓库</th><th>备注</th></tr></thead>
         <tbody>${items}</tbody></table>
-        <div class="total">合计数量：${d.doc.totalQty}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>
+        <div class="total">合计数量：${escapeHtml(String(d.doc.totalQty))}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>
         ${d.doc.remark ? `<div style="margin-top:8px">备注：${escapeHtml(d.doc.remark)}</div>` : ''}
         ${conf.footer ? `<div style="margin-top:14px;text-align:center;color:#888;font-size:12px">${escapeHtml(conf.footer)}</div>` : ''}
         <div class="foot"><span>制单人：____________</span><span>审核人：____________</span><span>签收人：____________</span></div>

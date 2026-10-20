@@ -86,12 +86,12 @@ export function verifyToken(token: string): AuthUser | null {
 
 /* ---------------- 中间件 ---------------- */
 
-/** 从请求中取令牌（Authorization: Bearer xxx 优先，其次 ?token= 便于下载类请求） */
+/** 从请求中取令牌（Authorization: Bearer xxx）。
+ *  不支持 ?token= query：令牌会泄漏进访问日志/浏览器历史/Referer。
+ *  下载类请求请前端用 fetch 携带 Bearer 头再转 blob。 */
 function readToken(req: Request): string | null {
   const h = req.headers.authorization;
   if (h && h.startsWith('Bearer ')) return h.slice(7).trim() || null;
-  const q = req.query.token;
-  if (typeof q === 'string' && q) return q;
   return null;
 }
 

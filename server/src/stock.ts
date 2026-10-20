@@ -3,6 +3,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { localDate } from './db';
 
 export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 实时库存（可按仓库/商品/关键词过滤，聚合同商品多仓位批次）
@@ -51,14 +52,15 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
          FROM stock WHERE teamId = ? AND qty > 0`,
       )
       .get(teamId) as { totalQty: number; skuCount: number };
-    // 库存成本：按最近一次入库单价估价（每商品取最新一条入库流水的成本）
-    // 注意不能 LEFT JOIN 全部入库流水——那会让每条库存行 × 每条流水相乘，货值虚增
+    // 库存成本：按最近一次「采购入库」流水单价估价（与报表 avgCost 口径一致）。
+    // 注意不能 LEFT JOIN 全部入库流水——那会让每条库存行 × 每条流水相乘，货值虚增；
+    // 也不能只看 direction='in'——销售退货(sret)的 unitCost 是售价，会污染货值
     const stockValue = (
       db
         .prepare(
           `SELECT COALESCE(SUM(s.qty * COALESCE((
-               SELECT l.unitCost FROM stock_ledger l
-               WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
+               SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
+               WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
                ORDER BY l.id DESC LIMIT 1
              ), 0)), 0) AS v
            FROM stock s
@@ -66,7 +68,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
         )
         .get(teamId) as { v: number }
     ).v;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDate();
     const todayIn = (
       db
         .prepare(
@@ -179,7 +181,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       .get(teamId) as { q: number | null };
     const value = db
       .prepare(
-        `SELECT SUM(s.qty * COALESCE((SELECT l.unitCost FROM stock_ledger l WHERE l.teamId=s.teamId AND l.productId=s.productId AND l.direction='in' ORDER BY l.id DESC LIMIT 1), 0)) AS v
+        `SELECT SUM(s.qty * COALESCE((SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId WHERE l.teamId=s.teamId AND l.productId=s.productId AND l.direction='in' AND d.type='stockin' AND d.status='audit' ORDER BY l.id DESC LIMIT 1), 0)) AS v
          FROM stock s WHERE s.teamId=? AND s.qty != 0`,
       )
       .get(teamId) as { v: number | null };

@@ -5,6 +5,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { localDate } from './db';
 
 type Value = string | number | null;
 
@@ -67,7 +68,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         partnerId,
         accountId,
         amount,
-        String(req.body.date ?? new Date().toISOString().slice(0, 10)),
+        String(req.body.date ?? localDate()),
         req.body.refDocId ? Number(req.body.refDocId) : null,
         (req.body.remark as string) ?? null,
       );

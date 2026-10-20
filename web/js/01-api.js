@@ -37,9 +37,9 @@ async function req(method, path, body, params) {
   const r = await fetch(url, opt);
   let data = null;
   try { data = await r.json(); } catch { /* non-json */ }
-  // 令牌失效：清空登录态并跳登录页（登录接口自身的 401 交给调用方提示）
+  // 令牌失效：清空登录态（含缓存账套数据）并跳登录页（登录接口自身的 401 交给调用方提示）
   if (r.status === 401 && !path.startsWith('/auth/login')) {
-    if (auth.token) { setToken(''); auth.user = null; auth.team = null; }
+    if (auth.token || auth.user || store.loaded) { setToken(''); auth.user = null; auth.team = null; store.loaded = false; store.teamId = null; store.team = null; store.teams = []; }
     if (location.hash !== '#/login') location.hash = '#/login';
   }
   if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);

@@ -140,6 +140,7 @@ const DocPage = {
       if (!f || old === undefined) return;
       for (const it of editor.form.items) {
         if (!it.productId) continue;
+        if (it._priceDirty) continue; // 用户已手改过单价的行不刷新
         const mem = priceMem.value[it.productId];
         if (mem != null) it.price = mem / 100;
       }
@@ -729,7 +730,7 @@ const DocPage = {
             <td class="r" :class="{ 'stock-low': stockOf(it.productId) <= 0 && it.productId }">{{ stockOf(it.productId) }}</td>
             <td class="r"><input type="number" step="any" class="num" v-model.number="it.qty" :disabled="editor.ro"/></td>
             <td class="r">
-              <input type="number" step="0.01" min="0" class="num" v-model.number="it.price" :disabled="editor.ro"/>
+              <input type="number" step="0.01" min="0" class="num" v-model.number="it.price" :disabled="editor.ro" @input="it._priceDirty = true"/>
               <div v-if="priceMem[it.productId] != null" class="mem-price"
                 :class="{ used: Math.round(it.price * 100) === priceMem[it.productId] }">
                 记忆价 {{ fmtMoney(priceMem[it.productId]) }}

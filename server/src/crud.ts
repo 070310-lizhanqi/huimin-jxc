@@ -10,6 +10,8 @@ type Value = string | number | null;
 export interface CrudConfig {
   table: string;
   fields: string[]; // 可写字段（不含 id/teamId）
+  /** 仅创建时可写、更新时忽略（如账户期初余额——余额只能由收付款/结算变动） */
+  createOnlyFields?: string[];
   orderBy?: string;
   /** 删除前引用检查：返回错误信息则拒绝删除 */
   deleteGuard?: (db: DatabaseSync, id: number) => string | null;
@@ -18,7 +20,8 @@ export interface CrudConfig {
 export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): void {
   const cols = cfg.fields.join(', ');
   const holders = cfg.fields.map(() => '?').join(', ');
-  const sets = cfg.fields.map((f) => `${f} = ?`).join(', ');
+  const updateFields = cfg.fields.filter((f) => !(cfg.createOnlyFields ?? []).includes(f));
+  const sets = updateFields.map((f) => `${f} = ?`).join(', ');
 
   router.get(`/${cfg.table}`, (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
@@ -49,7 +52,7 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     const teamId = Number(req.body.teamId);
     const id = Number(req.params.id);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const values: Value[] = cfg.fields.map((f) => normalize(req.body[f]));
+    const values: Value[] = updateFields.map((f) => normalize(req.body[f]));
     const info = db
       .prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`)
       .run(...values, id, teamId);
