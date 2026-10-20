@@ -218,6 +218,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     };
 
     // 期初 = 期间之前的单据发生额（退货取负） - 期间之前的收付
+    // （settlement 必须带 partnerType：customer/vendor 自增 id 可能撞号，避免串账）
     const beforeRows = db
       .prepare(
         `SELECT type, COALESCE(SUM(totalAmount), 0) AS amt FROM doc
@@ -230,9 +231,9 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const beforeSettle = db
       .prepare(
         `SELECT COALESCE(SUM(amount), 0) AS amt FROM settlement
-         WHERE teamId = ? AND type = ? AND partnerId = ? AND date < ?`,
+         WHERE teamId = ? AND type = ? AND partnerType = ? AND partnerId = ? AND date < ?`,
       )
-      .get(teamId, settleType, partnerId, from) as { amt: number };
+      .get(teamId, settleType, partnerType, partnerId, from) as { amt: number };
     const opening = beforeDocs - beforeSettle.amt;
 
     // 期间明细
@@ -254,10 +255,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const settleRows = db
       .prepare(
         `SELECT id, date, amount, accountId, remark FROM settlement
-         WHERE teamId = ? AND type = ? AND partnerId = ? AND date >= ? AND date <= ?
+         WHERE teamId = ? AND type = ? AND partnerType = ? AND partnerId = ? AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, settleType, partnerId, from, to) as Array<{
+      .all(teamId, settleType, partnerType, partnerId, from, to) as Array<{
       id: number;
       date: string;
       amount: number;
@@ -282,7 +283,17 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       sret: '销售退货',
     };
     const lines: Line[] = [];
-    let balance = opening;
+    // 期初订金抵扣：期间之前的订金冲减往来但不生成 settlement，从期初中扣除
+    const beforeDep = db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN type = 'sret' THEN -deposit WHEN type = 'pin' THEN -deposit ELSE deposit END), 0) AS amt
+         FROM doc
+         WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
+           AND partnerId = ? AND deposit > 0 AND date < ?`,
+      )
+      .get(teamId, partnerId, from) as { amt: number };
+    const openingFinal = opening - beforeDep.amt;
+    let balance = openingFinal;
     const merged: Array<{ date: string; seq: number; line: Omit<Line, 'balance'> }> = [];
     for (const r of chargeRows) {
       merged.push({
@@ -314,6 +325,39 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
         },
       });
     }
+    // 订金抵扣：审核时已冲减往来但不生成 settlement，需要在对账单里补一行，
+    // 否则期末余额会把订金抵掉的部分仍计为未结（与账龄口径一致）。
+    const depRows = db
+      .prepare(
+        `SELECT id, date, billNo, deposit, type FROM doc
+         WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
+           AND partnerId = ? AND deposit > 0 AND date >= ? AND date <= ?
+         ORDER BY date ASC, id ASC`,
+      )
+      .all(teamId, partnerId, from, to) as Array<{
+      id: number;
+      date: string;
+      billNo: string;
+      deposit: number;
+      type: string;
+    }>;
+    for (const r of depRows) {
+      const dep = signOf(r.type) > 0 ? r.deposit : -r.deposit;
+      if (dep === 0) continue;
+      merged.push({
+        date: r.date,
+        seq: 2_000_000 + r.id,
+        line: {
+          date: r.date,
+          kind: 'settle',
+          billNo: r.billNo,
+          label: '订金抵扣',
+          debit: 0,
+          credit: dep > 0 ? dep : 0,
+          remark: '开单审核时订金自动冲减往来',
+        },
+      });
+    }
     merged.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq));
     for (const m of merged) {
       balance += m.line.debit - m.line.credit;
@@ -332,10 +376,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     res.json({
       mode, from, to,
       partner: partner ?? { id: partnerId, name: `#${partnerId}`, mobile: null, address: null },
-      opening,
+      opening: openingFinal,
       periodDebit,
       periodCredit,
-      closing: opening + periodDebit - periodCredit,
+      closing: openingFinal + periodDebit - periodCredit,
       lines,
     });
   });

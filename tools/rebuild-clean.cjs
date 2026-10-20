@@ -46,7 +46,11 @@ try {
 db.exec('BEGIN');
 try {
   const now = new Date().toISOString();
-  const period = new Date().toISOString().slice(0, 7).replace('-', '');
+  // 本地时区年月（与后端 localDate() 口径一致，避免东八区 0-8 点跑测试时账期错月）
+  const period = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
+  })();
 
   const teamId = Number(
     db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run('鲜果批发部', period).lastInsertRowid,

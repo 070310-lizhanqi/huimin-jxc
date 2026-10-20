@@ -13,8 +13,10 @@ export interface CrudConfig {
   /** 仅创建时可写、更新时忽略（如账户期初余额——余额只能由收付款/结算变动） */
   createOnlyFields?: string[];
   orderBy?: string;
-  /** 删除前引用检查：返回错误信息则拒绝删除 */
-  deleteGuard?: (db: DatabaseSync, id: number) => string | null;
+  /** 删除前引用检查：返回错误信息则拒绝删除（自动限定本团队） */
+  deleteGuard?: (db: DatabaseSync, id: number, teamId: number) => string | null;
+  /** 创建/更新前校验：返回错误信息则拒绝写入（body 含 teamId） */
+  validate?: (body: Record<string, unknown>) => string | null;
 }
 
 export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): void {
@@ -40,6 +42,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
   router.post(`/${cfg.table}`, (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (cfg.validate) {
+      const err = cfg.validate(req.body as Record<string, unknown>);
+      if (err) return res.status(400).json({ error: err });
+    }
     const values: Value[] = cfg.fields.map((f) => normalize(req.body[f]));
     const info = db
       .prepare(`INSERT INTO ${cfg.table} (teamId, ${cols}) VALUES (?, ${holders})`)
@@ -52,6 +58,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     const teamId = Number(req.body.teamId);
     const id = Number(req.params.id);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (cfg.validate) {
+      const err = cfg.validate(req.body as Record<string, unknown>);
+      if (err) return res.status(400).json({ error: err });
+    }
     const values: Value[] = updateFields.map((f) => normalize(req.body[f]));
     const info = db
       .prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`)
@@ -68,7 +78,8 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     const id = Number(req.params.id);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     if (cfg.deleteGuard) {
-      const err = cfg.deleteGuard(db, id);
+      // guard 带 teamId：引用检查只看本团队的记录，跨团队 id 不构成删除障碍也不泄露他队数据
+      const err = cfg.deleteGuard(db, id, teamId);
       if (err) return res.status(400).json({ error: err });
     }
     db.prepare(`DELETE FROM ${cfg.table} WHERE id = ? AND teamId = ?`).run(id, teamId);

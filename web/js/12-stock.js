@@ -14,15 +14,21 @@ const StockPage = {
     const loading = ref(true);
     /** detail=按库位明细（原始行）；prod=按商品汇总（同商品多仓多库位合并） */
     const view = ref('prod');
+    /** 钻取时的临时过滤词：独立于用户搜索框，切回汇总后不残留 */
+    const drillKw = ref('');
 
     async function load() {
       loading.value = true;
       try {
+        // 钻取词优先于用户搜索词，仅在明细钻取场景生效
+        const effKw = view.value === 'detail' && drillKw.value ? drillKw.value : kw.value;
         list.value = await api.get('/stock/list', {
-          teamId: store.teamId, kw: kw.value,
+          teamId: store.teamId, kw: effKw,
           warehouseId: warehouseId.value,
           ifShowZero: ifShowZero.value ? '' : '0',
         });
+      } catch (e) {
+        toast('库存查询失败：' + e.message, 'error');
       } finally {
         loading.value = false;
       }
@@ -70,7 +76,13 @@ const StockPage = {
     /** 汇总行点「N 条明细」→ 切到明细视图并按商品名过滤，需重新请求后端 */
     async function drillTo(s) {
       view.value = 'detail';
-      kw.value = s.prodName;
+      drillKw.value = s.prodName;
+      await load();
+    }
+    /** 切回汇总视图：清掉钻取词并按用户自己的筛选重查 */
+    async function backToSummary() {
+      view.value = 'prod';
+      drillKw.value = '';
       await load();
     }
 
@@ -98,7 +110,7 @@ const StockPage = {
     }
     return {
       kw, warehouseId, ifShowZero, list, loading, load, totalQty, isLow, resvName, doExport, lowQtyMap, store,
-      view, summary, isLowSum, lowCount, drillTo,
+      view, summary, isLowSum, lowCount, drillTo, backToSummary, drillKw,
     };
   },
   template: `
@@ -107,8 +119,8 @@ const StockPage = {
       <div class="page-head">
         <span class="hd-title">库存查询</span>
         <div class="tabs" style="margin-left:14px">
-          <span class="tb" :class="{ on: view === 'prod' }" @click="view = 'prod'">按商品汇总</span>
-          <span class="tb" :class="{ on: view === 'detail' }" @click="view = 'detail'">按库位明细</span>
+          <span class="tb" :class="{ on: view === 'prod' }" @click="backToSummary()">按商品汇总</span>
+          <span class="tb" :class="{ on: view === 'detail' }" @click="view = 'detail'; drillKw = ''; load()">按库位明细</span>
         </div>
         <span class="hd-sp"></span>
         <button class="btn" @click="doExport"><el-icon><Download/></el-icon> 导出</button>
@@ -117,7 +129,7 @@ const StockPage = {
         <div class="fctrl" style="width:200px"><el-select v-model="warehouseId" filterable clearable placeholder="全部仓库" @change="load">
           <el-option v-for="w in store.warehouses" :key="w.id" :label="w.name" :value="w.id"/>
         </el-select></div>
-        <input class="finp w-key" v-model="kw" placeholder="商品名称 / 条码" @keyup.enter="load"/>
+        <input class="finp w-key" v-model="kw" :disabled="!!drillKw" :placeholder="drillKw ? '钻取过滤：' + drillKw : '商品名称 / 条码'" @keyup.enter="load"/>
         <button class="btn" @click="load">查询</button>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
           <input type="checkbox" v-model="ifShowZero" @change="load"/>显示零库存</label>
@@ -154,7 +166,12 @@ const StockPage = {
           </tbody>
         </table>
         <table class="tbl" v-else>
-          <thead><tr><th>商品</th><th>规格</th><th>单位</th><th>仓库</th><th>库位</th><th>批次</th><th class="r">数量</th><th class="r">安全库存</th><th></th></tr></thead>
+          <thead><tr>
+            <th colspan="9" v-if="drillKw" style="background:#f8f9fb;font-weight:400;font-size:12.5px;color:var(--muted)">
+              <el-icon style="vertical-align:-2px"><Filter/></el-icon>
+              钻取过滤「{{ drillKw }}」· <a href="javascript:;" class="lnk" @click="backToSummary()">返回汇总视图</a>
+            </th>
+          </tr><tr><th>商品</th><th>规格</th><th>单位</th><th>仓库</th><th>库位</th><th>批次</th><th class="r">数量</th><th class="r">安全库存</th><th></th></tr></thead>
           <tbody>
             <tr v-if="!list.length"><td colspan="9"><div class="empty">暂无库存数据</div></td></tr>
             <tr v-for="(r, i) in list" :key="i">

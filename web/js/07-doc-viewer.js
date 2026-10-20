@@ -9,8 +9,16 @@ const DocViewer = {
     watch(() => props.docId, async (v) => {
       data.value = null;
       if (!v) return;
-      try { data.value = await api.get('/doc/info', { id: v, teamId: store.teamId }); }
-      catch (e) { toast(e.message, 'error'); emit('close'); }
+      // 竞态守卫：快速连点两条单据时，旧请求的晚到响应不能覆盖新单据内容
+      const want = v;
+      try {
+        const r = await api.get('/doc/info', { id: v, teamId: store.teamId });
+        if (want !== props.docId) return;
+        data.value = r;
+      } catch (e) {
+        if (want !== props.docId) return;
+        toast(e.message, 'error'); emit('close');
+      }
     }, { immediate: true });
     const close = () => emit('close');
     function printDoc() {

@@ -53,7 +53,7 @@ const BasePage = {
       const k = editor.kind;
       if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
       const body = { teamId: store.teamId, ...editor.form };
-      if (k === 'account') body.balance = Math.round(Number(body.balance) * 100) || 0;
+      if (k === 'account') body.balance = toCents(body.balance);
       try {
         if (editor.id) await api.put(`/${k}/${editor.id}`, body);
         else await api.post(`/${k}`, body);

@@ -75,13 +75,21 @@ const DocPage = {
     const sumCols = computed(() => 4 + (meta.value.partner ? 1 : 0) + (meta.value.warehouse ? 1 : 0) + (meta.value.toWarehouse ? 1 : 0));
 
     async function load() {
-      const r = await api.get('/doc/list', {
-        teamId: store.teamId, type: activeType.value, status: status.value,
-        kw: kw.value, page: page.value, rows: rows.value,
-        from: filterFrom.value || '', to: filterTo.value || '',
-        partnerId: filterPartner.value || '',
-      });
-      list.value = r.rows; total.value = r.total;
+      try {
+        const r = await api.get('/doc/list', {
+          teamId: store.teamId, type: activeType.value, status: status.value,
+          kw: kw.value, page: page.value, rows: rows.value,
+          from: filterFrom.value || '', to: filterTo.value || '',
+          partnerId: filterPartner.value || '',
+        });
+        list.value = r.rows; total.value = r.total;
+        // 翻页/筛选后清空复选：否则「已选 N 单」含已不可见的行
+        selected.value = [];
+        // 汇总视图停留在当前页时，明细需随筛选/翻页同步刷新
+        if (viewTab.value === 'summary') loadFlatItems();
+      } catch (e) {
+        toast('单据列表加载失败：' + e.message, 'error');
+      }
     }
     function resetFilter() {
       kw.value = ''; status.value = ''; filterFrom.value = ''; filterTo.value = '';
@@ -137,7 +145,10 @@ const DocPage = {
       if (!editor.open || !emeta.value.partner) return;
       await loadPriceMem(pid);
       const f = emeta.value.priceField;
-      if (!f || old === undefined) return;
+      // old === null 是 watcher 的初始基线（editor.form 初始为 null）。
+      // 打开已有单据时表单整体赋值会触发 (pid=单据客户, old=null)：
+      // 此时行价来自服务器单据本身，必须跳过刷新，否则被价格记忆静默改写。
+      if (!f || old === null || editor.id) return;
       for (const it of editor.form.items) {
         if (!it.productId) continue;
         if (it._priceDirty) continue; // 用户已手改过单价的行不刷新
@@ -267,6 +278,8 @@ const DocPage = {
         if (!Number(it.qty)) throw new Error(`第 ${i + 1} 行数量不能为 0`);
         if (!m.negative && Number(it.qty) < 0) throw new Error(`第 ${i + 1} 行数量不能为负`);
         if (Number(it.price) < 0) throw new Error(`第 ${i + 1} 行单价不能为负`);
+        // 调拨单必须指定调往仓库：后端不校验必填，空值过账会变成「源仓出又入源仓」的无效调拨
+        if (m.toWarehouse && !it.toWarehouseId) throw new Error(`第 ${i + 1} 行未选择调往仓库`);
       }
       if (Number(f.discount) > grossAmt.value) throw new Error('整单折扣不能超过单据金额');
       if (Number(f.paidAmount) + Number(f.deposit) > totalAmt.value) {
@@ -281,12 +294,12 @@ const DocPage = {
         receiverName: f.receiverName || null,
         receiverMobile: f.receiverMobile || null,
         receiverAddress: f.receiverAddress || null,
-        discount: Math.round((Number(f.discount) || 0) * 100),
-        paidAmount: Math.round((Number(f.paidAmount) || 0) * 100),
+        discount: toCents(f.discount),
+        paidAmount: toCents(f.paidAmount),
         accountId: f.accountId || null,
-        deposit: Math.round((Number(f.deposit) || 0) * 100),
+        deposit: toCents(f.deposit),
         items: f.items.map(it => ({
-          productId: it.productId, qty: Number(it.qty), price: Math.round(Number(it.price) * 100),
+          productId: it.productId, qty: Number(it.qty), price: toCents(it.price),
           batchNo: it.batchNo || null, toWarehouseId: it.toWarehouseId || null, remark: it.remark || null,
         })),
       };
@@ -358,14 +371,18 @@ const DocPage = {
     }
     /** 批量提交当前页草稿 */
     async function submitAllDrafts() {
+      if (busyId.value) return;
       const ids = list.value.filter((d) => d.status === 'draft').map((d) => d.id);
       if (!ids.length) return toast('当前页没有草稿', 'warning');
       if (!(await confirmBox(`将当前页 ${ids.length} 张草稿全部提交审核？`))) return;
+      // confirmBox 是 async 弹窗，等待确认期间可再次点击 → 需要防重入
+      busyId.value = 'batch';
       try {
         const r = await api.post('/doc/submit-batch', { teamId: store.teamId, ids });
         toast(`已提交 ${r.done} 张${r.skipped?.length ? `，跳过 ${r.skipped.length} 张` : ''}`);
         load();
       } catch (e) { toast(e.message, 'error'); }
+      finally { busyId.value = null; }
     }
     async function voidDoc(row) {
       if (busyId.value) return;

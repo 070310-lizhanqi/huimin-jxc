@@ -51,8 +51,8 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
         `SELECT m.*, p.name AS prodName, p.spec, p.unit, p.salePrice,
                 c.name AS cusName
          FROM price_memory m
-         JOIN product p ON p.id = m.productId
-         LEFT JOIN customer c ON c.id = m.partnerId
+         JOIN product p ON p.id = m.productId AND p.teamId = m.teamId
+         LEFT JOIN customer c ON c.id = m.partnerId AND c.teamId = m.teamId
          WHERE ${where.join(' AND ')}
          ORDER BY m.lastDate DESC, m.id DESC LIMIT 500`,
       )
@@ -68,6 +68,11 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
     const price = Number(req.body.price);
     if (!teamId || !partnerId || !productId) return res.status(400).json({ error: '缺少必填参数' });
     if (!(price >= 0)) return res.status(400).json({ error: '价格不能为负' });
+    // 归属校验：客户与商品必须属于本团队（记忆行带 teamId，但引用的档案可以是跨团队 id）
+    const cus = db.prepare(`SELECT id FROM customer WHERE id = ? AND teamId = ?`).get(partnerId, teamId);
+    if (!cus) return res.status(400).json({ error: '客户不存在' });
+    const prod = db.prepare(`SELECT id FROM product WHERE id = ? AND teamId = ?`).get(productId, teamId);
+    if (!prod) return res.status(400).json({ error: '商品不存在' });
     db.prepare(
       `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
        VALUES (?, ?, ?, ?, date('now','localtime'), 1)

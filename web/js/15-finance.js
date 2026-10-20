@@ -58,20 +58,24 @@ const FinancePage = {
       const list = f.partnerType === 'cus' ? store.customers : store.vendors;
       return list.find((p) => p.id === f.partnerId)?.name ?? ('#' + f.partnerId);
     }
+    const busy = ref(false);
     async function save() {
+      // 防双击：收付款是资金操作，后端无幂等去重，重复提交会双重冲抵往来余额
+      if (busy.value) return;
       const f = editor.form;
       if (!f.partnerId) return toast('请选择往来单位', 'error');
       if (!(Number(f.amount) > 0)) return toast('金额必须大于 0', 'error');
+      busy.value = true;
       try {
         if (f.id) {
           await api.put('/settlement/' + f.id, {
             teamId: store.teamId, accountId: f.accountId || null,
-            amount: Math.round(Number(f.amount) * 100), date: f.date, remark: f.remark,
+            amount: toCents(f.amount), date: f.date, remark: f.remark,
           });
         } else {
           await api.post('/settlement/create', {
             teamId: store.teamId, type: f.type, partnerType: f.partnerType, partnerId: f.partnerId,
-            accountId: f.accountId || null, amount: Math.round(Number(f.amount) * 100),
+            accountId: f.accountId || null, amount: toCents(f.amount),
             date: f.date, remark: f.remark,
           });
         }
@@ -80,6 +84,7 @@ const FinancePage = {
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
+      finally { busy.value = false; }
     }
 
     function openEdit(s) {
@@ -103,7 +108,7 @@ const FinancePage = {
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
     }
-    return { settlements, tab, editor, viewerId, receivable, payable, balRows, openNew, openEdit, remove, save, partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney };
+    return { settlements, tab, editor, viewerId, receivable, payable, balRows, openNew, openEdit, remove, save, busy, partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney };
   },
   template: `
   <div>
@@ -198,7 +203,7 @@ const FinancePage = {
         </div>
         <div class="modal-foot">
           <button class="btn" @click="editor.open = false">取消</button>
-          <button class="btn primary" @click="save">保存</button>
+          <button class="btn primary" :disabled="busy" @click="save">{{ busy ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>

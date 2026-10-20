@@ -10,7 +10,8 @@
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import type { NextFunction, Request, Response, Router } from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import { localDate } from './db';
 
 /** 令牌有效期（秒）：7 天 */
 const TOKEN_TTL = 7 * 24 * 3600;
@@ -22,6 +23,8 @@ export interface AuthUser {
   teamId: number;
   role: string;
   name: string;
+  /** 令牌版本：与 user.tokenVer 比对，改密/删号后旧令牌立即失效 */
+  ver?: number;
 }
 
 declare module 'express-serve-static-core' {
@@ -78,7 +81,7 @@ export function verifyToken(token: string): AuthUser | null {
       AuthUser & { exp?: number };
     if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
     if (!payload.userId || !payload.teamId) return null;
-    return { userId: payload.userId, teamId: payload.teamId, role: payload.role, name: payload.name };
+    return { userId: payload.userId, teamId: payload.teamId, role: payload.role, name: payload.name, ver: payload.ver };
   } catch {
     return null;
   }
@@ -96,12 +99,23 @@ function readToken(req: Request): string | null {
 }
 
 /** 强制登录：未登录或令牌失效返回 401 */
+/** 令牌版本库校验句柄：mountAuth 挂载时设置（index.ts 先挂认证路由再 api.use(requireAuth)，时序安全） */
+let stmtTokenVer: StatementSync | null = null;
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const token = readToken(req);
   const user = token ? verifyToken(token) : null;
   if (!user) {
     res.status(401).json({ error: '未登录或登录已过期，请重新登录' });
     return;
+  }
+  // 令牌版本比对：改密、删除账号后旧令牌立即失效（无此机制时旧令牌最长仍可用 7 天）
+  if (stmtTokenVer) {
+    const row = stmtTokenVer.get(user.userId) as { tokenVer: number } | undefined;
+    if (!row || user.ver !== row.tokenVer) {
+      res.status(401).json({ error: '登录凭证已变更，请重新登录' });
+      return;
+    }
   }
   req.auth = user;
   // 团队隔离：把请求里的 teamId 统一覆盖为令牌中的 teamId，下游路由无需改动
@@ -154,6 +168,7 @@ interface UserRow {
   name: string;
   role: string;
   password: string | null;
+  tokenVer: number;
 }
 
 /** 全局注册配置存 setting 表 teamId=0 行（单账套语义下的全局命名空间） */
@@ -203,6 +218,9 @@ function safe(fn: (req: Request, res: Response) => unknown) {
 }
 
 export function mountAuth(router: Router, db: DatabaseSync): void {
+  // 供 requireAuth 做令牌版本比对（预编译语句，避免每请求重复编译）
+  stmtTokenVer = db.prepare(`SELECT tokenVer FROM "user" WHERE id = ?`);
+
   /** 注册：首个账号自动建团队；已有团队时按全局注册开关走邀请码建「独立新账套」 */
   router.post('/auth/register', safe(async (req, res) => {
     if (tooManyFails(clientIp(req))) {
@@ -224,8 +242,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const teamCount = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
     let teamId: number;
     if (teamCount === 0) {
-      // 没有任何团队 → 首次部署，建团队并初始化默认档案
-      const startPeriod = String(req.body.startPeriod ?? new Date().toISOString().slice(0, 7).replace('-', ''));
+      // 没有任何团队 → 首次部署，建团队并初始化默认档案（起账期缺省取本地年月，勿用 UTC）
+      const startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
       const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', startPeriod);
       teamId = Number(info.lastInsertRowid);
       db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);
@@ -241,7 +259,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       if (!invite || !conf.inviteCode || !safeEqual(invite, conf.inviteCode)) {
         return fail(400, '邀请码不正确');
       }
-      const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', new Date().toISOString().slice(0, 7).replace('-', ''));
+      const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', localDate().slice(0, 7).replace('-', ''));
       teamId = Number(info.lastInsertRowid);
       db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);
       db.prepare(`INSERT INTO account (teamId, name, type) VALUES (?, '现金', 'cash')`).run(teamId);
@@ -250,10 +268,16 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
 
     const createdAt = new Date().toISOString();
     const hashed = await hashPassword(password);
-    const info = db
-      .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
-      .run(teamId, username, hashed, createdAt);
-    const user: AuthUser = { userId: Number(info.lastInsertRowid), teamId, role: 'admin', name: username };
+    let info: { lastInsertRowid: number | bigint };
+    try {
+      info = db
+        .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
+        .run(teamId, username, hashed, createdAt);
+    } catch {
+      // 并发注册撞唯一索引 idx_user_name：预检（SELECT）与 INSERT 之间有竞态窗口
+      return fail(400, '该用户名已被使用');
+    }
+    const user: AuthUser = { userId: Number(info.lastInsertRowid), teamId, role: 'admin', name: username, ver: 0 };
     return res.json({ ok: true, token: issueToken(user), user, teamId, teamName: teamName || '我的账套' });
   }));
 
@@ -273,7 +297,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
       | { id: number; name: string }
       | undefined;
-    const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name };
+    const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name, ver: row.tokenVer };
     return res.json({ ok: true, token: issueToken(user), user, team });
   }));
 
@@ -303,8 +327,11 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     if (newPwd.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
     const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
     if (!row || !(await verifyPassword(oldPwd, row.password))) return res.status(400).json({ error: '原密码不正确' });
-    db.prepare(`UPDATE "user" SET password = ? WHERE id = ?`).run(await hashPassword(newPwd), u.userId);
-    return res.json({ ok: true });
+    // 改密后 tokenVer + 1：吊销该用户全部旧令牌（含泄漏在外的），并为当前会话重签新令牌
+    db.prepare(`UPDATE "user" SET password = ?, tokenVer = tokenVer + 1 WHERE id = ?`).run(await hashPassword(newPwd), u.userId);
+    const fresh = db.prepare(`SELECT tokenVer FROM "user" WHERE id = ?`).get(u.userId) as { tokenVer: number } | undefined;
+    const renewed: AuthUser = { userId: u.userId, teamId: u.teamId, role: u.role, name: u.name, ver: fresh?.tokenVer ?? row.tokenVer + 1 };
+    return res.json({ ok: true, token: issueToken(renewed) });
   }));
 
   /** 读注册配置：仅系统所有者（首个账套）的 admin 可看，防止朋友账套的管理员改动全局开关 */
@@ -362,9 +389,15 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
     if (dup) return res.status(400).json({ error: '该用户名已被使用' });
     const hashed = await hashPassword(password);
-    const info = db
-      .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
-      .run(u.teamId, username, role, hashed, new Date().toISOString());
+    let info: { lastInsertRowid: number | bigint };
+    try {
+      info = db
+        .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
+        .run(u.teamId, username, role, hashed, new Date().toISOString());
+    } catch {
+      // 并发新增撞唯一索引 idx_user_name（预检与 INSERT 之间有竞态窗口）
+      return res.status(400).json({ error: '该用户名已被使用' });
+    }
     return res.json({ ok: true, id: Number(info.lastInsertRowid) });
   }));
 

@@ -116,7 +116,9 @@ const DEDUCT_TYPES = new Set(['stockout', 'transfer', 'adjust', 'pin', 'stocktak
 
 /** 退货类单据：销售退货（退款给客户）/ 采购退货（收回供应商货款） */
 const RET_TYPES = new Set(['sret', 'pin']);
-/** 各单据类型「开单即收付」的资金流向：receipt=钱进我方账户 / payment=钱出我方账户 */
+/** 各单据类型「开单即收付」的资金流向：receipt=钱进我方账户 / payment=钱出我方账户。
+ *  未列出的类型一律不自动结算（settleOnAudit 白名单）：订单/纯库存单收订金走单独流程，
+ *  绝不能默认成 payment 把账户扣减。 */
 const MONEY_FLOW: Record<string, 'receipt' | 'payment'> = {
   stockout: 'receipt', // 销售出库：收货款
   stockin: 'payment', // 采购入库：付货款
@@ -331,7 +333,6 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     // 幂等：双击保存/重试在窗口内返回同一张单
     const dup = dedupCreate(db, input);
     if (dup) return res.json(dup);
-    const billNo = nextBillNo(db, input.teamId, input.type);
     const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
     // 明细价格可缺省：调拨/盘点等纯库存单据不填价格，按 0 计
     const grossAmount = input.items.reduce((s, i) => s + Math.round(i.qty * Number(i.price ?? 0)), 0);
@@ -342,41 +343,58 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const totalAmount = grossAmount - discount;
     const paidAmount = Math.max(0, Math.round(Number(input.paidAmount ?? 0)));
     const deposit = Math.max(0, Math.round(Number(input.deposit ?? 0)));
-    // 纯库存单据（调拨/盘点/组装/调整）不涉及往来款项，跳过结算校验
-    if (!NO_SETTLE_TYPES.has(input.type)) {
+    // 纯库存单据（调拨/盘点/组装/调整）不涉及往来款项：禁止填写收付款/订金
+    // （settleOnAudit 的类型白名单也不会为其记账，此处提前拒绝，避免字段值与账实不符）
+    if (NO_SETTLE_TYPES.has(input.type)) {
+      if (paidAmount > 0 || deposit > 0) {
+        return res.status(400).json({ error: '该单据类型为纯库存单，不能填写收付款/订金' });
+      }
+    } else {
       const settleErr = checkSettle(totalAmount, paidAmount, deposit);
       if (settleErr) return res.status(400).json({ error: settleErr });
     }
-    const info = db
-      .prepare(
-        `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
-                           receiverName, receiverMobile, receiverAddress, discount, paidAmount, accountId, deposit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.teamId,
-        billNo,
-        input.type,
-        input.date ?? localDate(),
-        input.partnerType ?? null,
-        input.partnerId ?? null,
-        input.clerkId ?? null,
-        input.warehouseId ?? null,
-        input.remark ?? null,
-        totalAmount,
-        totalQty,
-        null,
-        input.refOrderId ?? null,
-        input.receiverName ?? null,
-        input.receiverMobile ?? null,
-        input.receiverAddress ?? null,
-        discount,
-        paidAmount,
-        input.accountId ?? null,
-        deposit,
-      );
-    const docId = Number(info.lastInsertRowid);
-    insertItems(db, docId, input.items);
+    let docId = 0;
+    let billNo = '';
+    // BEGIN 放 try 外：BEGIN 本身失败时 ROLLBACK 会二次抛错掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // 单号、单据头、明细同事务：任一步失败整体回滚，不留半张单
+      billNo = nextBillNo(db, input.teamId, input.type);
+      const info = db
+        .prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
+                             receiverName, receiverMobile, receiverAddress, discount, paidAmount, accountId, deposit)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.teamId,
+          billNo,
+          input.type,
+          input.date ?? localDate(),
+          input.partnerType ?? null,
+          input.partnerId ?? null,
+          input.clerkId ?? null,
+          input.warehouseId ?? null,
+          input.remark ?? null,
+          totalAmount,
+          totalQty,
+          null,
+          input.refOrderId ?? null,
+          input.receiverName ?? null,
+          input.receiverMobile ?? null,
+          input.receiverAddress ?? null,
+          discount,
+          paidAmount,
+          input.accountId ?? null,
+          deposit,
+        );
+      docId = Number(info.lastInsertRowid);
+      insertItems(db, docId, input.items);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
+    }
     rememberCreate(input, docId, billNo);
     return res.json({ id: docId, billNo });
   });
@@ -424,73 +442,88 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       reservoirId: number | null;
       remark: string | null;
     }>;
-    // 履约数量跟踪：统计该订单已转出的子单（含草稿/待审/已审，作废不计）按商品汇总的数量，
-    // 只允许转出「剩余未履约数量」，全部转完则拦截，杜绝同一订单重复超额转单。
-    const fulfilledRows = db
-      .prepare(
-        `SELECT i.productId, COALESCE(SUM(i.qty), 0) AS qty
-         FROM doc_item i JOIN doc d ON d.id = i.docId
-         WHERE d.refOrderId = ? AND d.teamId = ? AND d.status <> 'void'
-         GROUP BY i.productId`,
-      )
-      .all(id, teamId) as Array<{ productId: number; qty: number }>;
-    const fulfilled = new Map<number, number>(fulfilledRows.map((r) => [r.productId, r.qty]));
-    const remainItems = items
-      .map((it) => {
-        const remain = roundQty(it.qty - (fulfilled.get(it.productId) ?? 0));
-        return { ...it, qty: remain };
-      })
-      .filter((it) => it.qty > 0);
-    if (!remainItems.length) {
-      return res.status(400).json({ error: '该订单已全部转单，没有可转出的剩余数量' });
-    }
-    const billNo = nextBillNo(db, teamId, toType);
-    const totalQty = roundQty(remainItems.reduce((s, i) => s + i.qty, 0));
-    const totalAmount = remainItems.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
-    const info = db
-      .prepare(
-        `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        teamId,
-        billNo,
-        toType,
-        localDate(),
-        doc.partnerType,
-        doc.partnerId,
-        doc.clerkId,
-        targetWh,
-        `由订单转单生成`,
-        totalAmount,
-        totalQty,
-        null,
-        id,
+    let newId = 0;
+    let billNo = '';
+    let partial = false;
+    let converted: Array<{ productId: number; qty: number }> = [];
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // 履约数量跟踪：统计该订单已转出的子单（含草稿/待审/已审，作废不计）按商品汇总的数量，
+      // 只允许转出「剩余未履约数量」，全部转完则拦截，杜绝同一订单重复超额转单。
+      // 统计与插入在同一事务内，防止并发转单双双通过余量检查。
+      const fulfilledRows = db
+        .prepare(
+          `SELECT i.productId, COALESCE(SUM(i.qty), 0) AS qty
+           FROM doc_item i JOIN doc d ON d.id = i.docId
+           WHERE d.refOrderId = ? AND d.teamId = ? AND d.status <> 'void'
+           GROUP BY i.productId`,
+        )
+        .all(id, teamId) as Array<{ productId: number; qty: number }>;
+      const fulfilled = new Map<number, number>(fulfilledRows.map((r) => [r.productId, r.qty]));
+      const remainItems = items
+        .map((it) => {
+          const remain = roundQty(it.qty - (fulfilled.get(it.productId) ?? 0));
+          return { ...it, qty: remain };
+        })
+        .filter((it) => it.qty > 0);
+      if (!remainItems.length) {
+        throw new Error('该订单已全部转单，没有可转出的剩余数量');
+      }
+      billNo = nextBillNo(db, teamId, toType);
+      const totalQty = roundQty(remainItems.reduce((s, i) => s + i.qty, 0));
+      const totalAmount = remainItems.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
+      const info = db
+        .prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          teamId,
+          billNo,
+          toType,
+          localDate(),
+          doc.partnerType,
+          doc.partnerId,
+          doc.clerkId,
+          targetWh,
+          `由订单转单生成`,
+          totalAmount,
+          totalQty,
+          null,
+          id,
+        );
+      newId = Number(info.lastInsertRowid);
+      const insStmt = db.prepare(
+        `INSERT INTO doc_item (docId, productId, qty, price, amount, batchNo, reservoirId, remark)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
-    const newId = Number(info.lastInsertRowid);
-    const insStmt = db.prepare(
-      `INSERT INTO doc_item (docId, productId, qty, price, amount, batchNo, reservoirId, remark)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    for (const it of remainItems) {
-      insStmt.run(
-        newId,
-        it.productId,
-        it.qty,
-        it.price,
-        Math.round(it.qty * it.price),
-        it.batchNo,
-        it.reservoirId,
-        it.remark,
-      );
+      for (const it of remainItems) {
+        insStmt.run(
+          newId,
+          it.productId,
+          it.qty,
+          it.price,
+          Math.round(it.qty * it.price),
+          it.batchNo,
+          it.reservoirId,
+          it.remark,
+        );
+      }
+      db.exec('COMMIT');
+      // 回传本次实际转出明细与剩余，便于前端提示「部分转单」
+      partial = remainItems.length < items.length;
+      converted = remainItems.map((i) => ({ productId: i.productId, qty: i.qty }));
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: e instanceof Error ? e.message : '转单失败' });
     }
-    // 回传本次实际转出明细与剩余，便于前端提示「部分转单」
     return res.json({
       id: newId,
       billNo,
       type: toType,
-      partial: remainItems.length < items.length,
-      items: remainItems.map((i) => ({ productId: i.productId, qty: i.qty })),
+      partial,
+      items: converted,
     });
   });
 
@@ -512,41 +545,51 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         }
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
-    const billNo = nextBillNo(db, teamId, doc.type);
-    const totalQty = (
-      db.prepare(`SELECT COALESCE(SUM(qty), 0) AS q FROM doc_item WHERE docId = ?`).get(id) as {
-        q: number;
-      }
-    ).q;
-    const totalAmount = (
-      db.prepare(`SELECT COALESCE(SUM(amount), 0) AS a FROM doc_item WHERE docId = ?`).get(id) as {
-        a: number;
-      }
-    ).a;
-    const info = db
-      .prepare(
-        `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NULL)`,
-      )
-      .run(
-        teamId,
-        billNo,
-        doc.type,
-        localDate(),
-        doc.partnerType,
-        doc.partnerId,
-        doc.clerkId,
-        doc.warehouseId,
-        doc.remark ? `${doc.remark}（复制）` : '（复制自原单）',
-        totalAmount,
-        totalQty,
-        null,
-      );
-    const newId = Number(info.lastInsertRowid);
-    db.prepare(
-      `INSERT INTO doc_item (docId, productId, qty, price, amount, remark)
-       SELECT ?, productId, qty, price, amount, remark FROM doc_item WHERE docId = ?`,
-    ).run(newId, id);
+    let newId = 0;
+    let billNo = '';
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      billNo = nextBillNo(db, teamId, doc.type);
+      const totalQty = (
+        db.prepare(`SELECT COALESCE(SUM(qty), 0) AS q FROM doc_item WHERE docId = ?`).get(id) as {
+          q: number;
+        }
+      ).q;
+      const totalAmount = (
+        db.prepare(`SELECT COALESCE(SUM(amount), 0) AS a FROM doc_item WHERE docId = ?`).get(id) as {
+          a: number;
+        }
+      ).a;
+      const info = db
+        .prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          teamId,
+          billNo,
+          doc.type,
+          localDate(),
+          doc.partnerType,
+          doc.partnerId,
+          doc.clerkId,
+          doc.warehouseId,
+          doc.remark ? `${doc.remark}（复制）` : '（复制自原单）',
+          totalAmount,
+          totalQty,
+          null,
+        );
+      newId = Number(info.lastInsertRowid);
+      db.prepare(
+        `INSERT INTO doc_item (docId, productId, qty, price, amount, remark)
+         SELECT ?, productId, qty, price, amount, remark FROM doc_item WHERE docId = ?`,
+      ).run(newId, id);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: e instanceof Error ? e.message : '复制失败' });
+    }
     return res.json({ id: newId, billNo });
   });
 
@@ -570,35 +613,54 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const totalAmount = grossAmount - discount;
     const paidAmount = Math.max(0, Math.round(Number(input.paidAmount ?? 0)));
     const deposit = Math.max(0, Math.round(Number(input.deposit ?? 0)));
-    // 纯库存单据（调拨/盘点/组装/调整）不涉及往来款项，跳过结算校验
-    if (!NO_SETTLE_TYPES.has(input.type)) {
+    // 纯库存单据不涉及往来款项：禁止填写收付款/订金（与 create 同规则）
+    if (NO_SETTLE_TYPES.has(input.type)) {
+      if (paidAmount > 0 || deposit > 0) {
+        return res.status(400).json({ error: '该单据类型为纯库存单，不能填写收付款/订金' });
+      }
+    } else {
       const settleErr = checkSettle(totalAmount, paidAmount, deposit);
       if (settleErr) return res.status(400).json({ error: settleErr });
     }
-    db.prepare(
-      `UPDATE doc SET date=?, partnerType=?, partnerId=?, clerkId=?, warehouseId=?, remark=?, totalAmount=?, totalQty=?,
-                      receiverName=?, receiverMobile=?, receiverAddress=?, discount=?, paidAmount=?, accountId=?, deposit=?
-       WHERE id=?`,
-    ).run(
-      input.date ?? localDate(),
-      input.partnerType ?? null,
-      input.partnerId ?? null,
-      input.clerkId ?? null,
-      input.warehouseId ?? null,
-      input.remark ?? null,
-      totalAmount,
-      totalQty,
-      input.receiverName ?? null,
-      input.receiverMobile ?? null,
-      input.receiverAddress ?? null,
-      discount,
-      paidAmount,
-      input.accountId ?? null,
-      deposit,
-      input.id,
-    );
-    db.prepare('DELETE FROM doc_item WHERE docId = ?').run(input.id);
-    insertItems(db, input.id, input.items);
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // 锁内复核状态：预检与取锁之间单据可能已被并发审核/作废，
+      // 覆盖已过账单据会导致明细与库存流水错位
+      const fresh = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(input.id, input.teamId) as
+        | { status: string }
+        | undefined;
+      if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
+      // 头部更新与明细重写同事务：失败整体回滚，不出现「新头旧明细」的中间态
+      db.prepare(
+        `UPDATE doc SET date=?, partnerType=?, partnerId=?, clerkId=?, warehouseId=?, remark=?, totalAmount=?, totalQty=?,
+                        receiverName=?, receiverMobile=?, receiverAddress=?, discount=?, paidAmount=?, accountId=?, deposit=?
+         WHERE id=?`,
+      ).run(
+        input.date ?? localDate(),
+        input.partnerType ?? null,
+        input.partnerId ?? null,
+        input.clerkId ?? null,
+        input.warehouseId ?? null,
+        input.remark ?? null,
+        totalAmount,
+        totalQty,
+        input.receiverName ?? null,
+        input.receiverMobile ?? null,
+        input.receiverAddress ?? null,
+        discount,
+        paidAmount,
+        input.accountId ?? null,
+        deposit,
+        input.id,
+      );
+      db.prepare('DELETE FROM doc_item WHERE docId = ?').run(input.id);
+      insertItems(db, input.id, input.items);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
+    }
     return res.json({ ok: true });
   });
 
@@ -606,12 +668,15 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.post('/doc/submit', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const id = Number(req.body.id);
-    const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
-      | { status: string }
-      | undefined;
-    if (!doc) return res.status(404).json({ error: '单据不存在' });
-    if (doc.status !== 'draft') return res.status(400).json({ error: '仅草稿可提交审核' });
-    db.prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=?`).run(id);
+    // UPDATE 带状态守卫：非草稿（已审核/作废）0 行，防止把已过账单改回待审后被二次审核双扣库存
+    const info = db
+      .prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=? AND teamId=? AND status='draft'`)
+      .run(id, teamId);
+    if (info.changes === 0) {
+      const doc = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as { status: string } | undefined;
+      if (!doc) return res.status(404).json({ error: '单据不存在' });
+      return res.status(400).json({ error: '仅草稿可提交审核' });
+    }
     return res.json({ ok: true, status: 'pending' });
   });
 
@@ -620,12 +685,15 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const teamId = Number(req.body.teamId);
     const id = Number(req.body.id);
     const reason = String(req.body.reason ?? '').trim();
-    const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
-      | { status: string }
-      | undefined;
-    if (!doc) return res.status(404).json({ error: '单据不存在' });
-    if (doc.status !== 'pending') return res.status(400).json({ error: '仅待审核单据可驳回' });
-    db.prepare(`UPDATE doc SET status='draft', rejectReason=? WHERE id=?`).run(reason || null, id);
+    // UPDATE 带状态守卫：仅待审核可驳回，防止驳回已过账单据
+    const info = db
+      .prepare(`UPDATE doc SET status='draft', rejectReason=? WHERE id=? AND teamId=? AND status='pending'`)
+      .run(reason || null, id, teamId);
+    if (info.changes === 0) {
+      const doc = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as { status: string } | undefined;
+      if (!doc) return res.status(404).json({ error: '单据不存在' });
+      return res.status(400).json({ error: '仅待审核单据可驳回' });
+    }
     return res.json({ ok: true, status: 'draft' });
   });
 
@@ -636,8 +704,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!ids.length) return res.status(400).json({ error: 'ids 不能为空' });
     let done = 0;
     const skipped: number[] = [];
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
     try {
-      db.exec('BEGIN');
       for (const id of ids) {
         const row = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
           | { status: string }
@@ -680,9 +749,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (doc.status !== 'draft' && doc.status !== 'pending') {
       return res.status(400).json({ error: '仅草稿或待审核单据可审核' });
     }
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
+    db.exec('BEGIN IMMEDIATE');
     try {
-      // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
-      db.exec('BEGIN IMMEDIATE');
       // 写锁内二次校验状态：预检在锁外，并发请求可能已抢先过账，防重复结算/双扣库存
       const freshAudit = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
         | { status: string }
@@ -734,8 +804,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'audit') return res.status(400).json({ error: '仅已审核单据可作废' });
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
     try {
-      db.exec('BEGIN IMMEDIATE');
       // 写锁内二次校验状态：预检在锁外，并发作废可能已抢先提交，防重复冲回
       const freshVoid = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
         | { status: string }
@@ -766,8 +837,21 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       .get(id, teamId) as { status: string } | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'draft') return res.status(400).json({ error: '仅草稿可删除' });
-    db.prepare('DELETE FROM doc_item WHERE docId = ?').run(id);
-    db.prepare('DELETE FROM doc WHERE id = ?').run(id);
+    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // 锁内复核状态：预检后单据可能已被并发审核（过账）——过账单删除会使库存流水悬挂
+      const fresh = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        | { status: string }
+        | undefined;
+      if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
+      db.prepare('DELETE FROM doc_item WHERE docId = ?').run(id);
+      db.prepare('DELETE FROM doc WHERE id = ?').run(id);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: e instanceof Error ? e.message : '删除失败' });
+    }
     return res.json({ ok: true });
   });
 }
@@ -778,8 +862,65 @@ function validate(db: DatabaseSync, input: DocInput): string | null {
   if (!ORDER_TYPES.has(input.type) && !input.warehouseId) return '仓库不能为空';
   if (input.type === 'transfer') {
     for (const [i, it] of input.items.entries()) {
-      if (it.toWarehouseId && it.toWarehouseId === input.warehouseId)
+      // 调往仓库必填：空值过账会 fallback 到源仓（`toWarehouseId ?? warehouseId`），
+      // 变成「源仓出又入源仓」库存净变化为 0 的无效调拨
+      if (!it.toWarehouseId) return `第 ${i + 1} 行调往仓库不能为空`;
+      if (it.toWarehouseId === input.warehouseId)
         return `第 ${i + 1} 行调往仓库不能与调出仓库相同`;
+    }
+  }
+  // 单据日期格式必须为 YYYY-MM-DD：下游报表/账龄/看板全部依赖字符串比较与 substr，
+  // 传入 '2026/10/1' 之类会使该单在所有按日期过滤的统计中漏计
+  if (input.date && !/^\d{4}-\d{2}-\d{2}$/.test(input.date)) return '单据日期格式必须为 YYYY-MM-DD';
+  // 外键归属校验：仓库/库区/调往仓库必须属于本团队（防跨团队污染库存与泄露他队仓库名）
+  if (input.warehouseId) {
+    const wh = db.prepare(`SELECT id FROM warehouse WHERE id = ? AND teamId = ?`).get(input.warehouseId, input.teamId) as
+      | { id: number }
+      | undefined;
+    if (!wh) return '仓库不存在';
+  }
+  if (input.clerkId) {
+    const clerk = db.prepare(`SELECT id FROM clerk WHERE id = ? AND teamId = ?`).get(input.clerkId, input.teamId) as
+      | { id: number }
+      | undefined;
+    if (!clerk) return '业务员不存在';
+  }
+  // 往来单位：必须存在且属于本团队，且类型必须与 partnerType 一致
+  if (input.partnerId) {
+    if (!['cus', 'ven'].includes(input.partnerType ?? '')) return '往来单位类型非法';
+    const partnerTable = input.partnerType === 'cus' ? 'customer' : 'vendor';
+    const partner = db
+      .prepare(`SELECT id FROM ${partnerTable} WHERE id = ? AND teamId = ?`)
+      .get(input.partnerId, input.teamId) as { id: number } | undefined;
+    if (!partner) return '往来单位不存在';
+  }
+  if (input.accountId) {
+    const acc = db.prepare(`SELECT id FROM account WHERE id = ? AND teamId = ?`).get(input.accountId, input.teamId) as
+      | { id: number }
+      | undefined;
+    if (!acc) return '收款账户不存在';
+  }
+  if (Array.isArray(input.items)) {
+    for (const [i, it] of input.items.entries()) {
+      if (it.reservoirId) {
+        // 行级库区挂在单据主仓库下（明细无独立源仓库字段）
+        const res = db
+          .prepare(`SELECT id FROM reservoir WHERE id = ? AND warehouseId = ? AND teamId = ?`)
+          .get(it.reservoirId, input.warehouseId, input.teamId) as { id: number } | undefined;
+        if (!res) return `第 ${i + 1} 行库区不属于该仓库`;
+      }
+      if (it.toWarehouseId) {
+        const tw = db.prepare(`SELECT id FROM warehouse WHERE id = ? AND teamId = ?`).get(it.toWarehouseId, input.teamId) as
+          | { id: number }
+          | undefined;
+        if (!tw) return `第 ${i + 1} 行调往仓库不存在`;
+      }
+      if (it.toReservoirId && it.toWarehouseId) {
+        const tres = db
+          .prepare(`SELECT id FROM reservoir WHERE id = ? AND warehouseId = ? AND teamId = ?`)
+          .get(it.toReservoirId, it.toWarehouseId, input.teamId) as { id: number } | undefined;
+        if (!tres) return `第 ${i + 1} 行调往库区不属于调往仓库`;
+      }
     }
   }
   if (!Array.isArray(input.items) || input.items.length === 0) return '明细不能为空';
@@ -1114,13 +1255,13 @@ function settleOnAudit(
   const paid = Math.max(0, Number(doc.paidAmount ?? 0));
   const dep = Math.max(0, Number(doc.deposit ?? 0));
   if (paid + dep <= 0) return;
+  // 类型白名单：只有进销四类单据（销售/采购出入库）支持开单即收付。
+  // 未映射的类型（订单、报价、期初、纯库存单）即便被恶意/误填 paidAmount 也直接跳过，
+  // 避免被记成默认 payment 方向错误的 settlement 并扣减账户。
+  const moneyType = MONEY_FLOW[doc.type];
+  if (!moneyType) return;
   if (!doc.partnerType || !doc.partnerId) throw new StockError('填写了收款/订金，但单据没有关联往来单位');
-  // 资金流向：
-  //   销售出库=收货款（receipt）；采购入库=付货款（payment）；
-  //   销售退货=退款给客户（payment）；采购退货=收回供应商货款（receipt）。
-  const moneyType = MONEY_FLOW[doc.type] ?? 'payment';
-  // 往来余额方向：普通进销单据收/付都减少「对方欠我方/我方欠对方」；
-  // 退货单据的退款/回款是冲减「我方欠对方/对方欠我方」，方向相反。
+  // 期初建库存类单据（stockinit）是 kind:'stock' 但不产生往来，理论上不会带收付款走到这里；白名单已拦。
   const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
   if (doc.accountId && paid > 0) {
     const acc = db.prepare(`SELECT id FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as
@@ -1130,8 +1271,8 @@ function settleOnAudit(
   }
   if (paid > 0) {
     db.prepare(
-      `INSERT INTO settlement (teamId, type, partnerType, partnerId, accountId, amount, date, remark, refDocId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO settlement (teamId, type, partnerType, partnerId, accountId, amount, date, remark, refDocId, isAuto)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
     ).run(
       teamId,
       moneyType,
@@ -1175,9 +1316,12 @@ function reverseSettleOnVoid(
   const dep = Math.max(0, Number(doc.deposit ?? 0));
   if (paid + dep <= 0) return;
   if (!doc.partnerType || !doc.partnerId) return;
-  const moneyType = MONEY_FLOW[doc.type] ?? 'payment';
+  // 与 settleOnAudit 相同的类型白名单：未映射类型审核时本就没有自动结算，作废也无需反冲
+  const moneyType = MONEY_FLOW[doc.type];
+  if (!moneyType) return;
   const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
-  db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND remark='开单即收付'`).run(
+  // 按 isAuto 服务端标识删除（客户端无法伪造；remark 仅作人类可读备注）
+  db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=1`).run(
     teamId,
     doc.id,
   );
@@ -1189,7 +1333,7 @@ function reverseSettleOnVoid(
   }
 }
 
-/** 往来余额增减（不存在则插入） */
+/** 往来余额增减：原子 upsert（不存在则插入），避免并发时 SELECT-then-INSERT 竞态 */
 function bumpPartnerBalance(
   db: DatabaseSync,
   teamId: number,
@@ -1197,18 +1341,10 @@ function bumpPartnerBalance(
   partnerId: number,
   delta: number,
 ): void {
-  const cur = db
-    .prepare(`SELECT balance FROM partner_balance WHERE teamId=? AND partnerType=? AND partnerId=?`)
-    .get(teamId, partnerType, partnerId) as { balance: number } | undefined;
-  if (cur) {
-    db.prepare(
-      `UPDATE partner_balance SET balance = balance + ? WHERE teamId=? AND partnerType=? AND partnerId=?`,
-    ).run(delta, teamId, partnerType, partnerId);
-  } else {
-    db.prepare(
-      `INSERT INTO partner_balance (teamId, partnerType, partnerId, balance) VALUES (?, ?, ?, ?)`,
-    ).run(teamId, partnerType, partnerId, delta);
-  }
+  db.prepare(
+    `INSERT INTO partner_balance (teamId, partnerType, partnerId, balance) VALUES (?, ?, ?, ?)
+     ON CONFLICT(teamId, partnerType, partnerId) DO UPDATE SET balance = balance + excluded.balance`,
+  ).run(teamId, partnerType, partnerId, delta);
 }
 
 /** move 的独立函数形态（deduct/transfer 共用） */

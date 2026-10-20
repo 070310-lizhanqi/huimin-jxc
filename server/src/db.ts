@@ -19,6 +19,8 @@ export function openDb(dbPath?: string): DB {
   const db = new DatabaseSync(p);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
+  // 多连接（服务进程 + 外部工具/多进程）并发写时等待锁而非立刻抛 SQLITE_BUSY
+  db.exec('PRAGMA busy_timeout = 5000;');
   return db;
 }
 
@@ -236,9 +238,13 @@ export function migrate(db: DB): void {
   // Excel 导入：外部原始单号（用于重复导入幂等跳过）
   addColumn('doc', 'srcBillNo', 'TEXT');
   db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo)`);
-  // 登录认证：密码哈希（scrypt）与创建时间
+  // 登录认证：密码哈希（scrypt）、创建时间与令牌版本（改密/删号后吊销旧令牌）
   addColumn('user', 'password', 'TEXT');
   addColumn('user', 'createdAt', 'TEXT');
+  addColumn('user', 'tokenVer', 'INTEGER NOT NULL DEFAULT 0');
+  // 结算记录：服务端专用标识（单据审核自动生成的「开单即收付」置 1）。
+  // 客户端不可伪造，作废冲回与改删守卫按此列判断，替代可被冒充的 remark 字符串。
+  addColumn('settlement', 'isAuto', 'INTEGER NOT NULL DEFAULT 0');
   // 热门查询索引：仪表盘/报表按 团队+状态+类型 过滤、对账单按往来单位过滤、成本估价按商品流水
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_doc_team_status_type ON doc(teamId, status, type);
@@ -246,4 +252,11 @@ export function migrate(db: DB): void {
     CREATE INDEX IF NOT EXISTS idx_settlement_team_partner ON settlement(teamId, partnerType, partnerId);
     CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir ON stock_ledger(teamId, productId, direction);
   `);
+  // 用户名唯一性兜底：注册/新增用户处有 SELECT 预检，但并发双击仍可能撞出重名
+  // （重名会让登录 SELECT name=? 命中错误行）。老库已有重名时本索引创建失败，忽略即可。
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_name ON "user"(name)`);
+  } catch {
+    /* 老库存在重名用户：跳过唯一索引，业务层预检仍然生效 */
+  }
 }

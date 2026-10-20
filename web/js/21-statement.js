@@ -52,10 +52,10 @@ const StatementPage = {
       const d = data.value;
       const isAr = d.mode === 'ar';
       const rowsHtml = d.lines.map((l) => `<tr>
-        <td>${l.date}</td><td>${l.billNo}</td><td>${l.label}</td>
+        <td>${l.date}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
         <td class="r">${l.credit ? fmtMoney(l.credit) : ''}</td>
-        <td class="r">${fmtMoney(l.balance)}</td><td>${l.remark || ''}</td></tr>`).join('');
+        <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`).join('');
       const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title><style>
         body{font-family:"Microsoft YaHei",sans-serif;font-size:12px;color:#333;padding:18px}
         h2{text-align:center;font-size:17px;margin:0 0 4px}
@@ -66,7 +66,7 @@ const StatementPage = {
         .r{text-align:right}.sum{margin-top:10px;text-align:right;font-size:13px}
       </style></head><body>
       <h2>${isAr ? '客户对账单' : '供应商对账单'}</h2>
-      <div class="sub">${d.partner.name} ｜ 期间 ${d.from} 至 ${d.to}</div>
+      <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${d.from} 至 ${d.to}</div>
       <table><thead><tr><th>日期</th><th>单据号</th><th>类型</th><th class="r">${isAr ? '应收' : '应付'}</th>
       <th class="r">${isAr ? '收款' : '付款'}</th><th class="r">余额</th><th>备注</th></tr></thead>
       <tbody>

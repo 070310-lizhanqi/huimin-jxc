@@ -103,15 +103,17 @@ async function call(method, path, body) {
   ];
   const created = {};
   for (const t of TYPES) {
+    const toWh = t.needs.includes('toWarehouse') ? (await ensure('warehouse', (x) => x.name === '回归仓库2', { name: '回归仓库2' })).id : null;
     const doc = {
       teamId: TEAM, type: t.type, date: '2026-10-17',
       warehouseId: t.needs.includes('warehouse') || t.needs.includes('toWarehouse') ? wh.id : null,
-      toWarehouseId: t.needs.includes('toWarehouse') ? (await ensure('warehouse', (x) => x.name === '回归仓库2', { name: '回归仓库2' })).id : null,
       partnerType: t.needs.includes('partner') ? (t.sign > 0 ? 'ven' : 'cus') : null,
       partnerId: t.needs.includes('partner') ? (t.sign > 0 ? ven.id : cus.id) : null,
       clerkId: clerk.id,
       remark: `回归-${t.type}`,
-      items: [{ productId: prod.id, qty: 10, price: 100, remark: '回归明细' }],
+      // 调往仓库是行级字段（与前端 13-doc.js 一致）：单据头没有 toWarehouseId 列，
+      // 旧行写法把它放在头部会被静默忽略，变成「源仓调源仓」的无效调拨
+      items: [{ productId: prod.id, qty: 10, price: 100, toWarehouseId: toWh, remark: '回归明细' }],
     };
     const r = await call('POST', '/doc/create', doc);
     ok(`create ${t.type}`, r.status === 200 && r.json && r.json.id, r.json && r.json.error ? r.json.error : '');

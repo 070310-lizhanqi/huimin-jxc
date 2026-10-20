@@ -83,73 +83,90 @@ const exists = (sql: string, ...args: Array<string | number>): boolean =>
 mountCrud(api, db, {
   table: 'cat',
   fields: ['parentId', 'name'],
-  deleteGuard: (d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM cat WHERE parentId = ?`, id)
-      ? '分类下还有子分类，不能删除'
-      : exists(`SELECT COUNT(*) AS c FROM product WHERE catId = ?`, id)
-        ? '分类下还有商品，不能删除'
-        : null,
+  deleteGuard: (d, id, teamId) => {
+    // 子分类/商品引用检查限定本团队：跨团队 id 不构成删除障碍
+    if (exists(`SELECT COUNT(*) AS c FROM cat WHERE parentId = ? AND teamId = ?`, id, teamId)) return '分类下还有子分类，不能删除';
+    if (exists(`SELECT COUNT(*) AS c FROM product WHERE catId = ? AND teamId = ?`, id, teamId)) return '分类下还有商品，不能删除';
+    return null;
+  },
+  // 新建/改分类时校验父分类归属本团队（防把分类挂到别的团队的分类树下）
+  validate: (body) => {
+    const parentId = Number(body.parentId);
+    if (parentId) {
+      const p = db.prepare(`SELECT id FROM cat WHERE id = ? AND teamId = ?`).get(parentId, Number(body.teamId)) as
+        | { id: number }
+        | undefined;
+      if (!p) return '父分类不存在';
+    }
+    return null;
+  },
 });
 mountCrud(api, db, {
   table: 'product',
   fields: ['catId', 'name', 'barcode', 'unit', 'spec', 'salePrice', 'retailPrice', 'purchasePrice', 'wholePrice', 'lowQty', 'remark', 'archived'],
-  deleteGuard: (_d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM doc_item WHERE productId = ?`, id)
-      ? '商品已被单据引用，不能删除'
-      : exists(`SELECT COUNT(*) AS c FROM stock WHERE productId = ? AND qty != 0`, id)
-        ? '商品还有库存，不能删除'
-        : null,
+  deleteGuard: (d, id, teamId) => {
+    if (exists(`SELECT COUNT(*) AS c FROM doc_item i JOIN doc x ON x.id = i.docId WHERE i.productId = ? AND x.teamId = ?`, id, teamId)) return '商品已被单据引用，不能删除';
+    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE productId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '商品还有库存，不能删除';
+    return null;
+  },
 });
 mountCrud(api, db, {
   table: 'warehouse',
   fields: ['name', 'remark'],
-  deleteGuard: (_d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM reservoir WHERE warehouseId = ?`, id)
-      ? '仓库下还有库位，不能删除'
-      : exists(`SELECT COUNT(*) AS c FROM stock WHERE warehouseId = ? AND qty != 0`, id)
-        ? '仓库还有库存，不能删除'
-        : null,
+  deleteGuard: (d, id, teamId) => {
+    if (exists(`SELECT COUNT(*) AS c FROM reservoir WHERE warehouseId = ? AND teamId = ?`, id, teamId)) return '仓库下还有库位，不能删除';
+    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE warehouseId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '仓库还有库存，不能删除';
+    // 单据引用（含调拨目标仓）：被引用的仓库删除会让历史单据仓库名悬空
+    if (exists(`SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND status != 'void' AND (warehouseId = ? OR warehouseId IS NULL) AND EXISTS (SELECT 1 FROM doc_item WHERE docId = doc.id AND toWarehouseId = ?)`, teamId, id, id)) return '仓库已被调拨单引用，不能删除';
+    if (exists(`SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND warehouseId = ? AND status != 'void'`, teamId, id)) return '仓库已被单据引用，不能删除';
+    return null;
+  },
 });
 mountCrud(api, db, {
   table: 'reservoir',
   fields: ['warehouseId', 'name'],
-  deleteGuard: (_d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM stock WHERE reservoirId = ? AND qty != 0`, id)
-      ? '库位还有库存，不能删除'
-      : null,
+  deleteGuard: (d, id, teamId) => {
+    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE reservoirId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '库位还有库存，不能删除';
+    return null;
+  },
 });
-const partnerGuard = (ptype: 'cus' | 'ven', label: string) => (_d: unknown, id: number): string | null =>
-  exists(
-    `SELECT COUNT(*) AS c FROM doc WHERE partnerType = ? AND partnerId = ? AND status != 'void'`,
+const partnerGuard = (ptype: 'cus' | 'ven', label: string) => (_d: unknown, id: number, teamId: number): string | null => {
+  if (exists(
+    `SELECT COUNT(*) AS c FROM doc WHERE partnerType = ? AND partnerId = ? AND teamId = ? AND status != 'void'`,
     ptype,
     id,
-  )
-    ? `${label}已被单据引用，不能删除`
-    : exists(`SELECT COUNT(*) AS c FROM settlement WHERE partnerType = ? AND partnerId = ?`, ptype, id)
-      ? `${label}已有收付款记录，不能删除`
-      : null;
+    teamId,
+  )) return `${label}已被单据引用，不能删除`;
+  if (exists(
+    `SELECT COUNT(*) AS c FROM settlement WHERE partnerType = ? AND partnerId = ? AND teamId = ?`,
+    ptype,
+    id,
+    teamId,
+  )) return `${label}已有收付款记录，不能删除`;
+  return null;
+};
 mountCrud(api, db, { table: 'customer', fields: ['name', 'mobile', 'address', 'remark', 'priceLevel'], deleteGuard: partnerGuard('cus', '客户') });
 mountCrud(api, db, { table: 'vendor', fields: ['name', 'mobile', 'address', 'remark'], deleteGuard: partnerGuard('ven', '供应商') });
 mountCrud(api, db, {
   table: 'clerk',
   fields: ['name', 'mobile'],
-  deleteGuard: (_d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM doc WHERE clerkId = ?`, id) ? '业务员已被单据引用，不能删除' : null,
+  deleteGuard: (d, id, teamId) =>
+    exists(`SELECT COUNT(*) AS c FROM doc WHERE clerkId = ? AND teamId = ?`, id, teamId) ? '业务员已被单据引用，不能删除' : null,
 });
 mountCrud(api, db, {
   table: 'account',
   fields: ['name', 'type', 'balance'],
   // 期初余额仅创建时可设；余额只能由收付款/单据结算变动，防止任意登录用户直接篡改资金
   createOnlyFields: ['balance'],
-  deleteGuard: (_d, id) =>
-    exists(`SELECT COUNT(*) AS c FROM settlement WHERE accountId = ?`, id) ? '账户已被收付款引用，不能删除' : null,
+  deleteGuard: (d, id, teamId) =>
+    exists(`SELECT COUNT(*) AS c FROM settlement WHERE accountId = ? AND teamId = ?`, id, teamId) ? '账户已被收付款引用，不能删除' : null,
 });
 // 商品单位档案
 mountCrud(api, db, {
   table: 'unit',
   fields: ['name', 'remark'],
-  deleteGuard: (d, id) => {
-    const row = d.prepare(`SELECT name, teamId FROM unit WHERE id = ?`).get(id) as
+  deleteGuard: (d, id, teamId) => {
+    const row = d.prepare(`SELECT name, teamId FROM unit WHERE id = ? AND teamId = ?`).get(id, teamId) as
       { name: string; teamId: number } | undefined;
     if (!row) return null;
     return exists(`SELECT COUNT(*) AS c FROM product WHERE teamId = ? AND unit = ?`, row.teamId, row.name)
@@ -195,7 +212,9 @@ api.post('/product/import', (req, res) => {
     `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  db.exec('BEGIN');
+  // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+  // BEGIN IMMEDIATE：批量导入立刻取写锁，避免与其它写事务交叉时 SQLITE_BUSY
+  db.exec('BEGIN IMMEDIATE');
   try {
     for (const [idx, r] of rows.entries()) {
       const rowNo = idx + 1;
@@ -273,6 +292,11 @@ api.get('/team/list', (req, res) => {
 
 app.use('/api', api);
 
+// API 未匹配路由统一返回 JSON 404（否则落到静态兜底会返回 index.html）
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: '接口不存在' });
+});
+
 // 静态前端（web 目录）；vendor 前端库内容恒定，缓存 7 天减少重复下载
 import path from 'node:path';
 import fs from 'node:fs';
@@ -285,6 +309,18 @@ app.use(express.static(WEB_ROOT));
 // 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', '..', 'web', 'index.html'));
+});
+
+// 全局错误处理：任何路由抛出的异常统一返回 JSON，避免 Express 默认 HTML 错误页
+// 破坏前端 {error} 约定（同步 throw 由 Express 自动转入此中间件）
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // headersSent 防止响应已开始后再写头导致崩溃
+  if (res.headersSent) {
+    _next(err);
+    return;
+  }
+  console.error('[api-error]', err);
+  res.status(500).json({ error: err.message || '服务器内部错误' });
 });
 
 app.listen(PORT, () => {

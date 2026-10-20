@@ -12,7 +12,8 @@ const PartnerPage = {
     const list = computed(() => {
       const src = tab.value === 'cus' ? store.customers : store.vendors;
       const k = kw.value.trim();
-      return k ? src.filter(x => x.name.includes(k)) : src;
+      // name 可能为 null（后端 CRUD 不强制非空）：includes 前先兜底
+      return k ? src.filter(x => String(x.name || '').includes(k) || String(x.mobile || '').includes(k)) : src;
     });
 
     function openNew() {
@@ -29,10 +30,15 @@ const PartnerPage = {
         : { name: p.name, mobile: p.mobile || '', address: p.address || '', remark: p.remark || '' };
       editor.open = true;
     }
+    const busy = ref(false);
+    const busyDel = ref(0);
     async function save() {
+      // 防双击：CRUD 无去重，重复提交会建出重复档案
+      if (busy.value) return;
       if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
       const table = tab.value === 'cus' ? 'customer' : 'vendor';
       const body = { teamId: store.teamId, ...editor.form };
+      busy.value = true;
       try {
         if (editor.id) await api.put(`/${table}/${editor.id}`, body);
         else await api.post(`/${table}`, body);
@@ -40,16 +46,20 @@ const PartnerPage = {
         toast('已保存');
         await loadBase();
       } catch (e) { toast(e.message, 'error'); }
+      finally { busy.value = false; }
     }
     async function del(p) {
+      if (busyDel.value) return;
       if (!(await confirmBox(`删除「${p.name}」？被单据或收付款引用的将被拒绝。`))) return;
       const table = tab.value === 'cus' ? 'customer' : 'vendor';
+      busyDel.value = p.id;
       try { await api.del(`/${table}/${p.id}`, { teamId: store.teamId }); toast('已删除'); await loadBase(); }
       catch (e) { toast(e.message, 'error'); }
+      finally { busyDel.value = 0; }
     }
     const LEVEL = { salePrice: '标准售价', wholePrice: '批发价', retailPrice: '零售价' };
     function reload() { return loadBase(); }
-    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, store, LEVEL, reload };
+    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, reload };
   },
   template: `
   <div>
@@ -64,7 +74,7 @@ const PartnerPage = {
           <button class="btn sm" :class="{primary: tab==='cus'}" @click="tab='cus'; kw=''">客户</button>
           <button class="btn sm" :class="{primary: tab==='ven'}" @click="tab='ven'; kw=''">供应商</button>
         </span>
-        <input class="finp w-key" v-model="kw" placeholder="名称 / 手机" @keyup.enter="reload"/>
+        <input class="finp w-key" v-model="kw" placeholder="名称 / 手机">
         <button class="btn" @click="reload">查询</button>
         <span class="fb-gap"></span>
         <span class="muted">共 {{ list.length }} 条</span>
@@ -81,7 +91,7 @@ const PartnerPage = {
             <td class="muted">{{ p.remark || '—' }}</td>
             <td>
               <button class="btn sm" @click="openEdit(p)">编辑</button>
-              <button class="btn sm danger" style="margin-left:6px" @click="del(p)">删除</button>
+              <button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === p.id" @click="del(p)">删除</button>
             </td>
           </tr>
         </tbody>
@@ -106,12 +116,11 @@ const PartnerPage = {
         </div>
         <div class="modal-foot">
           <button class="btn" @click="editor.open = false">取消</button>
-          <button class="btn primary" @click="save">保存</button>
+          <button class="btn primary" :disabled="busy" @click="save">{{ busy ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>
 
-    <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
   </div>`,
 };
 

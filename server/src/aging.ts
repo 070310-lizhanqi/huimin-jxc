@@ -114,22 +114,36 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       totalAmount: number;
     }>;
 
-    // 2) 取各往来单位的已结算总额
+    // 2) 取各往来单位的已结算总额（partnerType 必须一致：customer/vendor 自增 id 可能撞号，
+    //    不加过滤会把供应商的付款算到同号客户的应收上）
     const settles = db
       .prepare(
         `SELECT partnerId, SUM(amount) AS amt FROM settlement
-         WHERE teamId = ? AND type = ? GROUP BY partnerId`,
+         WHERE teamId = ? AND type = ? AND partnerType = ? GROUP BY partnerId`,
       )
-      .all(teamId, settleType) as Array<{ partnerId: number; amt: number }>;
+      .all(teamId, settleType, partnerType) as Array<{ partnerId: number; amt: number }>;
     const settleMap = new Map<number, number>(settles.map((s) => [s.partnerId, s.amt]));
 
     // 3) 按往来单位分组 → FIFO 分摊 → 按账龄分桶
+    //    订金（deposit）在审核时已冲减往来但不生成 settlement，这里把它并进已结额，
+    //    否则账龄会把订金抵掉的部分仍计为未结，虚高欠款。
     const byPartner = new Map<number, OpenDoc[]>();
+    const depByPartner = new Map<number, number>();
     for (const d of docs) {
       const list = byPartner.get(d.partnerId) ?? [];
       list.push({ id: d.id, partnerId: d.partnerId, date: d.date, amount: d.totalAmount * signOf(d.type) });
       byPartner.set(d.partnerId, list);
     }
+    const depRows = db
+      .prepare(
+        `SELECT partnerId, COALESCE(SUM(CASE WHEN type = 'sret' THEN -deposit WHEN type = 'pin' THEN -deposit ELSE deposit END), 0) AS amt
+         FROM doc
+         WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
+           AND partnerId IS NOT NULL AND deposit > 0
+         GROUP BY partnerId`,
+      )
+      .all(teamId) as Array<{ partnerId: number; amt: number }>;
+    for (const r of depRows) depByPartner.set(r.partnerId, r.amt);
 
     const names = new Map<number, string>();
     if (byPartner.size > 0) {
@@ -147,7 +161,7 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     };
 
     for (const [partnerId, list] of byPartner) {
-      const alloc = allocate(list, settleMap.get(partnerId) ?? 0);
+      const alloc = allocate(list, (settleMap.get(partnerId) ?? 0) + (depByPartner.get(partnerId) ?? 0));
       const row: AgingBucketRow = {
         partnerId,
         partnerName: names.get(partnerId) ?? `#${partnerId}`,

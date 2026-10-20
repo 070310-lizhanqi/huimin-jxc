@@ -29,7 +29,7 @@ const PricePage = {
     }
 
     async function save() {
-      const cents = Math.round(Number(editor.price) * 100);
+      const cents = toCents(editor.price);
       if (!(cents >= 0)) return toast('价格不能为负', 'error');
       try {
         await api.post('/price/set', {
@@ -287,7 +287,8 @@ const SettingsPage = {
       if (pwdForm.newPassword !== pwdForm.newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
       userBusy.value = true;
       try {
-        await api.post('/auth/password', { oldPassword: pwdForm.oldPassword, newPassword: pwdForm.newPassword });
+        const r = await api.post('/auth/password', { oldPassword: pwdForm.oldPassword, newPassword: pwdForm.newPassword });
+        if (r && r.token) setToken(r.token); // 改密会吊销旧令牌，接住服务端为当前会话重签的新令牌
         toast('密码已修改');
         pwdDialog.value = false;
       } catch (e) { toast(e.message, 'error'); }

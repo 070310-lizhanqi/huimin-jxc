@@ -66,11 +66,12 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       retQty: number;
     };
 
-    // 收款
+    // 收款（只统计客户收款：供应商退款也是 receipt 类型，混入会虚增收款 KPI）
     const receipt = db
       .prepare(
         `SELECT COALESCE(SUM(amount), 0) AS amt, COUNT(*) AS cnt
-         FROM settlement WHERE teamId = ? AND type = 'receipt' AND date >= ? AND date <= ?`,
+         FROM settlement WHERE teamId = ? AND type = 'receipt' AND partnerType = 'cus'
+           AND date >= ? AND date <= ?`,
       )
       .get(teamId, from, to) as { amt: number; cnt: number };
 
@@ -164,13 +165,15 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
 
     if (dimension === 'receipt') {
       // 收款排行：按业务员不可得（收款单无业务员），按客户归组
+      // （限定 partnerType='cus'：供应商退款是 receipt+ven，LEFT JOIN customer 会错挂客户名上榜）
       const rows = db
         .prepare(
           `SELECT s.partnerId AS key, COALESCE(c.name, '未指定客户') AS name,
                   SUM(s.amount) AS amount, 0 AS qty, COUNT(*) AS count
            FROM settlement s
            LEFT JOIN customer c ON c.id = s.partnerId AND c.teamId = s.teamId
-           WHERE s.teamId = ? AND s.type = 'receipt' AND s.date >= ? AND s.date <= ?
+           WHERE s.teamId = ? AND s.type = 'receipt' AND s.partnerType = 'cus'
+             AND s.date >= ? AND s.date <= ?
            GROUP BY s.partnerId ORDER BY amount DESC LIMIT ?`,
         )
         .all(teamId, from, to, limit) as unknown as RankRow[];
@@ -205,7 +208,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       const rows = db
         .prepare(
           `SELECT d.clerkId AS key, COALESCE(k.name, '未指定业务员') AS name,
-                  SUM(d.totalAmount) AS amount,
+                  SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
                   SUM(CASE WHEN d.type = 'sret' THEN -d.totalQty ELSE d.totalQty END) AS qty,
                   COUNT(*) AS count
            FROM doc d LEFT JOIN clerk k ON k.id = d.clerkId AND k.teamId = d.teamId
@@ -222,7 +225,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     const rows = db
       .prepare(
         `SELECT d.partnerId AS key, COALESCE(c.name, '未指定客户') AS name,
-                SUM(d.totalAmount) AS amount,
+                SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalQty ELSE d.totalQty END) AS qty,
                 COUNT(*) AS count
          FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId

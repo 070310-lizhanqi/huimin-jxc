@@ -35,7 +35,8 @@ const DashboardPage = {
     const RANK_CARDS = [
       { k: 'order', label: '销售订单排行', dims: DIM_ALL, more: '#/doc/sale?type=sorder', emptyText: '本月还没有销售订单' },
       { k: 'out', label: '销售出库排行', dims: DIM_ALL, more: '#/doc/sale?type=stockout', emptyText: '本月还没有销售出库' },
-      { k: 'receipt', label: '销售收款排行', dims: [{ k: 'cus', label: '客户' }, { k: 'clerk', label: '业务员' }], more: '#/finance', emptyText: '本月还没有收款记录' },
+      // 收款排行只有「客户」维度：收款单无业务员，后端 receipt 维度强制按客户聚合
+      { k: 'receipt', label: '销售收款排行', dims: [{ k: 'cus', label: '客户' }], more: '#/finance', emptyText: '本月还没有收款记录' },
     ];
     const rankRange = ref('month');
     const rankData = reactive({ order: [], out: [], receipt: [] });
@@ -294,7 +295,13 @@ const DashboardPage = {
       await nextTick();
       const el = document.getElementById('rank-' + kind);
       if (el) {
-        echarts.getInstanceByDom(el)?.dispose();
+        // dispose 后从 charts 数组移除旧实例：onResize 对已 disposed 实例 resize() 会报警告
+        const inst = echarts.getInstanceByDom(el);
+        if (inst) {
+          const i = charts.indexOf(inst);
+          if (i >= 0) charts.splice(i, 1);
+          inst.dispose();
+        }
         barRank(el, rows, '元');
       }
     }

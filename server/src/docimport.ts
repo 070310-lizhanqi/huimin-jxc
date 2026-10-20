@@ -17,6 +17,7 @@ import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
 import { localDate } from './db';
+import { loadNoMode, loadPrefix } from './settings';
 import type { SheetData } from './xlsxlite';
 
 /** 与 docs.ts 的上限保持一致 */
@@ -364,6 +365,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       const bills: BillOut[] = [];
       const skipped: SkippedBill[] = [];
       const created: CreatedDoc[] = [];
+      // 自动建档的孤儿追踪：落库失败 ROLLBACK 后，事务外已插入的 customer/vendor/product 需要一并清理
+      const pendingPartnerCreates: Array<{ table: string; id: number | null }> = [];
+      const pendingProductCreates: number[] = [];
 
       for (const key of order) {
         const rowsIn = groups.get(key)!;
@@ -426,6 +430,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           });
           continue;
         }
+        // 供应商/客户建档若发生在落库事务之前、后续落库失败，会残留孤儿档案——
+        // 收集本单自动建档的 id，落库失败 ROLLBACK 后一并清理。
+        pendingPartnerCreates.push({ table: isCus ? 'customer' : 'vendor', id: partnerId });
 
         // 仓库：列值匹配 > 第一个仓库
         let warehouseId: number | null = null;
@@ -485,6 +492,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
                 name: pr.productName,
                 barcode: pr.barcode || null,
               });
+              // 商品建档同样可能成孤儿，收集之（失败时清理）
+              pendingProductCreates.push(productId);
               itemWarning = `商品「${pr.productName}」不存在，已自动建档`;
             } else if (autoCreate && dryRun) {
               itemWarning = `商品「${pr.productName}」不存在，导入时将自动建档`;
@@ -544,7 +553,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         const insItem = db.prepare(
           `INSERT INTO doc_item (docId, productId, qty, price, amount, remark) VALUES (?, ?, ?, ?, ?, ?)`,
         );
-        db.exec('BEGIN');
+        // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+        // BEGIN IMMEDIATE：批量导入立刻取写锁，避免与其它写事务交叉时 SQLITE_BUSY
+        db.exec('BEGIN IMMEDIATE');
         try {
           for (const b of bills) {
             const ext = b as BillOut & { clerkId?: number | null; remarks?: string };
@@ -576,6 +587,18 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           db.exec('COMMIT');
         } catch (e) {
           db.exec('ROLLBACK');
+          // 落库失败：事务外的自动建档已成孤儿，按「无单据引用」清理（doc 未生成，id 安全）
+          for (const p of pendingPartnerCreates) {
+            if (p.id == null) continue;
+            try {
+              db.prepare(`DELETE FROM ${p.table} WHERE id = ? AND remark = 'Excel导入自动建档'`).run(p.id);
+            } catch { /* 清理失败不掩盖原始错误 */ }
+          }
+          for (const pid of pendingProductCreates) {
+            try {
+              db.prepare(`DELETE FROM product WHERE id = ? AND remark = 'Excel导入自动建档'`).run(pid);
+            } catch { /* 同上 */ }
+          }
           return res.status(500).json({ error: `导入失败：${(e as Error).message}` });
         }
       }
@@ -613,8 +636,12 @@ function nextBillNoForImport(db: DatabaseSync, teamId: number, type: string): st
     porder: 'CG', sorder: 'XS', pin: 'CT', sret: 'XT', otherin: 'QR', otherout: 'QC',
     assembly: 'ZZ', stockinit: 'QCQ', quo: 'BJ', outapply: 'SQ', prodtask: 'SC',
   };
-  const prefix = PREFIX[type] ?? 'NO';
-  const datePart = localDate().replace(/-/g, '');
+  // 与 docs.ts nextBillNo 一致：优先读 team 级单号配置（前缀 + 重置方式）
+  const custom = loadPrefix(db, teamId);
+  const prefix = custom[type] ?? PREFIX[type] ?? 'NO';
+  const mode = loadNoMode(db, teamId);
+  const full = localDate().replace(/-/g, '');
+  const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
   const key = `${teamId}:${prefix}:${datePart}`;
   db.prepare(
     `INSERT INTO bill_seq (k, seq) VALUES (?, 1)

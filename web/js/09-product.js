@@ -12,15 +12,19 @@ const ProductPage = {
       loading.value = true;
       try {
         list.value = await api.get('/product', { teamId: store.teamId, kw: kw.value });
+      } catch (e) {
+        toast('商品列表加载失败：' + e.message, 'error');
       } finally {
         loading.value = false;
       }
     }
     onMounted(load);
+    const busy = ref(false);
+    const busyDel = ref(0);
 
     function openNew() {
       editor.id = null;
-      editor.form = { name: '', barcode: '', unit: '件', spec: '', catId: null, salePrice: 0, retailPrice: 0, purchasePrice: 0, lowQty: 0, remark: '' };
+      editor.form = { name: '', barcode: '', unit: '件', spec: '', catId: null, salePrice: 0, retailPrice: 0, wholePrice: 0, purchasePrice: 0, lowQty: 0, remark: '' };
       editor.open = true;
     }
     function openEdit(p) {
@@ -28,22 +32,27 @@ const ProductPage = {
       editor.form = {
         name: p.name, barcode: p.barcode || '', unit: p.unit || '件', spec: p.spec || '',
         catId: p.catId, salePrice: (p.salePrice || 0) / 100, retailPrice: (p.retailPrice || 0) / 100,
-        purchasePrice: (p.purchasePrice || 0) / 100, lowQty: p.lowQty ?? 0, remark: p.remark || '',
+        wholePrice: (p.wholePrice || 0) / 100, purchasePrice: (p.purchasePrice || 0) / 100,
+        lowQty: p.lowQty ?? 0, remark: p.remark || '',
       };
       editor.open = true;
     }
     async function save() {
+      // 防双击：商品 CRUD 无去重，重复提交会建出重复档案
+      if (busy.value) return;
       const f = editor.form;
       if (!String(f.name || '').trim()) return toast('请输入商品名称', 'error');
       const body = {
         teamId: store.teamId, name: f.name, barcode: f.barcode, unit: f.unit, spec: f.spec,
         catId: f.catId || null,
-        salePrice: Math.round(Number(f.salePrice) * 100) || 0,
-        retailPrice: Math.round(Number(f.retailPrice) * 100) || 0,
-        purchasePrice: Math.round(Number(f.purchasePrice) * 100) || 0,
+        salePrice: toCents(f.salePrice) || 0,
+        retailPrice: toCents(f.retailPrice) || 0,
+        wholePrice: toCents(f.wholePrice) || 0,
+        purchasePrice: toCents(f.purchasePrice) || 0,
         lowQty: Number(f.lowQty) || 0,
         remark: f.remark,
       };
+      busy.value = true;
       try {
         if (editor.id) await api.put(`/product/${editor.id}`, body);
         else await api.post('/product', body);
@@ -52,11 +61,15 @@ const ProductPage = {
         await loadBase();
         load();
       } catch (e) { toast(e.message, 'error'); }
+      finally { busy.value = false; }
     }
     async function del(p) {
+      if (busyDel.value) return;
       if (!(await confirmBox(`删除商品「${p.name}」？被单据引用或仍有库存的商品将被拒绝。`))) return;
+      busyDel.value = p.id;
       try { await api.del(`/product/${p.id}`, { teamId: store.teamId }); toast('已删除'); await loadBase(); load(); }
       catch (e) { toast(e.message, 'error'); }
+      finally { busyDel.value = 0; }
     }
 
     /* ---- 批量导入 ---- */
@@ -95,7 +108,7 @@ const ProductPage = {
       return Array.from(new Set([...fromStore, ...builtin]));
     });
 
-    return { kw, list, loading, editor, load, openNew, openEdit, save, del, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, doImport, unitOpts };
+    return { kw, list, loading, editor, load, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, doImport, unitOpts };
   },
   template: `
   <div>
@@ -103,7 +116,7 @@ const ProductPage = {
       <div class="page-head">
         <span class="hd-title">商品</span>
         <span class="hd-sp"></span>
-        <button class="btn" @click="exportCsv('商品列表.csv', list, [
+        <button class="btn" @click="exportCsv('商品列表.csv', list.map(p => ({ ...p, purchasePrice: (p.purchasePrice || 0) / 100, salePrice: (p.salePrice || 0) / 100 })), [
           { key: 'name', label: '名称' }, { key: 'spec', label: '规格' },
           { key: 'barcode', label: '条码' }, { key: 'unit', label: '单位' },
           { key: 'purchasePrice', label: '进价(元)' }, { key: 'salePrice', label: '售价(元)' },
@@ -137,7 +150,7 @@ const ProductPage = {
             <td class="muted">{{ p.remark || '—' }}</td>
             <td>
               <button class="btn sm" @click="openEdit(p)">编辑</button>
-              <button class="btn sm danger" style="margin-left:6px" @click="del(p)">删除</button>
+              <button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === p.id" @click="del(p)">删除</button>
             </td>
           </tr>
         </tbody>
@@ -170,7 +183,7 @@ const ProductPage = {
         </div>
         <div class="modal-foot">
           <button class="btn" @click="editor.open = false">取消</button>
-          <button class="btn primary" @click="save">保存</button>
+          <button class="btn primary" :disabled="busy" @click="save">{{ busy ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>

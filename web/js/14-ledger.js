@@ -13,6 +13,8 @@ const LedgerPage = {
       loading.value = true;
       try {
         list.value = await api.get('/stock/ledger', { teamId: store.teamId, productId: productId.value });
+      } catch (e) {
+        toast('库存流水加载失败：' + e.message, 'error');
       } finally {
         loading.value = false;
       }
@@ -33,7 +35,7 @@ const LedgerPage = {
         </el-select></div>
         <button class="btn" @click="load">查询</button>
         <span class="fb-gap"></span>
-        <span class="muted">共 {{ list.length }} 条</span>
+        <span class="muted">共 {{ list.length }} 条<template v-if="list.length >= 200">（仅显示最近 200 条）</template></span>
       </div>
       <div class="tbl-wrap">
         <sk-table v-if="loading && !list.length" :rows="8" :cols="8"/>

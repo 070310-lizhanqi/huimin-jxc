@@ -15,6 +15,8 @@ function logout() {
   auth.user = null; auth.team = null;
   store.loaded = false;
   store.teamId = null; store.team = null; store.teams = [];
+  // 打印抬头重置：换账号后新账套未设置打印时，不能沿用上一账号的抬头
+  store.print = { company: '', address: '', phone: '', footer: '', showLogo: true };
   location.hash = '#/login';
 }
 
