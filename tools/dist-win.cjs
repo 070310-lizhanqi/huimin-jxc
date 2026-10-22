@@ -98,10 +98,36 @@ fs.writeFileSync(
 );
 
 console.log('========== 5/5 产物自检 + 编译安装包 ==========');
+/** 等待子进程真正退出（Windows 上 kill 后句柄释放有延迟，立即删目录会 EPERM） */
+function waitExit(child, ms = 5000) {
+  return new Promise((resolve) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return resolve();
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } resolve(); }, ms);
+    child.once('exit', () => { clearTimeout(t); resolve(); });
+  });
+}
+
+/** 尽力删除临时目录：Windows 上文件句柄释放有延迟，重试几次；仍失败则告警不阻断 */
+function rmTempBestEffort(dir) {
+  for (let i = 0; i < 5; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      return true;
+    } catch {
+      // 同步等待一点再试
+      const until = Date.now() + 300;
+      while (Date.now() < until) { /* busy wait，避免引入 async */ }
+    }
+  }
+  console.warn(`[dist:win] 临时目录未能删除（不阻断交付）：${dir}`);
+  return false;
+}
+
 // 自检：把 payload 复制到临时隔离目录（模拟用户机器，杜绝向上解析到仓库 node_modules），
 // 独立起服务并探测 /api/auth/status —— 这一步能挡住「产物缺依赖却交付」这类错误。
 async function selfCheck() {
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'orange-dist-check-'));
+  let child = null;
   try {
     cpDir(PAYLOAD, tmp);
     const checkPort = 7841;
@@ -109,7 +135,7 @@ async function selfCheck() {
     const nodeExe = fs.existsSync(path.join(tmp, 'node', 'node.exe'))
       ? path.join(tmp, 'node', 'node.exe')
       : process.execPath;
-    const child = require('node:child_process').spawn(nodeExe, [path.join(tmp, 'dist', 'server', 'index.js')], {
+    child = require('node:child_process').spawn(nodeExe, [path.join(tmp, 'dist', 'server', 'index.js')], {
       cwd: tmp,
       env: { ...process.env, ORANGE_DATA_DIR: checkData, PORT: String(checkPort) },
       stdio: 'ignore',
@@ -131,6 +157,9 @@ async function selfCheck() {
       await new Promise((r) => setTimeout(r, 500));
     }
     try { child.kill(); } catch { /* ignore */ }
+    // 等子进程真正退出再删目录：否则 Windows 上句柄未释放，rmSync 会 EPERM
+    await waitExit(child);
+    child = null;
     if (!ok) {
       console.error('[dist:win] ❌ 产物自检失败：隔离目录中的服务未能启动（缺依赖/入口错误）。');
       console.error('           已阻止交付。请检查上面的 payload 组装与依赖安装步骤。');
@@ -138,7 +167,8 @@ async function selfCheck() {
     }
     console.log('[自检] ✅ 产物在隔离目录中可独立启动并响应 /api/auth/status');
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    if (child) await waitExit(child);
+    rmTempBestEffort(tmp);
   }
 }
 
@@ -158,5 +188,111 @@ async function selfCheck() {
     process.exit(0);
   }
   run(iscc, [path.join(ROOT, 'installer', 'orange-jxc.iss')]);
+
+  // ---------- 出包后冒烟：把 Setup.exe 静默装到临时目录，再从安装产物起服务 ----------
+  // 这一步专门堵住「Inno 脚本引用错文件」这类只在安装后才暴露的打包层错误——
+  // payload 自检通过 ≠ 安装包里装出来的东西是对的（少拷一个目录/漏注册入口都只有装机才知道）。
+  await packageSmoke(pkg.version);
+
   console.log('[dist:win] 完成：installer/out/ 与 installer/payload/（便携版）');
+  maybeUploadRelease(pkg.version);
 })();
+
+/**
+ * 安装包冒烟：ISCC 出包后，用 /VERYSILENT 装到临时目录并独立起服务探测。
+ * 探测成功后立即静默卸载并清理临时目录。找不到 Setup.exe 时跳过（不阻断交付）。
+ */
+async function packageSmoke(version) {
+  const setup = path.join(ROOT, 'installer', 'out', `橙子进销存-Setup-${version}.exe`);
+  if (!fs.existsSync(setup)) {
+    console.warn(`[冒烟] 未找到安装产物 ${setup}，跳过安装后冒烟。`);
+    return;
+  }
+  const tmpDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'orange-install-smoke-'));
+  const checkPort = 7851;
+  try {
+    console.log('========== 冒烟：静默安装到临时目录并启动服务 ==========');
+    // /DIR 指定安装位置；/VERYSILENT 无界面；不建快捷方式（避免污染用户桌面）
+    const inst = spawnSync(setup, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', `/DIR=${tmpDir}`,
+      '/MERGETASKS=!desktopicon'], { stdio: 'inherit', shell: false });
+    if (inst.status !== 0) {
+      fail(`安装包静默安装失败（exit ${inst.status}）`, '安装包 Inno 脚本可能在装机阶段出错。');
+    }
+    // 安装产物应含服务入口与运行时
+    const entry = path.join(tmpDir, 'dist', 'server', 'index.js');
+    if (!fs.existsSync(entry)) fail(`安装目录缺少服务入口 ${entry}`, '安装脚本漏拷 dist/ 或路径写错。');
+    const nodeExe = fs.existsSync(path.join(tmpDir, 'node', 'node.exe'))
+      ? path.join(tmpDir, 'node', 'node.exe')
+      : process.execPath;
+    const dataDir2 = path.join(tmpDir, 'smoke-data');
+    const child = require('node:child_process').spawn(nodeExe, [entry], {
+      cwd: tmpDir,
+      env: { ...process.env, ORANGE_DATA_DIR: dataDir2, PORT: String(checkPort) },
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    const probeOnce = () => new Promise((resolve) => {
+      const req = require('node:http').get(
+        { host: '127.0.0.1', port: checkPort, path: '/api/auth/status', timeout: 1500 },
+        (res) => { res.resume(); resolve(res.statusCode < 500); },
+      );
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+    });
+    let up = false;
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      if (await probeOnce()) { up = true; break; }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    try { child.kill(); } catch { /* ignore */ }
+    await waitExit(child);
+    if (!up) {
+      fail('安装产物中的服务未能启动', '安装后的文件布局或依赖与 payload 不一致。');
+    } else {
+      console.log('[冒烟] ✅ Setup.exe 静默安装后，安装产物可独立启动并响应 /api/auth/status');
+    }
+    // 卸载并清理临时目录
+    const uninst = path.join(tmpDir, 'unins000.exe');
+    if (fs.existsSync(uninst)) {
+      const u = spawnSync(uninst, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'], { stdio: 'ignore' });
+      void u;
+    }
+  } catch (e) {
+    console.warn('[冒烟] 安装后冒烟过程异常（不阻断交付）：' + (e && e.message));
+  } finally {
+    rmTempBestEffort(tmpDir);
+  }
+}
+
+function fail(msg, hint) {
+  console.error(`[dist:win] ❌ 安装包冒烟失败：${msg}`);
+  if (hint) console.error(`           ${hint}`);
+  process.exit(1);
+}
+
+// ---------- 可选：把 Setup.exe 传到 GitHub Release ----------
+// 仅当设置了 ORANGE_RELEASE_TAG 且本机有 gh CLI 时执行；失败只告警不阻断出包。
+function maybeUploadRelease(version) {
+  const tag = process.env.ORANGE_RELEASE_TAG;
+  if (!tag) return;
+  const setup = path.join(ROOT, 'installer', 'out', `橙子进销存-Setup-${version}.exe`);
+  if (!fs.existsSync(setup)) {
+    console.warn('[release] 未找到 Setup.exe，跳过上传。');
+    return;
+  }
+  console.log(`========== 上传 Release ${tag} ==========`);
+  // 先确保 tag 的 release 存在（不存在则创建），再上传产物
+  let r = spawnSync('gh', ['release', 'view', tag], { stdio: 'ignore', shell: process.platform === 'win32' });
+  if (r.status !== 0) {
+    r = spawnSync('gh', ['release', 'create', tag, '--title', `橙子进销存 v${version}`, '--notes', `v${version}`, '--target', 'HEAD'],
+      { stdio: 'inherit', shell: process.platform === 'win32' });
+    if (r.status !== 0) {
+      console.warn('[release] 创建 Release 失败（检查 gh 登录状态），跳过上传。');
+      return;
+    }
+  }
+  r = spawnSync('gh', ['release', 'upload', tag, setup, '--clobber'], { stdio: 'inherit', shell: process.platform === 'win32' });
+  if (r.status !== 0) console.warn('[release] 上传 Setup.exe 失败（不阻断出包）。');
+  else console.log(`[release] ✅ 已上传 ${path.basename(setup)} 到 Release ${tag}`);
+}

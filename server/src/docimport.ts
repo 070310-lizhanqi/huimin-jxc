@@ -16,7 +16,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
-import { localDate } from './db';
+import { localDate, validBizDate } from './db';
 import { loadNoMode, loadPrefix } from './settings';
 import type { SheetData } from './xlsxlite';
 
@@ -189,15 +189,17 @@ function parseDate(raw: string): string | null {
   }
   let m = s.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
   if (m) {
-    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
-      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-    }
-    return null;
+    const out = `${m[1]}-${String(Number(m[2])).padStart(2, '0')}-${String(Number(m[3])).padStart(2, '0')}`;
+    // 真实日历校验：格式对但日子不存在（如 2026-02-30）在导入阶段就要拦，
+    // 否则脏日期落库后污染账龄/报表且无法用普通查询筛出
+    return validBizDate(out) ? null : out;
   }
   // ISO 时间戳（xlsx 偶见）
   m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ]/);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  if (m) {
+    const out = `${m[1]}-${m[2]}-${m[3]}`;
+    return validBizDate(out) ? null : out;
+  }
   return null;
 }
 

@@ -5,7 +5,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
-import { localDate } from './db';
+import { localDate, validBizDate } from './db';
 
 type Value = string | number | null;
 
@@ -72,6 +72,9 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       return res.status(400).json({ error: '付款（payment）的往来单位必须是供应商' });
     if (!partnerId) return res.status(400).json({ error: '往来单位不能为空' });
     if (!(amount > 0)) return res.status(400).json({ error: '金额必须大于 0' });
+    // 日期校验：脏日期会污染账龄分桶与对账单期初，且事后无法用普通查询筛出
+    const dateErr = validBizDate(req.body.date);
+    if (dateErr) return res.status(400).json({ error: '收付款日期' + dateErr });
     const accountId = req.body.accountId ? Number(req.body.accountId) : null;
 
     // 引用完整性：往来单位必须存在于本团队
@@ -164,6 +167,9 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       ? (req.body.accountId ? Number(req.body.accountId) : null)
       : old.accountId;
     const date = String(req.body.date ?? old.date);
+    // 修改时同样校验日期：改错日期同样会污染账龄与对账单期初
+    const dateErr = validBizDate(date);
+    if (dateErr) return res.status(400).json({ error: '收付款日期' + dateErr });
     const remark = req.body.remark !== undefined ? (req.body.remark as string) : old.remark;
 
     try {

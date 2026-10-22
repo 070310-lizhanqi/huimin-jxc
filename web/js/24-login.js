@@ -56,7 +56,10 @@ const LoginPage = {
         if (mode.value === 'login') localStorage.setItem(REMEMBER_KEY, form.username.trim());
         else localStorage.removeItem(REMEMBER_KEY);
         toast(mode.value === 'login' ? '登录成功' : '账套创建成功');
-        location.hash = '#/dashboard';
+        // 会话过期被踢回登录页时，登录成功后回到原页面（否则去工作台）
+        const back = sessionStorage.getItem(RETURN_KEY);
+        sessionStorage.removeItem(RETURN_KEY);
+        location.hash = back && !back.startsWith('#/login') ? back : '#/dashboard';
       } catch (e) {
         err.value = e.message;
       } finally {

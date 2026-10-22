@@ -30,10 +30,64 @@ function safe(fn: (req: Request, res: Response) => unknown) {
 
 const NAME_RE = /^backup-\d{8}-\d{6}(?:-[a-z0-9]{4})?\.db$/;
 
+/**
+ * 自动备份保留份数：每次新建备份后只保留最近 N 份，超出按文件名（=时间）删最旧。
+ * 无上限的备份目录会随使用年限无限增长（每份约等于整库大小），最终吃满磁盘
+ * 反而让备份功能本身失效。30 份足够覆盖「近一个月内发现录错要回滚」的常见诉求。
+ */
+const KEEP_BACKUPS = 30;
+
 function backupDir(): string {
   const dir = path.join(dataDir(), 'backups');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * 备份保留策略：保留最新 KEEP_BACKUPS 份，删除更旧的。只处理本目录下符合命名
+ * 白名单的文件，用户手工放进来的其它文件一概不动。返回被删除的文件名列表。
+ *
+ * 排序用文件 mtime 而非文件名：文件名的时间戳只到秒，同一秒内连点备份会有多份
+ * 同前缀文件，仅按文件名排会得出任意顺序——刚创建的那份可能被当成「最旧」立刻
+ * 删掉（用户刚点的备份当场消失）。mtime 精度远高于秒，且 keepFile 显式豁免。
+ */
+function pruneBackups(dir: string, keepFile?: string): string[] {
+  let entries: Array<{ file: string; mtimeMs: number }>;
+  try {
+    entries = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!NAME_RE.test(f)) continue;
+      try {
+        entries.push({ file: f, mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs });
+      } catch {
+        /* 读不到 stat 的跳过（可能正被删） */
+      }
+    }
+  } catch {
+    return [];
+  }
+  if (entries.length <= KEEP_BACKUPS) return [];
+  entries.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.file < b.file ? 1 : -1)); // 新 → 旧
+  const removed: string[] = [];
+  // 从最旧端开始删，直到剩 KEEP_BACKUPS 份为止。
+  // 不能简单「删 slice(KEEP)」：keepFile 被豁免时那份会占掉一个名额，最终会多留一份；
+  // 用「剩余数量」做循环条件可确保精确收敛，且同秒文件（mtime 相同）也不会误删新份。
+  let remaining = entries.length;
+  for (let i = entries.length - 1; i >= 0 && remaining > KEEP_BACKUPS; i--) {
+    const old = entries[i].file;
+    if (old === keepFile) continue; // 绝不动本次刚创建的那份
+    // 连副产物一起删：备份文件是 WAL 主库的复制，被工具打开过会留下 -wal/-shm，
+    // 只删主文件会攒下一堆孤儿副产物
+    for (const f of [old, old + '-wal', old + '-shm']) {
+      try {
+        fs.rmSync(path.join(dir, f), { force: true });
+        if (f === old) { removed.push(old); remaining--; }
+      } catch {
+        /* 单个删除失败不影响其它与本次备份结果 */
+      }
+    }
+  }
+  return removed;
 }
 
 function dbFilePath(): string {
@@ -129,18 +183,22 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
   router.get('/backup/list', (req, res) => {
     if (!requireAdmin(req, res)) return;
     const dir = backupDir();
-    const rows = fs
-      .readdirSync(dir)
-      .filter((f) => NAME_RE.test(f))
-      .map((f) => {
-        try {
-          return { file: f, ...statOf(path.join(dir, f)) };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean)
-      .sort((a, b) => (a!.file < b!.file ? 1 : -1));
+    const rows = (
+      fs
+        .readdirSync(dir)
+        .filter((f) => NAME_RE.test(f))
+        .map((f) => {
+          try {
+            const st = fs.statSync(path.join(dir, f));
+            return { file: f, size: st.size, mtime: st.mtime.toISOString(), _ms: st.mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter((x): x is { file: string; size: number; mtime: string; _ms: number } => x !== null)
+        // 按 mtime 倒序：同一秒内多份备份仅按文件名排序顺序不定，最新一份可能不在首位
+        .sort((a, b) => (b._ms - a._ms) || (a.file < b.file ? 1 : -1))
+    ).map(({ _ms, ...rest }) => rest);
     return res.json({ dir, rows });
   });
 
@@ -157,7 +215,10 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       const name = `backup-${stamp}-${suffix}.db`;
       const dir = backupDir();
       fs.copyFileSync(dbFilePath(), path.join(dir, name));
-      return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)) });
+      // 保留策略：新建后立即裁剪，避免目录无限增长（显式豁免刚创建的这份）
+      const removed = pruneBackups(dir, name);
+      if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${KEEP_BACKUPS} 份）的旧备份`);
+      return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)), pruned: removed.length });
     } catch (e) {
       return res.status(500).json({ error: `备份失败：${(e as Error).message}` });
     }

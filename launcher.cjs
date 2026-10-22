@@ -40,6 +40,22 @@ const PID_FILE = path.join(DATA, 'server.pid');
 
 // ---------- 工具 ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 日志体积上限：超过则将当前日志改名为 .old（只保留一代），避免跨年堆积成几十 MB 纯文本 */
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * 启动前轮转日志：服务每次重启都会以追加模式新开一个 write stream，
+ * 无轮转的话一年下来 server.log 会累积几百次启动的输出。超过 2MB 就滚动成 .old
+ * （旧的一代直接覆盖），保证日志目录始终只有 server.log + server.log.old 两个文件。
+ */
+function rotateLog() {
+  try {
+    const st = fs.statSync(LOG_FILE);
+    if (st.size > LOG_MAX_BYTES) {
+      fs.rmSync(LOG_FILE + '.old', { force: true });
+      fs.renameSync(LOG_FILE, LOG_FILE + '.old');
+    }
+  } catch { /* 日志不存在或改不动：不阻断启动 */ }
+}
 function readPort() {
   try {
     const p = Number(fs.readFileSync(PORT_FILE, 'utf8').trim());
@@ -82,6 +98,7 @@ async function ensureServer() {
   } catch { /* ignore */ }
   // 冷启动
   const nodeExe = process.execPath;
+  rotateLog();
   child = spawn(nodeExe, [SERVER_ENTRY], {
     cwd: APP_ROOT,
     env: { ...process.env, ORANGE_DATA_DIR: DATA, ELECTRON_RUN_AS_NODE: undefined },

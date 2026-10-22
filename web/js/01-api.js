@@ -3,6 +3,8 @@
 /* ================= API ================= */
 /* 登录态：令牌存 localStorage，所有请求自动携带；收到 401 立即回登录页 */
 const TOKEN_KEY = 'oc_token';
+/** 登录回跳：401 被踢回登录页时记住原地址，重新登录后自动回到该页 */
+const RETURN_KEY = 'oc_return_hash';
 const auth = reactive({ token: localStorage.getItem(TOKEN_KEY) || '', user: null, team: null, ready: false });
 
 function setToken(t) {
@@ -17,7 +19,26 @@ function logout() {
   store.teamId = null; store.team = null; store.teams = [];
   // 打印抬头重置：换账号后新账套未设置打印时，不能沿用上一账号的抬头
   store.print = { company: '', address: '', phone: '', footer: '', showLogo: true };
+  // 主动退出不保留回跳地址：下次登录回工作台，而非退出前那页
+  sessionStorage.removeItem(RETURN_KEY);
   location.hash = '#/login';
+}
+
+/** 令牌失效的统一清理（多个并发请求同时 401 时只执行一次） */
+let handling401 = false;
+function handle401() {
+  if (handling401) return;
+  handling401 = true;
+  // 记住当前页（排除登录页自身），登录成功后回到这里
+  const cur = location.hash;
+  if (cur && cur !== '#/login' && !cur.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, cur);
+  if (auth.token || auth.user || store.loaded) {
+    setToken(''); auth.user = null; auth.team = null;
+    store.loaded = false; store.teamId = null; store.team = null; store.teams = [];
+  }
+  if (location.hash !== '#/login') location.hash = '#/login';
+  // 渲染/路由切换需要一点时间，稍后释放去抖锁避免真实的下一次失效被吞掉
+  setTimeout(() => { handling401 = false; }, 1000);
 }
 
 async function req(method, path, body, params) {
@@ -53,10 +74,7 @@ async function req(method, path, body, params) {
   let data = null;
   try { data = await r.json(); } catch { /* non-json */ }
   // 令牌失效：清空登录态（含缓存账套数据）并跳登录页（登录接口自身的 401 交给调用方提示）
-  if (r.status === 401 && !path.startsWith('/auth/login')) {
-    if (auth.token || auth.user || store.loaded) { setToken(''); auth.user = null; auth.team = null; store.loaded = false; store.teamId = null; store.team = null; store.teams = []; }
-    if (location.hash !== '#/login') location.hash = '#/login';
-  }
+  if (r.status === 401 && !path.startsWith('/auth/login')) handle401();
   if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
   return data;
 }

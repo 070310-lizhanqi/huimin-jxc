@@ -6,7 +6,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { rememberPrices } from './price';
 import { loadNoMode, loadPrefix } from './settings';
-import { localDate } from './db';
+import { localDate, validBizDate } from './db';
 import type { Request, Response, Router } from 'express';
 
 type Value = string | number | null;
@@ -892,9 +892,10 @@ function validate(db: DatabaseSync, input: DocInput): string | null {
         return `第 ${i + 1} 行调往仓库不能与调出仓库相同`;
     }
   }
-  // 单据日期格式必须为 YYYY-MM-DD：下游报表/账龄/看板全部依赖字符串比较与 substr，
-  // 传入 '2026/10/1' 之类会使该单在所有按日期过滤的统计中漏计
-  if (input.date && !/^\d{4}-\d{2}-\d{2}$/.test(input.date)) return '单据日期格式必须为 YYYY-MM-DD';
+  // 单据日期必须是真实存在的合理日期：下游报表/账龄/看板全部依赖日期字符串比较与 substr，
+  // 传入 '2026/10/1'（格式错）或 '2026-02-30'（格式对但不存在）都会让该单在统计中漏计/错桶
+  const dateErr = validBizDate(input.date);
+  if (dateErr) return '单据日期' + dateErr;
   // 外键归属校验：仓库/库区/调往仓库必须属于本团队（防跨团队污染库存与泄露他队仓库名）
   if (input.warehouseId) {
     const wh = db.prepare(`SELECT id FROM warehouse WHERE id = ? AND teamId = ?`).get(input.warehouseId, input.teamId) as

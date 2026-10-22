@@ -1,8 +1,13 @@
 'use strict';
-/* web/js/13-doc.js —— 由 app.js 拆分（lines 1602-2371） */
-/* ================= 单据页（列表 + 整页开单，对齐橙子云布局） ================= */
+/* web/js/13-doc.js —— 单据页（列表 + 明细视图 + 操作分发）
+ *
+ * 由原 902 行的单体文件拆分而来（整页开单编辑器 → 13-doc-editor.js、
+ * Excel 导入弹窗 → 13-doc-import.js）。本文件只保留「列表」职责：
+ * 查询/筛选/分页、批量提交、行内动作（审核/作废/复制/转换/删除）与导出，
+ * 编辑与导入通过子组件挂载，二者各自持有自己的状态。
+ */
 const DocPage = {
-  components: { DocViewer },
+  components: { DocViewer, DocEditor, DocImport },
   props: { group: { type: String, default: 'purchase' } },
   setup(props) {
     const grp = DOC_GROUPS[props.group] || DOC_GROUPS.purchase;
@@ -18,8 +23,10 @@ const DocPage = {
     const filterTo = ref('');
     const filterPartner = ref(null);
     const viewerId = ref(null);
-    const editor = reactive({ open: false, id: null, billNo: '', type: grp.types[0], form: null, status: '', ro: false });
-    const saving = ref(false);
+    /** 开单编辑器：open 控制显隐，editId 为被编辑单据（0 = 新增） */
+    const editorOpen = ref(false);
+    const editorEditId = ref(0);
+    const impOpen = ref(false);
     const busyId = ref(null);
     /** 列表/明细分页签（真实橙子云有这个二级切换，明细=展开商品行） */
     const viewTab = ref('list');
@@ -35,19 +42,6 @@ const DocPage = {
       if (ev.target.checked) set.add(id); else set.delete(id);
       selected.value = [...set];
     }
-    /* 当前仓库的库存快照：productId -> 可用数量（用于明细表「库存数量」列） */
-    const stockMap = ref({});
-    // 客户价格记忆：选中客户后批量取回，选商品时优先使用
-    const priceMem = ref({});
-    async function loadPriceMem(pid) {
-      if (!pid) { priceMem.value = {}; return; }
-      try {
-        const r = await api.get('/price/memory', { teamId: store.teamId, partnerId: pid });
-        const m = {};
-        for (const it of r.list || []) m[it.productId] = it.price;
-        priceMem.value = m;
-      } catch { priceMem.value = {}; }
-    }
 
     const meta = computed(() => DOC_META[activeType.value]);
     const partners = computed(() => meta.value.partner === 'ven' ? store.vendors : store.customers);
@@ -59,14 +53,6 @@ const DocPage = {
     });
     function onRowsChange(e) { rows.value = Number(e.target.value) || 20; page.value = 1; load(); }
 
-    /* 编辑态合计 */
-    const grossAmt = computed(() => editor.form
-      ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0) : 0);
-    const totalQty = computed(() => editor.form ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0) : 0);
-    const totalAmt = computed(() => Math.max(0, grossAmt.value - (Number(editor.form?.discount) || 0)));
-    const oweAmt = computed(() => Math.max(0, totalAmt.value - (Number(editor.form?.paidAmount) || 0) - (Number(editor.form?.deposit) || 0)));
-    const emeta = computed(() => DOC_META[editor.type] || {});
-    const epartners = computed(() => emeta.value.partner === 'ven' ? store.vendors : store.customers);
     /* 列表页底部合计 */
     const sumQty = computed(() => list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0));
     const sumAmount = computed(() => list.value.reduce((s, d) => s + (Number(d.totalAmount) || 0), 0));
@@ -96,246 +82,21 @@ const DocPage = {
       filterPartner.value = null; page.value = 1; load();
     }
 
-    /* ---- Excel/CSV 智能导入 ---- */
-    const imp = reactive({ open: false, file: null, autoCreate: false, busy: false, result: null, done: null });
-    function onImpFile(ev) {
-      imp.file = ev.target.files && ev.target.files[0] || null;
-      imp.result = null; imp.done = null;
-    }
-    async function impUpload(dryRun) {
-      if (!imp.file) return toast('请先选择 .xlsx 或 .csv 文件', 'error');
-      imp.busy = true;
-      try {
-        const buf = await imp.file.arrayBuffer();
-        const qs = new URLSearchParams({ dryRun: dryRun ? '1' : '0', autoCreate: imp.autoCreate ? '1' : '0' });
-        const r = await fetch('/api/doc/import?' + qs, {
-          method: 'POST',
-          headers: { authorization: 'Bearer ' + auth.token, 'content-type': 'application/octet-stream' },
-          body: buf,
-        });
-        const data = await r.json().catch(() => ({}));
-        if (r.status === 401) { logout(); return; }
-        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-        if (dryRun) { imp.result = data; toast('识别完成，请确认后导入'); }
-        else {
-          imp.done = data;
-          toast(`已导入 ${data.summary.imported} 张草稿单据`);
-          await load();
-        }
-      } catch (e) { toast(e.message, 'error'); }
-      finally { imp.busy = false; }
-    }
-    function closeImport() { imp.open = false; imp.file = null; imp.result = null; imp.done = null; }
-    const impTypeName = (t) => (DOC_META[t] ? DOC_META[t].label : t);
-
-    async function loadStock(warehouseId) {
-      if (!warehouseId) { stockMap.value = {}; return; }
-      const rows2 = await api.get('/stock/list', { teamId: store.teamId, warehouseId, ifShowZero: '' });
-      const m = {};
-      for (const r of rows2) m[r.productId] = (m[r.productId] || 0) + r.qty;
-      stockMap.value = m;
-    }
     watch(activeType, () => { page.value = 1; load(); });
     watch(() => route.q.type, (t) => {
       if (t && DOC_META[t] && grp.types.includes(t) && t !== activeType.value) activeType.value = t;
     });
-    watch(() => editor.form && editor.form.warehouseId, (w) => { if (editor.open && emeta.value.warehouse) loadStock(w); });
-    // 换客户：重新拉该客户的价格记忆，并把「未手改过」的行价刷成记忆价
-    watch(() => editor.form && editor.form.partnerId, async (pid, old) => {
-      if (!editor.open || !emeta.value.partner) return;
-      await loadPriceMem(pid);
-      const f = emeta.value.priceField;
-      // old === null 是 watcher 的初始基线（editor.form 初始为 null）。
-      // 打开已有单据时表单整体赋值会触发 (pid=单据客户, old=null)：
-      // 此时行价来自服务器单据本身，必须跳过刷新，否则被价格记忆静默改写。
-      if (!f || old === null || editor.id) return;
-      for (const it of editor.form.items) {
-        if (!it.productId) continue;
-        if (it._priceDirty) continue; // 用户已手改过单价的行不刷新
-        const mem = priceMem.value[it.productId];
-        if (mem != null) it.price = mem / 100;
-      }
-    });
     onMounted(() => {
       load();
-      if (route.q.new) openEditor(null, activeType.value);
+      if (route.q.new) openEditor(null);
     });
 
-    function blankItem() {
-      return { productId: null, qty: 1, price: 0, batchNo: '', toWarehouseId: null, remark: '' };
+    /** 打开整页开单编辑器：row 为空 = 新增 */
+    function openEditor(row) {
+      editorEditId.value = row ? row.id : 0;
+      editorOpen.value = true;
     }
-    function blankForm() {
-      return {
-        date: todayStr(),
-        partnerId: null, clerkId: null,
-        warehouseId: store.warehouses[0]?.id ?? null,
-        remark: '',
-        receiverName: '', receiverMobile: '', receiverAddress: '',
-        discount: 0, paidAmount: 0, accountId: null, deposit: 0,
-        items: [blankItem()],
-      };
-    }
-    function onPick(it) {
-      const p = byId(store.products, it.productId);
-      if (!p) return;
-      let f = emeta.value.priceField;
-      if (!f || Number(it.price)) return;
-      // 客户价格等级（批发价/零售价）优先，再退到单据默认价格字段
-      if (emeta.value.partner === 'cus' && editor.form.partnerId) {
-        const cus = byId(store.customers, editor.form.partnerId);
-        if (cus && cus.priceLevel && cus.priceLevel in p) f = cus.priceLevel;
-      }
-      // 客户价格记忆优先于商品标准价（一客一价是批发场景的常态）
-      const mem = priceMem.value[it.productId];
-      it.price = (mem != null ? mem : (p[f] || 0)) / 100;
-    }
-    function openEditor(row, type) {
-      editor.type = type || activeType.value;
-      if (row) {
-        api.get('/doc/info', { id: row.id, teamId: store.teamId }).then(({ doc, items }) => {
-          editor.id = doc.id; editor.billNo = doc.billNo;
-          /*
-           * 只读态：已审核 / 已作废 / 待审核 的单据不允许再改内容。
-           * 之前完全没有这个判断，导致「查看明细」进去后能改数量单价再点「保存草稿」，
-           * 把已过账单据的库存与结算依据擅自改掉。
-           */
-          editor.status = doc.status;
-          editor.ro = doc.status !== 'draft';
-          editor.form = {
-            date: (doc.date || '').slice(0, 10),
-            partnerId: doc.partnerId, clerkId: doc.clerkId,
-            warehouseId: doc.warehouseId || store.warehouses[0]?.id || null,
-            remark: doc.remark || '',
-            receiverName: doc.receiverName || '', receiverMobile: doc.receiverMobile || '',
-            receiverAddress: doc.receiverAddress || '',
-            discount: (doc.discount || 0) / 100, paidAmount: (doc.paidAmount || 0) / 100,
-            accountId: doc.accountId || null, deposit: (doc.deposit || 0) / 100,
-            items: items.map(it => ({
-              productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
-              batchNo: it.batchNo || '', toWarehouseId: it.toWarehouseId, remark: it.remark || '',
-            })),
-          };
-          if (!editor.form.items.length) editor.form.items.push(blankItem());
-          editor.open = true;
-          if (emeta.value.warehouse) loadStock(editor.form.warehouseId);
-          loadPriceMem(editor.form.partnerId);
-        }).catch(e => toast(e.message, 'error'));
-      } else {
-        editor.id = null; editor.billNo = '';
-        editor.status = 'draft'; editor.ro = false;
-        editor.form = blankForm();
-        editor.open = true;
-        if (emeta.value.warehouse) loadStock(editor.form.warehouseId);
-      }
-    }
-    function backToList() { editor.open = false; load(); }
-    function addItem() { editor.form.items.push(blankItem()); }
-    function removeItem(idx) {
-      if (editor.form.items.length <= 1) return toast('至少保留一行明细', 'error');
-      editor.form.items.splice(idx, 1);
-    }
-    /* 扫码开单：按条码（或商品名精确匹配）找到商品 → 已有行则数量+1，否则新增行 */
-    function scanBarcode(code) {
-      const s = String(code || '').trim();
-      if (!s || !editor.form) return;
-      const p = store.products.find((x) => (x.barcode || '').trim() === s);
-      if (!p) return toast(`未找到条码 ${s} 对应的商品`, 'warning');
-      const hit = editor.form.items.find((it) => it.productId === p.id);
-      if (hit) { hit.qty = (Number(hit.qty) || 0) + 1; return toast(`${p.name} 数量 +1`); }
-      // 复用末尾空行
-      const empty = editor.form.items.find((it) => !it.productId);
-      const row = empty || blankItem();
-      row.productId = p.id;
-      row.qty = 1;
-      row.price = 0;
-      onPick(row);
-      if (!empty) editor.form.items.push(row);
-      toast(`已加入 ${p.name}`);
-    }
-    const scanCode = ref('');
-    function doScan() {
-      scanBarcode(scanCode.value);
-      scanCode.value = '';
-    }
-    function lineAmt(it) { return ((Number(it.qty) || 0) * (Number(it.price) || 0)).toFixed(2); }
-    function stockOf(pid) { return stockMap.value[pid] ?? 0; }
-    function setFullPaid() {
-      if (!editor.form) return;
-      editor.form.paidAmount = Number(totalAmt.value.toFixed(2));
-    }
-    function fullDiscount() {
-      if (!editor.form) return;
-      editor.form.discount = Number(grossAmt.value.toFixed(2));
-    }
-
-    async function persist() {
-      const m = emeta.value;
-      const f = editor.form;
-      if (m.warehouse && !f.warehouseId) throw new Error('请选择仓库');
-      if (!f.items.length) throw new Error('至少一条明细');
-      for (const [i, it] of f.items.entries()) {
-        if (!it.productId) throw new Error(`第 ${i + 1} 行未选商品`);
-        if (!Number(it.qty)) throw new Error(`第 ${i + 1} 行数量不能为 0`);
-        if (!m.negative && Number(it.qty) < 0) throw new Error(`第 ${i + 1} 行数量不能为负`);
-        if (Number(it.price) < 0) throw new Error(`第 ${i + 1} 行单价不能为负`);
-        // 调拨单必须指定调往仓库：后端不校验必填，空值过账会变成「源仓出又入源仓」的无效调拨
-        if (m.toWarehouse && !it.toWarehouseId) throw new Error(`第 ${i + 1} 行未选择调往仓库`);
-      }
-      if (Number(f.discount) > grossAmt.value) throw new Error('整单折扣不能超过单据金额');
-      if (Number(f.paidAmount) + Number(f.deposit) > totalAmt.value) {
-        throw new Error('本次收款 + 抵扣订金不能超过应收金额');
-      }
-      const body = {
-        teamId: store.teamId, type: editor.type, date: f.date,
-        partnerType: m.partner || null, partnerId: f.partnerId || null,
-        clerkId: f.clerkId || null,
-        warehouseId: m.warehouse ? f.warehouseId : null,
-        remark: f.remark || null,
-        receiverName: f.receiverName || null,
-        receiverMobile: f.receiverMobile || null,
-        receiverAddress: f.receiverAddress || null,
-        discount: toCents(f.discount),
-        paidAmount: toCents(f.paidAmount),
-        accountId: f.accountId || null,
-        deposit: toCents(f.deposit),
-        items: f.items.map(it => ({
-          productId: it.productId, qty: Number(it.qty), price: toCents(it.price),
-          batchNo: it.batchNo || null, toWarehouseId: it.toWarehouseId || null, remark: it.remark || null,
-        })),
-      };
-      if (editor.id) {
-        await api.put('/doc/edit', { id: editor.id, ...body });
-        return editor.id;
-      }
-      const r = await api.post('/doc/create', body);
-      editor.id = r.id; editor.billNo = r.billNo;
-      return r.id;
-    }
-
-    async function save() {
-      if (saving.value) return;
-      saving.value = true;
-      try {
-        await persist();
-        toast('已保存');
-        editor.open = false;
-        load();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { saving.value = false; }
-    }
-
-    async function saveAndAudit() {
-      if (saving.value) return;
-      saving.value = true;
-      try {
-        const id = await persist();
-        await api.post('/doc/audit', { teamId: store.teamId, id });
-        toast('已保存并审核');
-        editor.open = false;
-        load();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { saving.value = false; }
-    }
+    function closeEditor() { editorOpen.value = false; load(); }
 
     async function audit(row) {
       if (busyId.value) return;
@@ -448,7 +209,7 @@ const DocPage = {
     function moreAction(cmd, row) {
       switch (cmd) {
         case 'audit': audit(row); break;
-        case 'edit': openEditor(row, activeType.value); break;
+        case 'edit': openEditor(row); break;
         case 'view': viewerId.value = row.id; break;
         case 'copy': copyDoc(row); break;
         case 'delete': delDoc(row); break;
@@ -470,25 +231,21 @@ const DocPage = {
       ]);
     }
     return {
-      grp, activeType, status, kw, page, rows, list, total, pages, pageBtns, viewerId, editor,
-      meta, emeta, partners, epartners, stockMap, grossAmt, totalQty, totalAmt, oweAmt, saving, busyId,
-      load, openEditor, backToList, addItem, removeItem, onPick, lineAmt, stockOf, priceMem, loadPriceMem, setFullPaid, fullDiscount,
-      scanCode, doScan, scanBarcode, viewTab, selected, selAll, toggleAll, toggleOne, flatItems, loadFlatItems,
-      save, saveAndAudit, audit, submitDoc, rejectDoc, submitAllDrafts, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
+      grp, activeType, status, kw, page, rows, list, total, pages, pageBtns, viewerId,
+      meta, partners, busyId,
+      load, openEditor, closeEditor,
+      viewTab, selected, selAll, toggleAll, toggleOne, flatItems, loadFlatItems,
+      audit, submitDoc, rejectDoc, submitAllDrafts, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
       filterFrom, filterTo, filterPartner, resetFilter, sumQty, sumAmount, sumPaid, sumCols,
-      imp, onImpFile, impUpload, closeImport, impTypeName,
+      editorOpen, editorEditId, impOpen,
       fmtMoney, partnerLabel, whLabel, prodLabel, store, STATUS_TEXT, DOC_META, specOf, unitOf,
     };
   },
-// 模板必须单根：v-if/v-else 之前不能有任何根级注释或兄弟节点，否则组件退化为
-  // 多根片段（fragment），外层 <transition mode="out-in"> 无法挂载/卸载该片段，
-  // 导致在两个单据子路由（如 采购入库 ↔ 销售出库）之间切换时整页空白。
-  // 单根必须：外层 <transition mode="out-in"> 要求组件只有一个根元素才能完成「离场→入场」；
-  // 此前列表/编辑/doc-viewer 三根并列构成片段（fragment），离场后永不入场导致整页空白，
-  // 且卡死的 transition 会级联影响后续路由切换。用布局中性的 wrapper 收束为单根。
+  // 模板必须单根：外层 <transition mode="out-in"> 要求组件只有一个根元素才能完成「离场→入场」，
+  // 多根片段（fragment）会导致子路由切换时整页空白。用布局中性的 wrapper 收束为单根。
   template: `
   <div class="doc-page-root">
-  <div class="page-card" v-if="!editor.open">
+  <div class="page-card" v-if="!editorOpen">
     <div class="page-head">
       <span class="page-title">{{ DOC_META[activeType].label }}</span>
       <div class="tabs">
@@ -516,9 +273,9 @@ const DocPage = {
       <button class="btn icon-only" title="刷新" @click="load()"><el-icon><Refresh/></el-icon></button>
       <span class="fb-gap"></span>
       <span class="muted fb-count">共 {{ total }} 条</span>
-      <button class="btn" @click="imp.open = true"><el-icon><Upload/></el-icon> Excel 导入</button>
+      <button class="btn" @click="impOpen = true"><el-icon><Upload/></el-icon> Excel 导入</button>
       <button class="btn" @click="submitAllDrafts">批量提交</button>
-      <button class="btn primary" @click="openEditor(null, activeType)">＋ 新增</button>
+      <button class="btn primary" @click="openEditor(null)">＋ 新增</button>
     </div>
     <div class="tbl-wrap">
       <!-- ===== 明细视图（把单据行展开成商品明细） ===== -->
@@ -627,7 +384,7 @@ const DocPage = {
               </div>
               <div class="row-actions" v-else>
                 <button class="btn sm" @click="viewerId = d.id">查看</button>
-                <button class="btn sm" @click="openEditor(d, activeType)">明细</button>
+                <button class="btn sm" @click="openEditor(d)">明细</button>
               </div>
             </td>
           </tr>
@@ -657,246 +414,12 @@ const DocPage = {
     </div>
   </div>
 
-  <!-- ===== 整页开单态（对齐橙子云） ===== -->
-  <div class="page-card doc-editor" v-else>
-    <div class="de-head">
-      <span class="de-title">{{ DOC_META[editor.type].label }}</span>
-      <span class="billno" v-if="editor.billNo">{{ editor.billNo }}</span>
-      <span v-else class="muted" style="font-size:12px">保存后自动生成单号</span>
-      <span v-if="editor.ro" class="ro-badge">
-        <el-icon><Lock/></el-icon>
-        {{ STATUS_TEXT[editor.status] }} · 只读
-      </span>
-      <span class="de-sp"></span>
-      <button class="btn" @click="backToList">返回列表</button>
-      <template v-if="!editor.ro">
-        <button class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存草稿' }}</button>
-        <button class="btn primary" :disabled="saving" @click="saveAndAudit">保存并审核</button>
-      </template>
-    </div>
-    <div class="ro-tip" v-if="editor.ro">
-      该单据已{{ STATUS_TEXT[editor.status] }}，内容不可修改。如需调整请先作废并重新开单。
-    </div>
+  <!-- ===== 整页开单态（对齐橙子云）：独立子组件，自持编辑状态 ===== -->
+  <doc-editor v-else :type="activeType" :doc-id="editorEditId" @close="closeEditor"/>
 
-    <div class="de-body" :class="{ ro: editor.ro }">
-      <!-- 表头字段区：四列密集布局 -->
-      <div class="de-grid">
-        <div class="fi">
-          <label>单号</label>
-          <div class="fc"><input :value="editor.billNo || '保存后自动生成'" disabled/></div>
-        </div>
-        <div class="fi">
-          <label><span class="req">*</span>日期</label>
-          <div class="fc"><el-date-picker v-model="editor.form.date" type="date" value-format="YYYY-MM-DD" style="width:100%" :disabled="editor.ro"/></div>
-        </div>
-        <div class="fi" v-if="emeta.partner">
-          <label><span class="req">*</span>{{ emeta.partner === 'ven' ? '供应商' : '客户' }}</label>
-          <div class="fc">
-            <el-select v-model="editor.form.partnerId" filterable clearable placeholder="搜索名称/拼音/手机" style="width:100%" :disabled="editor.ro">
-              <el-option v-for="p in epartners" :key="p.id" :label="p.name" :value="p.id">
-                <span>{{ p.name }}</span><span class="opt-sub">{{ p.mobile || '' }}</span>
-              </el-option>
-            </el-select>
-          </div>
-        </div>
-        <div class="fi" v-if="emeta.warehouse">
-          <label><span class="req">*</span>仓库</label>
-          <div class="fc">
-            <el-select v-model="editor.form.warehouseId" placeholder="选择仓库" style="width:100%" :disabled="editor.ro">
-              <el-option v-for="w in store.warehouses" :key="w.id" :label="w.name" :value="w.id"/>
-            </el-select>
-          </div>
-        </div>
-
-        <div class="fi">
-          <label>业务员</label>
-          <div class="fc">
-            <el-select v-model="editor.form.clerkId" filterable clearable placeholder="选择" style="width:100%" :disabled="editor.ro">
-              <el-option v-for="c in store.clerks" :key="c.id" :label="c.name" :value="c.id"/>
-            </el-select>
-          </div>
-        </div>
-
-        <template v-if="emeta.partner === 'cus'">
-          <div class="fi"><label>收件人</label><div class="fc"><input v-model="editor.form.receiverName" placeholder="收件人姓名" :disabled="editor.ro"/></div></div>
-          <div class="fi"><label>收件手机</label><div class="fc"><input v-model="editor.form.receiverMobile" placeholder="联系电话" :disabled="editor.ro"/></div></div>
-          <div class="fi"><label>收件地址</label><div class="fc"><input v-model="editor.form.receiverAddress" placeholder="详细地址" :disabled="editor.ro"/></div></div>
-        </template>
-
-        <div class="fi span-all"><label>备注</label><div class="fc"><input v-model="editor.form.remark" placeholder="整单备注" :disabled="editor.ro"/></div></div>
-      </div>
-
-      <!-- 明细表 -->
-      <table class="item-edit">
-        <thead><tr>
-          <th style="min-width:240px">商品名称</th>
-          <th style="width:90px">规格</th>
-          <th style="width:60px">单位</th>
-          <th style="width:80px" class="r">{{ emeta.stocktake ? '账面数量' : '库存数量' }}</th>
-          <th style="width:90px" class="r">{{ emeta.stocktake ? '实盘数量' : '数量' }}</th>
-          <th style="width:100px" class="r">单价(元)</th>
-          <th style="width:100px" class="r">金额</th>
-          <th v-if="emeta.batch" style="width:110px">批次</th>
-          <th v-if="emeta.toWarehouse" style="width:130px">调往仓库</th>
-          <th>行备注</th>
-          <th style="width:46px"></th>
-        </tr></thead>
-        <tbody>
-          <tr v-for="(it, idx) in editor.form.items" :key="idx">
-            <td>
-              <el-select v-model="it.productId" filterable placeholder="选择商品 / 输入编码" size="small" :disabled="editor.ro" @change="onPick(it)">
-                <el-option v-for="p in store.products" :key="p.id" :label="p.name + (p.spec ? '（' + p.spec + '）' : '')" :value="p.id"/>
-              </el-select>
-            </td>
-            <td class="muted">{{ specOf(it.productId) }}</td>
-            <td class="muted">{{ unitOf(it.productId) }}</td>
-            <td class="r" :class="{ 'stock-low': stockOf(it.productId) <= 0 && it.productId }">{{ stockOf(it.productId) }}</td>
-            <td class="r"><input type="number" step="any" class="num" v-model.number="it.qty" :disabled="editor.ro"/></td>
-            <td class="r">
-              <input type="number" step="0.01" min="0" class="num" v-model.number="it.price" :disabled="editor.ro" @input="it._priceDirty = true"/>
-              <div v-if="priceMem[it.productId] != null" class="mem-price"
-                :class="{ used: Math.round(it.price * 100) === priceMem[it.productId] }">
-                记忆价 {{ fmtMoney(priceMem[it.productId]) }}
-              </div>
-            </td>
-            <td class="r money-amt">{{ lineAmt(it) }}</td>
-            <td v-if="emeta.batch"><input v-model="it.batchNo" placeholder="留空自动 FIFO" :disabled="editor.ro"/></td>
-            <td v-if="emeta.toWarehouse">
-              <select v-model="it.toWarehouseId" :disabled="editor.ro">
-                <option :value="null">请选择</option>
-                <option v-for="w in store.warehouses" :key="w.id" :value="w.id">{{ w.name }}</option>
-              </select>
-            </td>
-            <td><input v-model="it.remark" :disabled="editor.ro"/></td>
-            <td style="text-align:center" v-if="!editor.ro"><button class="btn sm danger" @click="removeItem(idx)">删</button></td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="de-add">
-        <button class="btn sm" @click="addItem">＋ 添加一行</button>
-        <span class="scan-box">
-          <el-icon><Aim/></el-icon>
-          <input v-model="scanCode" placeholder="扫码开单：扫描或输入条码后回车" @keyup.enter="doScan"/>
-        </span>
-        <span v-if="emeta.stocktake" class="muted">填写实盘数量，审核时按与账面差额自动盈亏</span>
-        <span v-else-if="emeta.assemblyNote" class="muted">提示：{{ emeta.assemblyNote }}</span>
-        <span v-else-if="emeta.negative" class="muted">提示：数量可为负数（盘亏 / 冲减）</span>
-        <span class="fb-gap"></span>
-        <span>合计数量 <b>{{ totalQty }}</b></span>
-      </div>
-
-      <!-- 底部结算区（仅涉及往来结算的单据显示） -->
-      <div class="de-settle" v-if="emeta.partner">
-        <div class="ds-head">结算信息</div>
-        <div class="ds-row">
-          <div class="fi"><label>减整单折扣</label>
-            <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.discount" :disabled="editor.ro"/>
-              <span class="lnk" title="把折扣设为全部商品金额（整单全免）" @click="fullDiscount">全额减</span></div>
-          </div>
-          <div class="fi"><label>{{ emeta.payLabel || '减本次收款' }}</label>
-            <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.paidAmount" :disabled="editor.ro"/>
-              <span class="lnk" title="本次收款 = 应收金额" @click="setFullPaid">设为全收</span></div>
-          </div>
-          <div class="fi"><label>{{ emeta.payLabel ? '付款账户' : '收款账户' }}</label>
-            <div class="fc">
-              <el-select v-model="editor.form.accountId" clearable placeholder="选择账户" style="width:100%" :disabled="editor.ro">
-                <el-option v-for="a in store.accounts" :key="a.id" :label="a.name" :value="a.id"/>
-              </el-select>
-            </div>
-          </div>
-          <div class="fi"><label>抵扣订金</label>
-            <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.deposit" :disabled="editor.ro"/></div>
-          </div>
-        </div>
-        <div class="ds-total">
-          <div class="ds-item">商品金额 <b class="money">{{ grossAmt.toFixed(2) }}</b></div>
-          <div class="ds-item">折扣 <b class="money">-{{ (Number(editor.form.discount)||0).toFixed(2) }}</b></div>
-          <div class="ds-item big">{{ emeta.recvLabel || '应收金额' }} <b class="money">{{ totalAmt.toFixed(2) }}</b></div>
-          <div v-if="oweAmt > 0.005" class="ds-item">本次欠款 <b class="money owe">{{ oweAmt.toFixed(2) }}</b></div>
-          <div v-else class="ds-item settled">✓ 已结清 <b class="money">0.00</b></div>
-        </div>
-      </div>
-      <!-- 非结算类单据：只显示金额小结 -->
-      <div class="de-settle" v-else>
-        <div class="ds-total plain">
-          <div class="ds-item">合计数量 <b>{{ totalQty }}</b></div>
-          <div class="ds-item big">合计金额 <b class="money">{{ totalAmt.toFixed(2) }}</b></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== Excel/CSV 智能导入弹窗 ===== -->
-  <div class="modal-mask" v-if="imp.open" @click.self="closeImport">
-    <div class="modal mid">
-      <div class="modal-head"><span class="mt">Excel 导入单据</span><span class="x" @click="closeImport">×</span></div>
-      <div class="modal-body">
-        <div class="fitem" style="margin-bottom:10px"><label>选择文件</label>
-          <div class="fctrl"><input type="file" accept=".xlsx,.csv" @change="onImpFile"/></div>
-        </div>
-        <div class="fitem" style="margin-bottom:10px"><label>自动建档</label>
-          <div class="fctrl" style="display:flex;align-items:center;gap:8px">
-            <input type="checkbox" id="imp-auto-create" v-model="imp.autoCreate"/>
-            <label for="imp-auto-create" style="margin:0">未识别的商品 / 客户 / 供应商自动创建档案</label>
-          </div>
-        </div>
-        <div class="muted" style="font-size:12.5px;margin-bottom:10px">
-          自动识别表头（商品/品名、数量、单价、日期、单号、客户/供应商等）与单据方向；导入结果为<b>草稿</b>，需手动审核过账。有「单号」列时按单号分单，重复导入自动跳过。
-        </div>
-
-        <!-- 识别预览 -->
-        <template v-if="imp.result">
-          <div style="border-top:1px solid #eee;padding-top:10px">
-            <b>识别结果</b>：{{ imp.result.file.kind.toUpperCase() }} · 工作表「{{ imp.result.file.sheet }}」 ·
-            识别 {{ imp.result.summary.billCount }} 张单 / {{ imp.result.summary.itemCount }} 行明细
-            <span v-if="imp.result.summary.errorCount" style="color:#f56c6c">，{{ imp.result.summary.errorCount }} 行错误</span>
-            <span v-if="imp.result.summary.skipCount" style="color:#e6a23c">，{{ imp.result.summary.skipCount }} 张跳过</span>
-          </div>
-          <table class="tbl" style="max-height:220px;overflow:auto">
-            <thead><tr><th>类型</th><th>日期</th><th>往来单位</th><th>仓库</th><th>明细数</th><th>金额</th><th>提示</th></tr></thead>
-            <tbody>
-              <tr v-for="(b, i) in imp.result.bills" :key="i">
-                <td>{{ impTypeName(b.type) }}</td>
-                <td>{{ b.date }}</td>
-                <td>{{ b.partnerName }}</td>
-                <td>{{ b.warehouseName }}</td>
-                <td>{{ b.items.length }}</td>
-                <td class="r money">{{ fmtMoney(b.items.reduce((s, it) => s + Math.round(it.qty * it.price), 0)) }}</td>
-                <td class="muted" style="max-width:220px;font-size:12px">{{ (b.warnings || []).join('；') || '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-if="imp.result.rowErrors.length" style="color:#f56c6c;font-size:12.5px">
-            错误行：{{ imp.result.rowErrors.slice(0, 5).map(e => '第' + e.row + '行 ' + e.msg).join('；') }}{{ imp.result.rowErrors.length > 5 ? ' …' : '' }}
-          </div>
-          <div v-if="imp.result.skipped.length" style="color:#e6a23c;font-size:12.5px">
-            跳过：{{ imp.result.skipped.slice(0, 5).map(s => (s.srcBillNo || '') + ' ' + s.reason).join('；') }}{{ imp.result.skipped.length > 5 ? ' …' : '' }}
-          </div>
-        </template>
-
-        <!-- 导入完成 -->
-        <template v-if="imp.done">
-          <div style="border-top:1px solid #eee;padding-top:10px;color:#53a551">
-            <b>导入完成</b>：新建 {{ imp.done.summary.imported }} 张草稿
-            <span v-if="imp.done.summary.skipCount" style="color:#e6a23c">，跳过 {{ imp.done.summary.skipCount }} 张</span>
-            <span v-if="imp.done.summary.errorCount" style="color:#f56c6c">，{{ imp.done.summary.errorCount }} 行错误</span>
-          </div>
-          <div class="muted" style="font-size:12.5px">
-            单号：{{ imp.done.created.map(c => c.billNo).join('、') }}
-          </div>
-        </template>
-      </div>
-      <div class="modal-foot">
-        <button class="btn" @click="closeImport">关闭</button>
-        <button v-if="!imp.done" class="btn" :disabled="!imp.file || imp.busy" @click="impUpload(true)">{{ imp.busy ? '处理中…' : '识别预览' }}</button>
-        <button v-if="imp.result && !imp.done" class="btn primary" :disabled="imp.busy || !imp.result.summary.billCount" @click="impUpload(false)">
-          {{ imp.busy ? '导入中…' : '确认导入 ' + imp.result.summary.billCount + ' 张' }}
-        </button>
-      </div>
-    </div>
-  </div>
+  <!-- ===== Excel/CSV 智能导入弹窗：独立子组件 ===== -->
+  <doc-import v-if="impOpen" @close="impOpen = false" @imported="load"/>
 
   <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
   </div>`,
 };
-

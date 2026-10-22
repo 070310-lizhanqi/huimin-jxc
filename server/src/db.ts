@@ -12,6 +12,36 @@ export function localDate(d: Date = new Date()): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** 业务日期合理区间：早于 2000 或晚于 2100 视为录错（多为手滑多打/少打一位数字） */
+const MIN_BIZ_YEAR = 2000;
+const MAX_BIZ_YEAR = 2100;
+
+/**
+ * 业务日期校验（单据 / 收付款共用一处口径）：
+ * 1) 严格 YYYY-MM-DD 格式——下游报表/账龄/看板全部按字符串比较与 substr 取日期
+ * 2) 真实日历——2026-02-30 / 2099-13-45 这类「格式对但日子不存在」的脏日期
+ *    会污染账龄分桶与对账单期初，且事后无法用普通查询筛出
+ * 3) 合理年份区间——挡住 1900 / 9999 这类明显录错
+ * 返回 null 表示合法，否则返回中文错误文案。
+ */
+export function validBizDate(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null; // 缺省由调用方决定是否用当天
+  const s = String(v);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '日期格式必须为 YYYY-MM-DD';
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (y < MIN_BIZ_YEAR || y > MAX_BIZ_YEAR) return `日期年份应在 ${MIN_BIZ_YEAR}~${MAX_BIZ_YEAR} 之间`;
+  if (mo < 1 || mo > 12) return '日期月份非法';
+  if (d < 1 || d > 31) return '日期天数非法';
+  // round-trip 校验：JS Date 会把 2026-02-30 归一化成 2026-03-02，比对回读值即知是否真实存在
+  const dt = new Date(`${s}T00:00:00`);
+  const p = (n: number) => String(n).padStart(2, '0');
+  if (`${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}` !== s) return '日期不存在（如 2 月 30 日）';
+  return null;
+}
+
 /**
  * 数据目录：环境变量 ORANGE_DATA_DIR 优先（安装版由启动器指向 %APPDATA%\orange-jxc），
  * 缺省保持「当前工作目录/data」的开发行为（测试脚本与手工运行不受影响）。
