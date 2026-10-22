@@ -330,6 +330,85 @@ const SettingsPage = {
       finally { regBusy.value = false; }
     }
 
+    /* ---- 数据备份与恢复 ---- */
+    const backups = ref([]);
+    const backupDir = ref('');
+    const backupLoading = ref(false);
+    const backupBusy = ref(false);
+
+    const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
+    const fmtBackupName = (f) => {
+      const m = f.match(/^backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-[a-z0-9]{4})?\.db$/);
+      return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : f;
+    };
+
+    async function loadBackups() {
+      backupLoading.value = true;
+      try {
+        const r = await api.get('/backup/list');
+        backups.value = r.rows || [];
+        backupDir.value = r.dir || '';
+      } catch (e) { toast(e.message, 'error'); }
+      finally { backupLoading.value = false; }
+    }
+
+    async function createBackup() {
+      backupBusy.value = true;
+      try {
+        await api.post('/backup/create');
+        toast('备份完成');
+        await loadBackups();
+      } catch (e) { toast(e.message, 'error'); }
+      finally { backupBusy.value = false; }
+    }
+
+    function downloadBackup(row) {
+      api.download(`/backup/download?file=${encodeURIComponent(row.file)}`, row.file)
+        .then(() => toast('已开始下载'))
+        .catch((e) => toast(e.message, 'error'));
+    }
+
+    async function restoreBackup(row) {
+      const label = fmtBackupName(row.file);
+      if (!(await confirmBox(
+        `确定恢复到备份「${label}」吗？当前数据将被该备份完全覆盖，服务会自动重启。建议先点一次「立即备份」保留现状。`,
+        '恢复备份',
+      ))) return;
+      // 二次验密：恢复不可逆，要求再输一次当前账号密码（服务端同样强校验）
+      let password = '';
+      try {
+        const r = await ElMessageBox.prompt('恢复会整体覆盖当前数据且不可撤销，请输入你的登录密码以确认：', '安全确认', {
+          confirmButtonText: '确认恢复', cancelButtonText: '取消',
+          inputType: 'password', inputPlaceholder: '当前账号密码',
+        });
+        password = (r.value || '').trim();
+      } catch { return; }
+      if (!password) return toast('未输入密码，已取消恢复', 'warning');
+      backupBusy.value = true;
+      try {
+        await api.post('/backup/restore', { file: row.file, password });
+        toast('恢复已排队，服务正在重启……页面稍后自动重连');
+        // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态
+        setTimeout(function poll(retries) {
+          api.get('/auth/status')
+            .then(() => { location.reload(); })
+            .catch(() => { if (retries > 0) setTimeout(() => poll(retries - 1), 2000); });
+        }, 3000, 30);
+      } catch (e) {
+        toast(e.message, 'error');
+        backupBusy.value = false;
+      }
+    }
+
+    async function deleteBackup(row) {
+      if (!(await confirmBox(`删除备份「${fmtBackupName(row.file)}」？删除后不可找回。`, '删除备份'))) return;
+      try {
+        await api.del(`/backup/${encodeURIComponent(row.file)}`);
+        toast('已删除');
+        await loadBackups();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
     onMounted(load);
     return {
       tab, loading, saving, prefix, noMode, print, defaults, rows, sample,
@@ -337,6 +416,8 @@ const SettingsPage = {
       auth, isAdmin, isOwner, users, userLoading, userBusy, userDialog, userForm,
       pwdDialog, pwdForm, loadUsers, openUserDialog, saveUser, removeUser, openPwdDialog, savePassword,
       regConf, regLoading, regBusy, loadRegConf, saveRegConf,
+      backups, backupDir, backupLoading, backupBusy, loadBackups, createBackup, downloadBackup, restoreBackup, deleteBackup,
+      fmtSize, fmtBackupName,
     };
   },
   template: `
@@ -347,6 +428,7 @@ const SettingsPage = {
         <span :class="['tab', { active: tab === 'prefix' }]" @click="tab = 'prefix'">单据编号</span>
         <span :class="['tab', { active: tab === 'print' }]" @click="tab = 'print'">打印抬头</span>
         <span :class="['tab', { active: tab === 'user' }]" @click="tab = 'user'; loadUsers(); loadRegConf()">用户与权限</span>
+        <span v-if="isAdmin" :class="['tab', { active: tab === 'backup' }]" @click="tab = 'backup'; loadBackups()">数据备份</span>
       </div>
       <div class="hd-right">
         <button class="btn" @click="reset('all')">恢复默认</button>
@@ -424,7 +506,7 @@ const SettingsPage = {
     </div>
 
     <!-- 用户与权限 -->
-    <div v-else class="card">
+    <div v-else-if="tab === 'user'" class="card">
       <div class="card-title" style="margin-bottom:4px">团队用户</div>
       <div class="muted" style="font-size:12.5px;margin-bottom:12px">
         当前账套「{{ auth.team ? auth.team.name : '—' }}」的成员。管理员可添加/删除用户；员工只能使用业务功能，不能管理用户。
@@ -477,6 +559,41 @@ const SettingsPage = {
           关闭注册会立即生效并清除已保存的邀请码；再次开启需重新设置邀请码。仅系统所有者（首个账套）可管理此项。
         </div>
       </template>
+    </div>
+
+    <!-- 数据备份与恢复 -->
+    <div v-else-if="tab === 'backup'" class="card">
+      <div class="card-title" style="margin-bottom:4px">数据备份</div>
+      <div class="muted" style="font-size:12.5px;margin-bottom:12px">
+        全部业务数据存放在一个 SQLite 文件里（<span class="billno">{{ backupDir || '数据目录' }}</span>）。
+        备份是整个数据库的完整快照，建议每次重要操作后或每周固定备份一次，并定期把备份文件复制到 U 盘/网盘等机器之外的位置。
+      </div>
+      <div class="de-add" style="padding:0 0 12px">
+        <button class="btn primary" :disabled="backupBusy" @click="createBackup">{{ backupBusy ? '处理中…' : '⬇ 立即备份' }}</button>
+        <button class="btn" @click="loadBackups">刷新</button>
+        <span class="muted" style="font-size:12.5px">恢复会让服务重启一次（约几秒），重启完成前请勿操作。</span>
+      </div>
+      <table class="tbl">
+        <thead><tr><th>备份时间</th><th style="width:110px" class="r">大小</th><th style="width:250px">操作</th></tr></thead>
+        <tbody>
+          <tr v-for="b in backups" :key="b.file">
+            <td class="nowrap">{{ fmtBackupName(b.file) }}</td>
+            <td class="r muted">{{ fmtSize(b.size) }}</td>
+            <td>
+              <div class="row-actions">
+                <button class="btn sm" @click="downloadBackup(b)">下载</button>
+                <button class="btn sm" :disabled="backupBusy" @click="restoreBackup(b)">恢复到此</button>
+                <button class="btn sm danger" @click="deleteBackup(b)">删除</button>
+              </div>
+            </td>
+          </tr>
+          <tr v-if="backupLoading"><td colspan="3"><div class="empty">加载中…</div></td></tr>
+          <tr v-else-if="!backups.length"><td colspan="3"><div class="empty">还没有备份，点上方「立即备份」创建第一份</div></td></tr>
+        </tbody>
+      </table>
+      <div class="muted" style="font-size:12px;margin-top:10px">
+        「下载」把备份文件存到你想放的地方（建议同时保存到本机以外）；「恢复到此」用所选备份覆盖当前全部数据，不可撤销。
+      </div>
     </div>
 
     <!-- 添加用户弹窗 -->

@@ -96,3 +96,9 @@ web/shot-*.png
 .dsh-mint.log
 .dsh-token.txt
 web/__dsh_tok.json
+
+# 安装包构建产物（不入库）
+installer/payload/
+installer/out/
+.tools/node.exe
+data-payload/

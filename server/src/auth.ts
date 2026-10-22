@@ -243,7 +243,15 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     let teamId: number;
     if (teamCount === 0) {
       // 没有任何团队 → 首次部署，建团队并初始化默认档案（起账期缺省取本地年月，勿用 UTC）
-      const startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
+      // 起账期格式必须为 YYYYMM：报表按 substr(date,1,6) 与账期比较，脏格式会让所有期间报表错位
+      let startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
+      if (!/^\d{6}$/.test(startPeriod)) {
+        const m = String(startPeriod).match(/^(\d{4})-?(\d{1,2})$/);
+        if (m) startPeriod = `${m[1]}${m[2].padStart(2, '0')}`;
+        else startPeriod = localDate().slice(0, 7).replace('-', '');
+      }
+      const mm = Number(startPeriod.slice(4, 6));
+      if (mm < 1 || mm > 12) startPeriod = localDate().slice(0, 7).replace('-', '');
       const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamName || '我的账套', startPeriod);
       teamId = Number(info.lastInsertRowid);
       db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);

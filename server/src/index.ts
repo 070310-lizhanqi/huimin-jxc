@@ -16,6 +16,8 @@ import { mountPriceMemory } from './price';
 import { mountSettings } from './settings';
 import { mountAuth, requireAuth } from './auth';
 import { mountDocImport } from './docimport';
+import { mountBackup } from './backup';
+import { dataDir } from './db';
 import type { Router } from 'express';
 
 // 令牌签名密钥安全校验：单机自用可用内置密钥；公网/隧道暴露必须显式设置密钥。
@@ -34,13 +36,13 @@ const db = openDb();
 migrate(db);
 
 const app = express();
+app.set('x-powered-by', false);
 app.use(express.json({ limit: '2mb' }));
 
-// CORS：仅允许同源与本地开发端口（不再放开 *）
-const ALLOW_ORIGINS = new Set([
-  'http://127.0.0.1:7741', 'http://localhost:7741',
-  'http://127.0.0.1:19387', 'http://localhost:19387',
-]);
+// CORS：仅允许同源与本地开发端口（白名单按实际端口动态生成，改 PORT 部署不失效）
+const ALLOW_ORIGINS = new Set(
+  [PORT, 19387].flatMap((p) => [`http://127.0.0.1:${p}`, `http://localhost:${p}`]),
+);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && ALLOW_ORIGINS.has(origin)) {
@@ -64,6 +66,83 @@ app.use((_req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+// 零依赖 gzip 压缩：vendor 库（echarts ≈1MB）与 JSON API 响应体积约缩至 1/3，
+// 显著加快首屏与列表加载。阈值以下不压（压缩开销不划算）。
+import zlib from 'node:zlib';
+const GZIP_MIN = 1024;
+const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const accept = String(req.headers['accept-encoding'] ?? '');
+  if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
+    next();
+    return;
+  }
+  // 包装 write/end：缓冲完整体再统一 gzip（静态文件与 JSON 均为一次性写出，内存可控）
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let usingGzip = false;
+  const origWrite = res.write.bind(res) as (c: unknown) => boolean;
+  const origEnd = res.end.bind(res) as (...a: unknown[]) => express.Response;
+  const origSetHeader = res.setHeader.bind(res);
+  res.setHeader = (name: string, value: unknown) => {
+    // 内容长度按压缩后重算；压缩决定下发前先扣下原值
+    if (usingGzip && /^content-length$/i.test(name)) return res;
+    return origSetHeader(name, value as never);
+  };
+  res.write = (chunk: unknown): boolean => {
+    if (chunk) {
+      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      chunks.push(b);
+      size += b.length;
+    }
+    return true;
+  };
+  res.end = (...a: unknown[]): express.Response => {
+    const tail = a[0];
+    if (tail) {
+      const b = Buffer.isBuffer(tail) ? tail : Buffer.from(String(tail));
+      chunks.push(b);
+      size += b.length;
+    }
+    const type = String(res.getHeader('content-type') ?? '').split(';')[0];
+    // 决策：类型可压 + 体积达标 + 未手动指定 Content-Encoding
+    if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
+      usingGzip = true;
+      const body = zlib.gzipSync(Buffer.concat(chunks), { level: 6 });
+      chunks.length = 0;
+      origSetHeader('content-encoding', 'gzip');
+      origSetHeader('content-length', String(body.length));
+      origSetHeader('vary', 'Accept-Encoding');
+      origWrite(body);
+      return origEnd();
+    }
+    for (const c of chunks) origWrite(c);
+    return origEnd();
+  };
+  next();
+});
+
+// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
+// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
+const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+for (const h of String(process.env.ORANGE_ALLOW_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
+  ALLOW_HOSTS.add(h);
+}
+const hostAllowed = (hostHeader: string): boolean => {
+  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
+  if (ALLOW_HOSTS.has(h)) return true;
+  // 本机任意回环地址（如 127.0.0.5）也算可信
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+};
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const host = String(req.headers.host ?? '');
+  if (host && !hostAllowed(host)) {
+    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
+    return;
+  }
   next();
 });
 
@@ -104,6 +183,8 @@ mountCrud(api, db, {
 mountCrud(api, db, {
   table: 'product',
   fields: ['catId', 'name', 'barcode', 'unit', 'spec', 'salePrice', 'retailPrice', 'purchasePrice', 'wholePrice', 'lowQty', 'remark', 'archived'],
+  // 关键词同时搜条码/规格：扫码枪录入与按规格找货都不用先选列
+  kwFields: ['barcode', 'spec'],
   deleteGuard: (d, id, teamId) => {
     if (exists(`SELECT COUNT(*) AS c FROM doc_item i JOIN doc x ON x.id = i.docId WHERE i.productId = ? AND x.teamId = ?`, id, teamId)) return '商品已被单据引用，不能删除';
     if (exists(`SELECT COUNT(*) AS c FROM stock WHERE productId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '商品还有库存，不能删除';
@@ -186,6 +267,8 @@ mountDashboard(api, db);
 mountJxcReports(api, db);
 mountPriceMemory(api, db);
 mountSettings(api, db);
+// 数据备份与恢复（仅管理员）
+mountBackup(api, db);
 
 // 商品批量导入：部分成功模式（错误行跳过并返回行号错误清单）
 api.post('/product/import', (req, res) => {
@@ -305,9 +388,20 @@ app.use(
   '/vendor',
   express.static(path.join(WEB_ROOT, 'vendor'), { maxAge: '7d', immutable: true }),
 );
-app.use(express.static(WEB_ROOT));
+// 应用脚本 index.html 必须每次校验（no-cache，允许协商缓存命中 304）：
+// 否则升级程序后浏览器可能复用旧 index.html + 旧 js，用户看到的是未修复的前端。
+app.use(
+  express.static(WEB_ROOT, {
+    setHeaders: (res, filePath) => {
+      if (/\.(?:html|js|css)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    },
+  }),
+);
 // 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）
 app.get(/^\/(?!api).*/, (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, '..', '..', 'web', 'index.html'));
 });
 
@@ -323,8 +417,75 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: err.message || '服务器内部错误' });
 });
 
-app.listen(PORT, () => {
-  console.log(`orange-clone server listening on http://127.0.0.1:${PORT}`);
+// ---------- 启动监听：本机回环 + 端口自适应 + 单实例文件锁 ----------
+import http from 'node:http';
+
+/** 单实例锁：锁文件存在且 pid 活着 → 已有实例在跑，退出（启动器会去唤起已有实例） */
+function acquireLock(): boolean {
+  const lockFile = path.join(dataDir(), 'server.lock');
+  try {
+    const old = Number(fs.readFileSync(lockFile, 'utf8').trim());
+    if (old > 0) {
+      try {
+        process.kill(old, 0);
+        return false; // 旧进程仍存活
+      } catch {
+        /* 旧进程已死，锁文件是残留，可覆盖 */
+      }
+    }
+  } catch {
+    /* 无锁文件，首次启动 */
+  }
+  fs.writeFileSync(lockFile, String(process.pid));
+  // 退出时清锁（kill -9 等异常退出会留残留文件，由上面的存活检测兜底）
+  process.on('exit', () => {
+    try {
+      if (Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid) fs.rmSync(lockFile, { force: true });
+    } catch { /* ignore */ }
+  });
+  return true;
+}
+
+/** 把实际端口写进数据目录，供启动器/快捷方式读取后打开浏览器 */
+function writePortFile(port: number): void {
+  try {
+    fs.writeFileSync(path.join(dataDir(), 'port.txt'), String(port));
+  } catch { /* 数据目录不可写时忽略：仅影响自动开浏览器 */ }
+}
+
+/**
+ * 依次尝试首选端口起的连续若干个端口；成功后写 port.txt 并返回 server。
+ * ORANGE_BIND=0.0.0.0 时按原行为监听全部网卡（服务管理器隧道场景需要显式开启）。
+ */
+function listenOn(firstPort: number, tries: number): Promise<{ server: http.Server; port: number }> {
+  const host = process.env.ORANGE_BIND === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+  return new Promise((resolve, reject) => {
+    const attempt = (port: number, left: number) => {
+      const server = app.listen(port, host, () => {
+        resolve({ server, port });
+      });
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE' && left > 1) attempt(port + 1, left - 1);
+        else reject(err);
+      });
+    };
+    attempt(firstPort, tries);
+  });
+}
+
+(async () => {
+  if (!acquireLock()) {
+    console.log('[单实例] 已有一个橙子进销存实例在运行（锁文件指向存活进程），本次启动退出。');
+    process.exit(0);
+  }
+  const firstPort = PORT;
+  const { server, port } = await listenOn(firstPort, 20);
+  writePortFile(port);
+  const actualPort = port;
+  console.log(`orange-clone server listening on http://127.0.0.1:${actualPort}`);
+  if (actualPort !== firstPort) {
+    console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${actualPort}（port.txt 已更新）。`);
+  }
   // 自写 pid 文件：不论服务器由谁启动（管理器 / 命令行 / 后台任务），
   // 服务管理器都能据此识别进程并停止它，不必依赖 netstat/tasklist
   try {
@@ -332,4 +493,6 @@ app.listen(PORT, () => {
     fs.mkdirSync(runtimeDir, { recursive: true });
     fs.writeFileSync(path.join(runtimeDir, 'server.pid'), String(process.pid));
   } catch { /* 无权限或目录不可写时忽略，不影响服务本身 */ }
-});
+  // keep a reference so the server handle is not GC'd / lint-dead
+  void server;
+})();

@@ -12,15 +12,48 @@ export function localDate(d: Date = new Date()): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * 数据目录：环境变量 ORANGE_DATA_DIR 优先（安装版由启动器指向 %APPDATA%\orange-jxc），
+ * 缺省保持「当前工作目录/data」的开发行为（测试脚本与手工运行不受影响）。
+ */
+export function dataDir(): string {
+  const envDir = process.env.ORANGE_DATA_DIR;
+  if (envDir && envDir.trim()) return path.resolve(envDir.trim());
+  return path.join(process.cwd(), 'data');
+}
+
+/**
+ * 应用挂起的恢复请求：restore.pending 存在于库文件旁时，
+ * 用它整体替换当前库（含 WAL/SHM 副产物）后删除标记。
+ * 必须在 openDb 之前执行——WAL 文件一旦生成就不能再换库文件。
+ */
+function applyPendingRestore(dbPath: string): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const pending = `${dbPath}.restore-pending`;
+  if (!fs.existsSync(pending)) return;
+  for (const suffix of ['-wal', '-shm']) {
+    const side = dbPath + suffix;
+    if (fs.existsSync(side)) fs.rmSync(side, { force: true });
+  }
+  fs.rmSync(dbPath, { force: true });
+  fs.renameSync(pending, dbPath);
+  console.log('[恢复] 已从备份文件还原数据库，服务以恢复后的数据启动。');
+}
+
 export function openDb(dbPath?: string): DB {
-  const p = dbPath ?? path.join(process.cwd(), 'data', 'orange-clone.db');
+  const p = dbPath ?? path.join(dataDir(), 'orange-clone.db');
   const fs = require('node:fs') as typeof import('node:fs');
   fs.mkdirSync(path.dirname(p), { recursive: true });
+  applyPendingRestore(p);
   const db = new DatabaseSync(p);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   // 多连接（服务进程 + 外部工具/多进程）并发写时等待锁而非立刻抛 SQLITE_BUSY
   db.exec('PRAGMA busy_timeout = 5000;');
+  // WAL 模式下 synchronous=NORMAL 事务只在检查点落盘，写入提速数倍且崩溃不损库完整性
+  db.exec('PRAGMA synchronous = NORMAL;');
+  // 缓存页 64MB（默认 2MB），报表聚合与盘点差额计算显著减少磁盘读
+  db.exec('PRAGMA cache_size = -65536;');
   return db;
 }
 
@@ -252,11 +285,25 @@ export function migrate(db: DB): void {
     CREATE INDEX IF NOT EXISTS idx_settlement_team_partner ON settlement(teamId, partnerType, partnerId);
     CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir ON stock_ledger(teamId, productId, direction);
   `);
+  // 报表/账龄/趋势按日期区间过滤与排序；库存流水按商品回溯；收付款按日期统计
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_doc_team_date ON doc(teamId, date);
+    CREATE INDEX IF NOT EXISTS idx_doc_item_product ON doc_item(productId);
+    CREATE INDEX IF NOT EXISTS idx_settlement_team_date ON settlement(teamId, date);
+    CREATE INDEX IF NOT EXISTS idx_ledger_team_wh_prod ON stock_ledger(teamId, warehouseId, productId);
+  `);
   // 用户名唯一性兜底：注册/新增用户处有 SELECT 预检，但并发双击仍可能撞出重名
   // （重名会让登录 SELECT name=? 命中错误行）。老库已有重名时本索引创建失败，忽略即可。
   try {
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_name ON "user"(name)`);
   } catch {
     /* 老库存在重名用户：跳过唯一索引，业务层预检仍然生效 */
+  }
+  // 商品名唯一性兜底：商品导入预检 + 手工建档都按 (teamId, name) 判重，
+  // 并发写入仍可能撞出同名商品（报表按名称归组时会裂成两行）。老库已有重名时跳过。
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_team_name ON product(teamId, name)`);
+  } catch {
+    /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
   }
 }

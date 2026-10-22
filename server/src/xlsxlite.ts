@@ -50,6 +50,10 @@ interface ZipEntry {
   data: Buffer;
 }
 
+/** zip 条目解压体积上限（80MB）：恶意 xlsx 可以用 2MB 压缩体声明数十 GB 解压内容（zip 炸弹），
+ *  inflateRawSync 不限长会把内存吃满。正常单据表远小于此值。 */
+const MAX_ENTRY_BYTES = 80 * 1024 * 1024;
+
 /** 解析 ZIP：返回 文件名 → 内容 映射 */
 function unzip(buf: Buffer): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
@@ -69,8 +73,10 @@ function unzip(buf: Buffer): Map<string, Buffer> {
   if (cdOffset === 0xffffffff || entryCount === 0xffff) {
     throw new Error('暂不支持 ZIP64 格式的 xlsx 文件');
   }
-  // 2) 遍历中央目录
+  if (cdOffset + 46 > buf.length || cdOffset < 0) throw new Error('ZIP 中央目录损坏');
+  // 2) 遍历中央目录（越界前终止：损坏文件可能声明了超量条目）
   for (let i = 0; i < entryCount; i++) {
+    if (cdOffset + 46 > buf.length) throw new Error('ZIP 中央目录损坏');
     if (buf.readUInt32LE(cdOffset) !== 0x02014b50) throw new Error('ZIP 中央目录损坏');
     const method = buf.readUInt16LE(cdOffset + 10);
     const compSize = buf.readUInt32LE(cdOffset + 20);
@@ -81,15 +87,17 @@ function unzip(buf: Buffer): Map<string, Buffer> {
     const name = buf.toString('utf8', cdOffset + 46, cdOffset + 46 + nameLen);
     cdOffset += 46 + nameLen + extraLen + commentLen;
     // 3) 读本地头，取数据
-    if (buf.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`ZIP 本地头损坏：${name}`);
+    if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`ZIP 本地头损坏：${name}`);
     const lNameLen = buf.readUInt16LE(localOffset + 26);
     const lExtraLen = buf.readUInt16LE(localOffset + 28);
     const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+    if (dataStart + compSize > buf.length) throw new Error(`ZIP 条目越界：${name}`);
     const raw = buf.subarray(dataStart, dataStart + compSize);
     if (method === 0) {
       out.set(name, Buffer.from(raw));
     } else if (method === 8) {
-      out.set(name, zlib.inflateRawSync(raw));
+      // maxOutputLength：解压结果超过上限直接抛错，防 zip 炸弹吃满内存
+      out.set(name, zlib.inflateRawSync(raw, { maxOutputLength: MAX_ENTRY_BYTES }));
     } else {
       throw new Error(`不支持的 ZIP 压缩方式 ${method}：${name}`);
     }

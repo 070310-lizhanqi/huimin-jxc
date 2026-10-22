@@ -42,6 +42,14 @@ interface CustomerReportRow {
   orderCount: number;
 }
 
+/** 报表日期参数校验：脏日期（'2026/10/1'）会让字符串比较整体失效，报表静默漏计。
+ *  合法值直接返回；非法值回落默认区间（本月）。 */
+function safeRange(req: Request): { from: string; to: string } {
+  const { from, to } = rangeOf(req);
+  const ok = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  return { from: ok(from) ? from : rangeOf({ query: {} } as Request).from, to: ok(to) ? to : rangeOf({ query: {} } as Request).to };
+}
+
 function rangeOf(req: Request): { from: string; to: string } {
   const now = new Date();
   const y = now.getFullYear();
@@ -57,7 +65,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   router.get('/report/sales', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = rangeOf(req);
+    const { from, to } = safeRange(req);
     const days = db
       .prepare(
         `SELECT substr(d.date, 1, 10) AS day,
@@ -91,7 +99,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   router.get('/report/product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = rangeOf(req);
+    const { from, to } = safeRange(req);
     // 按 (单据, 商品) 聚合，并带上整单折扣与单据明细总额用于分摊
     const lines = db
       .prepare(
@@ -223,7 +231,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   router.get('/report/customer', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = rangeOf(req);
+    const { from, to } = safeRange(req);
     const rows = db
       .prepare(
         `SELECT d.partnerId AS cusId, c.name AS cusName,

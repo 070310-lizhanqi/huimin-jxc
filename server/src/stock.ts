@@ -21,8 +21,10 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       args.push(Number(req.query.productId));
     }
     if (req.query.kw) {
-      conds.push('p.name LIKE ?');
-      args.push(`%${String(req.query.kw)}%`);
+      // 名称/条码/规格任一命中（扫码查库存时手上只有条码）
+      const like = `%${String(req.query.kw).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      conds.push(`(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`);
+      args.push(like, like, like);
     }
     if (req.query.ifShowZero === '0') {
       conds.push('s.qty != 0');

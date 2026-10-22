@@ -136,6 +136,16 @@ try {
 }
 db.exec('PRAGMA foreign_keys = ON;');
 
+// 重新补齐索引/列：清数据不清结构，但老库若曾因重名数据跳过唯一索引创建，
+// 清空后必须重跑 migrate 才能把唯一索引补回来（否则重名拦截失效）
+try {
+  const { migrate } = require(path.join(__dirname, '..', 'dist', 'server', 'db.js'));
+  migrate(db);
+  console.log('已重跑 migrate（补齐索引与列）');
+} catch (e) {
+  console.log('跳过 migrate（需先 pnpm build）: ' + e.message);
+}
+
 // 校验
 const tables = ['team', 'user', 'warehouse', 'reservoir', 'account', 'cat', 'unit', 'clerk', 'product', 'customer', 'vendor', 'doc', 'settlement', 'stock'];
 const counts = {};

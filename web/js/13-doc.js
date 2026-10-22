@@ -480,8 +480,14 @@ const DocPage = {
       fmtMoney, partnerLabel, whLabel, prodLabel, store, STATUS_TEXT, DOC_META, specOf, unitOf,
     };
   },
+// 模板必须单根：v-if/v-else 之前不能有任何根级注释或兄弟节点，否则组件退化为
+  // 多根片段（fragment），外层 <transition mode="out-in"> 无法挂载/卸载该片段，
+  // 导致在两个单据子路由（如 采购入库 ↔ 销售出库）之间切换时整页空白。
+  // 单根必须：外层 <transition mode="out-in"> 要求组件只有一个根元素才能完成「离场→入场」；
+  // 此前列表/编辑/doc-viewer 三根并列构成片段（fragment），离场后永不入场导致整页空白，
+  // 且卡死的 transition 会级联影响后续路由切换。用布局中性的 wrapper 收束为单根。
   template: `
-  <!-- ===== 列表态 ===== -->
+  <div class="doc-page-root">
   <div class="page-card" v-if="!editor.open">
     <div class="page-head">
       <span class="page-title">{{ DOC_META[activeType].label }}</span>
@@ -890,6 +896,7 @@ const DocPage = {
     </div>
   </div>
 
-  <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>`,
+  <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
+  </div>`,
 };
 

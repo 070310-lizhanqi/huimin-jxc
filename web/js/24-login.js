@@ -11,6 +11,9 @@ const LoginPage = {
     const busy = ref(false);
     const firstRun = ref(false); // 系统尚未初始化 → 默认注册并填账套名
     const initialized = ref(false); // 已有账套 → 注册需要邀请码
+    // 记住用户名：存 localStorage（不存密码），下次登录自动回填
+    const REMEMBER_KEY = 'oc_login_username';
+    form.username = localStorage.getItem(REMEMBER_KEY) || '';
 
     onMounted(async () => {
       try {
@@ -49,6 +52,9 @@ const LoginPage = {
         setToken(r.token);
         auth.user = r.user;
         auth.team = r.team || { id: r.teamId, name: r.teamName };
+        // 登录成功才记住用户名；注册模式不记（新账号下一次用不用还不确定）
+        if (mode.value === 'login') localStorage.setItem(REMEMBER_KEY, form.username.trim());
+        else localStorage.removeItem(REMEMBER_KEY);
         toast(mode.value === 'login' ? '登录成功' : '账套创建成功');
         location.hash = '#/dashboard';
       } catch (e) {

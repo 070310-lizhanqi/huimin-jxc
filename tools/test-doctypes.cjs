@@ -36,8 +36,15 @@ const stockOf = async (teamId, whId, prodId) => {
 
   const wh = (await api('POST', '/warehouse', { teamId, name: '主仓' })).json;
   const wh2 = (await api('POST', '/warehouse', { teamId, name: '备仓' })).json;
-  const prod = (await api('POST', '/product', { teamId, name: '物料A', spec: 'kg', unit: 'kg', purchasePrice: 1000, salePrice: 2000 })).json;
-  const prod2 = (await api('POST', '/product', { teamId, name: '成品B', spec: '台', unit: '台', purchasePrice: 5000, salePrice: 9000 })).json;
+  // 幂等建档：同账套重跑时名称已存在（商品名唯一索引），复用而不是重复建行
+  const findOrCreateProd = async (fields) => {
+    const exist = (await api('GET', `/product?teamId=${teamId}&kw=${encodeURIComponent(fields.name)}`)).json
+      .find((x) => x.name === fields.name);
+    if (exist) return exist;
+    return (await api('POST', '/product', { teamId, ...fields })).json;
+  };
+  const prod = await findOrCreateProd({ name: '物料A', spec: 'kg', unit: 'kg', purchasePrice: 1000, salePrice: 2000 });
+  const prod2 = await findOrCreateProd({ name: '成品B', spec: '台', unit: '台', purchasePrice: 5000, salePrice: 9000 });
 
   // 备货 100
   {

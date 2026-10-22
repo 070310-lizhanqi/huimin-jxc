@@ -9,6 +9,17 @@ import { localDate } from './db';
 
 type Value = string | number | null;
 
+/** 收付款创建双击防重：key=(团队,类型,往来,金额,账户,日期)，3 秒窗口内幂等返回首单 */
+const SETTLE_DEDUP_MS = 3000;
+const recentSettles = new Map<string, { id: number; at: number }>();
+function rememberSettle(key: string, id: number): void {
+  recentSettles.set(key, { id, at: Date.now() });
+  if (recentSettles.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of recentSettles) if (now - v.at > SETTLE_DEDUP_MS) recentSettles.delete(k);
+  }
+}
+
 export function mountSettlements(router: Router, db: DatabaseSync): void {
   router.get('/settlement/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
@@ -19,8 +30,27 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       conds.push('type = ?');
       args.push(String(req.query.type));
     }
+    if (req.query.partnerId) {
+      conds.push('partnerId = ?');
+      args.push(Number(req.query.partnerId));
+    }
+    if (req.query.refDocId) {
+      conds.push('refDocId = ?');
+      args.push(Number(req.query.refDocId));
+    }
+    if (req.query.from) {
+      conds.push('date >= ?');
+      args.push(String(req.query.from));
+    }
+    if (req.query.to) {
+      conds.push('date <= ?');
+      args.push(String(req.query.to));
+    }
+    // rows 参数历史上一直被调用方传（test-settle 等）但从未生效：这里真正实现并设 500 上限
+    const rawRows = Number(req.query.rows ?? 200);
+    const rows = Math.min(500, Math.max(1, Number.isFinite(rawRows) && rawRows > 0 ? Math.floor(rawRows) : 200));
     const list = db
-      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT 200`)
+      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ${rows}`)
       .all(...args);
     return res.json(list);
   });
@@ -51,6 +81,17 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       .get(partnerId, teamId) as { id: number } | undefined;
     if (!partner) return res.status(400).json({ error: '往来单位不存在' });
 
+    let createdId = 0;
+    // 双击防重：3 秒窗口内同 (团队,类型,往来,金额,账户,日期) 的重复请求返回首次结果。
+    // 创建型请求不能像单据那样幂等回查草稿——结算入账立即生效，重复请求会造成重复冲账。
+    const dedupKey = JSON.stringify([teamId, type, partnerType, partnerId, amount, accountId, String(req.body.date ?? '')]);
+    const hit = recentSettles.get(dedupKey);
+    if (hit && Date.now() - hit.at < SETTLE_DEDUP_MS) {
+      const still = db.prepare(`SELECT id FROM settlement WHERE id = ? AND teamId = ?`).get(hit.id, teamId);
+      if (still) return res.json({ ok: true, id: hit.id, dedup: true });
+      recentSettles.delete(dedupKey);
+    }
+
     try {
       dbtransaction(db, () => {
         // 锁内校验账户与余额：锁外校验存在 TOCTOU 窗口（校验后、入账前余额可能被并发改动）
@@ -66,7 +107,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             );
           }
         }
-        db.prepare(
+        const info = db.prepare(
           `INSERT INTO settlement (teamId, type, partnerType, partnerId, accountId, amount, date, refDocId, remark, isAuto)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         ).run(
@@ -80,6 +121,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           req.body.refDocId ? Number(req.body.refDocId) : null,
           (req.body.remark as string) ?? null,
         );
+        createdId = Number(info.lastInsertRowid);
         // 应收冲减 / 应付冲减：收款使 cus 余额减少，付款使 ven 余额减少。
         // upsert 原子写入，避免并发首笔时 SELECT-then-INSERT 撞主键
         db.prepare(
@@ -95,7 +137,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     } catch (e) {
       return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
     }
-    return res.json({ ok: true });
+    rememberSettle(dedupKey, createdId);
+    return res.json({ ok: true, id: createdId });
   });
 
   /** 收付款单修改：先反向冲回旧记录影响，再按新值入账 */

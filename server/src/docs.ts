@@ -246,8 +246,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       const k = `%${String(req.query.kw)}%`;
       args.push(k, k);
     }
-    const page = Math.max(1, Number(req.query.page ?? 1));
-    const rows = Number(req.query.rows ?? 20);
+    const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+    // 行数上限 200：恶意超大分页会把全表拖进内存（DoS 面）
+    const rows = Math.min(200, Math.max(1, Number(req.query.rows ?? 20) || 20));
     const total = db
       .prepare(`SELECT COUNT(*) AS c FROM doc d WHERE ${conds.join(' AND ')}`)
       .get(...args) as { c: number };
@@ -378,7 +379,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           input.remark ?? null,
           totalAmount,
           totalQty,
-          null,
+          // 开单人：列存在但此前一直写 NULL，列表页无法追责
+          req.auth?.userId ?? null,
           input.refOrderId ?? null,
           input.receiverName ?? null,
           input.receiverMobile ?? null,
@@ -542,6 +544,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           clerkId: number | null;
           warehouseId: number | null;
           remark: string | null;
+          receiverName: string | null;
+          receiverMobile: string | null;
+          receiverAddress: string | null;
+          discount: number | null;
+          accountId: number | null;
         }
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
@@ -563,8 +570,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       ).a;
       const info = db
         .prepare(
-          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NULL)`,
+          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
+                           receiverName, receiverMobile, receiverAddress, discount, accountId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
         )
         .run(
           teamId,
@@ -578,7 +586,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           doc.remark ? `${doc.remark}（复制）` : '（复制自原单）',
           totalAmount,
           totalQty,
-          null,
+          req.auth?.userId ?? null,
+          // 收件人与整单折扣一并复制：复制销售单重新发货时不必重录收件信息
+          doc.receiverName,
+          doc.receiverMobile,
+          doc.receiverAddress,
+          Math.max(0, Math.round(Number(doc.discount ?? 0))),
+          doc.accountId,
         );
       newId = Number(info.lastInsertRowid);
       db.prepare(
@@ -598,9 +612,15 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const input = req.body as DocInput & { id: number };
     const doc = db
       .prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`)
-      .get(input.id, input.teamId) as { status: string; billNo: string } | undefined;
+      .get(input.id, input.teamId) as { status: string; billNo: string; type: string } | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'draft') return res.status(400).json({ error: '仅草稿可编辑' });
+    // 类型必须与原单一致：edit 不改 type（表头无此列更新），若按请求里的 type 校验
+    // （如 adjust 允许负数量）而落库仍是原类型，过账会出现「负数出库=加库存」的错账
+    if (input.type && input.type !== doc.type) {
+      return res.status(400).json({ error: `单据类型不可修改（原类型 ${DOC_META[doc.type]?.label ?? doc.type}）` });
+    }
+    input.type = doc.type as typeof input.type;
     const err = validate(db, input);
     if (err) return res.status(400).json({ error: err });
     const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
@@ -707,12 +727,15 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
     db.exec('BEGIN IMMEDIATE');
     try {
+      // 预编译到循环外：批量接口一次可能提交上百张草稿
+      const sel = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`);
+      const upd = db.prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=?`);
       for (const id of ids) {
-        const row = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        const row = sel.get(id, teamId) as
           | { status: string }
           | undefined;
         if (!row || row.status !== 'draft') { skipped.push(id); continue; }
-        db.prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=?`).run(id);
+        upd.run(id);
         done += 1;
       }
       db.exec('COMMIT');
@@ -773,8 +796,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       // 客户价格记忆：销售类单据审核后记住每个商品的成交价
       rememberPrices(db, { ...doc, teamId }, id);
       db.prepare(
-        `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=? WHERE id=?`,
-      ).run(auditBy || null, id);
+        `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=?, auditUserId=? WHERE id=?`,
+      ).run(auditBy || null, req.auth?.userId ?? null, id);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');
@@ -924,12 +947,65 @@ function validate(db: DatabaseSync, input: DocInput): string | null {
     }
   }
   if (!Array.isArray(input.items) || input.items.length === 0) return '明细不能为空';
+  // 逐行 4~5 次 SELECT 会让大单校验退化为 O(n) 查询：先按 id 批量预取归属，循环内只查 Map
+  {
+    const productIds = [...new Set(input.items.map((it) => Number(it.productId)).filter(Boolean))];
+    const reservoirIds = [...new Set(input.items.map((it) => Number(it.reservoirId)).filter(Boolean))];
+    const toWhIds = [...new Set(input.items.map((it) => Number(it.toWarehouseId)).filter(Boolean))];
+    const toResIds = [...new Set(input.items.map((it) => Number(it.toReservoirId)).filter(Boolean))];
+    const existIn = (table: string, ids: number[]): Set<number> => {
+      if (!ids.length) return new Set();
+      const rows = db
+        .prepare(`SELECT id FROM ${table} WHERE teamId = ? AND id IN (${ids.map(() => '?').join(',')})`)
+        .all(input.teamId, ...ids) as Array<{ id: number }>;
+      return new Set(rows.map((r) => r.id));
+    };
+    const prodSet = existIn('product', productIds);
+    // 库区校验需限定所属仓库：一次取回 id→warehouseId 映射
+    const resMap = new Map<number, number>();
+    if (reservoirIds.length) {
+      for (const r of db
+        .prepare(`SELECT id, warehouseId FROM reservoir WHERE teamId = ? AND id IN (${reservoirIds.map(() => '?').join(',')})`)
+        .all(input.teamId, ...reservoirIds) as Array<{ id: number; warehouseId: number }>) {
+        resMap.set(r.id, r.warehouseId);
+      }
+    }
+    const toWhSet = existIn('warehouse', toWhIds);
+    const toResMap = new Map<number, number>();
+    if (toResIds.length) {
+      for (const r of db
+        .prepare(`SELECT id, warehouseId FROM reservoir WHERE teamId = ? AND id IN (${toResIds.map(() => '?').join(',')})`)
+        .all(input.teamId, ...toResIds) as Array<{ id: number; warehouseId: number }>) {
+        toResMap.set(r.id, r.warehouseId);
+      }
+    }
+    for (const [i, it] of input.items.entries()) {
+      if (!it.productId) return `第 ${i + 1} 行缺少商品`;
+      if (!prodSet.has(Number(it.productId))) return `第 ${i + 1} 行商品不存在`;
+      if (it.reservoirId) {
+        // 行级库区挂在单据主仓库下（明细无独立源仓库字段）
+        if (resMap.get(Number(it.reservoirId)) !== Number(input.warehouseId)) return `第 ${i + 1} 行库区不属于该仓库`;
+      }
+      if (it.toWarehouseId && !toWhSet.has(Number(it.toWarehouseId))) return `第 ${i + 1} 行调往仓库不存在`;
+      if (it.toReservoirId && it.toWarehouseId) {
+        if (toResMap.get(Number(it.toReservoirId)) !== Number(it.toWarehouseId)) return `第 ${i + 1} 行调往库区不属于调往仓库`;
+      }
+    }
+  }
+  // 数量与单价合法性（独立成段，便于上限调整）
   for (const [i, it] of input.items.entries()) {
-    if (!it.productId) return `第 ${i + 1} 行缺少商品`;
-    const prod = db
-      .prepare(`SELECT id FROM product WHERE id = ? AND teamId = ?`)
-      .get(it.productId, input.teamId) as { id: number } | undefined;
-    if (!prod) return `第 ${i + 1} 行商品不存在`;
+    // 类型必须是 number：null/字符串/布尔在 Number() 后会变成 0/NaN/1 蒙混过校验
+    // （JSON.stringify(Infinity) === 'null'，qty:null 落库即 0 数量行）。
+    // 例外：price 可缺省（调拨/盘点等纯库存单不填价格），undefined 视为 0。
+    if (it.price !== undefined && typeof it.price !== 'number') {
+      return `第 ${i + 1} 行单价必须是数值`;
+    }
+    if (typeof it.qty !== 'number') {
+      return `第 ${i + 1} 行数量必须是数值`;
+    }
+    if (!Number.isFinite(it.qty) || (it.price !== undefined && !Number.isFinite(it.price))) {
+      return `第 ${i + 1} 行数量或单价必须是有限数值`;
+    }
     // 允许负数的类型：调整单（盘亏）、生产组装（负数行 = 耗用原料）
     // 允许 0 的类型：盘点单（实盘数量可以为 0）
     const allowNegative = input.type === 'adjust' || input.type === 'assembly';
@@ -940,6 +1016,13 @@ function validate(db: DatabaseSync, input: DocInput): string | null {
     if (it.price < 0) return `第 ${i + 1} 行单价不能为负`;
     if (it.price > MAX_PRICE_CENTS) return `第 ${i + 1} 行单价超出上限 ${MAX_PRICE_CENTS / 100} 元`;
   }
+  // 折扣/收付款负数直接拒绝：负折扣会「凭空加价」，负收款会反向冲账
+  const discountRaw = Number(input.discount ?? 0);
+  if (Number.isFinite(discountRaw) && discountRaw < 0) return '整单折扣不能为负数';
+  const paidRaw = Number(input.paidAmount ?? 0);
+  if (Number.isFinite(paidRaw) && paidRaw < 0) return '本次收款不能为负数';
+  const depRaw = Number(input.deposit ?? 0);
+  if (Number.isFinite(depRaw) && depRaw < 0) return '抵扣订金不能为负数';
   return null;
 }
 
@@ -951,12 +1034,15 @@ function insertItems(db: DatabaseSync, docId: number, items: ItemInput[]): void 
   for (const it of items) {
     // 价格可缺省（调拨/盘点等纯库存单据不填价格）
     const price = Math.round(Number(it.price ?? 0));
+    // 数量统一到 4 位小数：客户端传 0.1+0.2 之类的浮点噪声会直接落库，
+    // 与过账时的 roundQty 口径不一致会导致对账出现 -1e-16 级差额
+    const qty = roundQty(Number(it.qty));
     stmt.run(
       docId,
       it.productId,
-      it.qty,
+      qty,
       price,
-      Math.round(it.qty * price),
+      Math.round(qty * price),
       it.batchNo ?? null,
       it.productionDate ?? null,
       it.expiryDate ?? null,
@@ -968,6 +1054,9 @@ function insertItems(db: DatabaseSync, docId: number, items: ItemInput[]): void 
   }
 }
 
+/** 单号 upsert 语句：mountDocs 时预编译（每次开单都会用到，避免重复编译） */
+let stmtNextBillNo: import('node:sqlite').StatementSync | null = null;
+
 function nextBillNo(db: DatabaseSync, teamId: number, type: string): string {
   // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）
   const prefix = loadPrefix(db, teamId)[type] ?? BILL_PREFIX[type] ?? 'NO';
@@ -976,11 +1065,13 @@ function nextBillNo(db: DatabaseSync, teamId: number, type: string): string {
   const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
   // 独立序号表：删除草稿后序号不复用，保证 billNo 永不重复
   const key = `${teamId}:${prefix}:${datePart}`;
-  db.prepare(
+  if (!stmtNextBillNo) stmtNextBillNo = db.prepare(
     `INSERT INTO bill_seq (k, seq) VALUES (?, 1)
-     ON CONFLICT(k) DO UPDATE SET seq = seq + 1`,
-  ).run(key);
-  const row = db.prepare(`SELECT seq FROM bill_seq WHERE k = ?`).get(key) as { seq: number };
+     ON CONFLICT(k) DO UPDATE SET seq = seq + 1
+     RETURNING seq`,
+  );
+  // upsert + RETURNING 一次往返取号（原实现 upsert 后再 SELECT，两次语句）
+  const row = stmtNextBillNo.get(key) as { seq: number };
   return `${prefix}${datePart}${String(row.seq).padStart(4, '0')}`;
 }
 
