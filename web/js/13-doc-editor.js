@@ -129,10 +129,30 @@ const DocEditor = {
         editor.form = blankForm();
         if (emeta.value.warehouse) loadStock(editor.form.warehouseId);
       }
+      snap();
     }
     onMounted(init);
 
-    function backToList() { emit('close'); }
+    /**
+     * 未保存提醒：开单时手一抖点「返回列表」/浏览器后退，
+     * 填了半天的单据直接蒸发。这里记住「进入时的表单快照」，
+     * 返回前比对是否改过，改过就二次确认。
+     */
+    const snapshot = ref('');
+    function snap() {
+      try { snapshot.value = JSON.stringify(editor.form || null); } catch { snapshot.value = ''; }
+    }
+    const isDirty = computed(() => {
+      if (editor.ro || !editor.form) return false;
+      try { return JSON.stringify(editor.form) !== snapshot.value; } catch { return false; }
+    });
+    async function backToList() {
+      if (isDirty.value) {
+        const ok = await confirmBox('当前单据有未保存的修改，确定返回列表？修改将丢失。', '离开确认');
+        if (!ok) return;
+      }
+      emit('close');
+    }
     function addItem() { editor.form.items.push(blankItem()); }
     function removeItem(idx) {
       if (editor.form.items.length <= 1) return toast('至少保留一行明细', 'error');
@@ -242,7 +262,7 @@ const DocEditor = {
     return {
       type: props.type, editor, saving, emeta, epartners, grossAmt, totalQty, totalAmt, oweAmt,
       stockMap, priceMem, loadPriceMem, addItem, removeItem, onPick, lineAmt, stockOf,
-      scanCode, doScan, scanBarcode, setFullPaid, fullDiscount, save, saveAndAudit, backToList,
+      scanCode, doScan, scanBarcode, setFullPaid, fullDiscount, save, saveAndAudit, backToList, isDirty,
       fmtMoney, store, STATUS_TEXT, DOC_META, specOf, unitOf,
     };
   },
@@ -257,7 +277,7 @@ const DocEditor = {
         {{ STATUS_TEXT[editor.status] }} · 只读
       </span>
       <span class="de-sp"></span>
-      <button class="btn" @click="backToList">返回列表</button>
+      <button class="btn" @click="backToList">返回列表{{ isDirty ? ' *' : '' }}</button>
       <template v-if="!editor.ro">
         <button class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存草稿' }}</button>
         <button class="btn primary" :disabled="saving" @click="saveAndAudit">保存并审核</button>

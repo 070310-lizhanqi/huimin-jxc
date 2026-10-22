@@ -5,22 +5,79 @@ const LedgerPage = {
   components: { DocViewer },
   setup() {
     const productId = ref(null);
+    const warehouseId = ref(null);
+    const fRange = ref([]);
     const list = ref([]);
+    const total = ref(0);
+    const page = ref(1);
+    const rows = ref(50);
     const loading = ref(true);
     const viewerId = ref(null);
+    // 关联单据单号：一次批量取，避免每条流水单独查（原实现直接显示 #id）
+    const docNos = ref({});
 
     async function load() {
       loading.value = true;
       try {
-        list.value = await api.get('/stock/ledger', { teamId: store.teamId, productId: productId.value });
+        const q = { teamId: store.teamId, page: page.value, rows: rows.value };
+        if (productId.value) q.productId = productId.value;
+        if (warehouseId.value) q.warehouseId = warehouseId.value;
+        if (fRange.value?.length === 2) { q.from = fRange.value[0]; q.to = fRange.value[1]; }
+        const r = await api.get('/stock/ledger', q);
+        // 兼容旧接口返回数组
+        if (Array.isArray(r)) { list.value = r; total.value = r.length; }
+        else { list.value = r.rows || []; total.value = r.total || 0; }
+        loadDocNos();
       } catch (e) {
         toast('库存流水加载失败：' + e.message, 'error');
       } finally {
         loading.value = false;
       }
     }
+
+    async function loadDocNos() {
+      const ids = [...new Set(list.value.map((l) => l.refDocId).filter(Boolean))]
+        .filter((id) => !docNos.value[id]);
+      if (!ids.length) return;
+      try {
+        const map = await api.get('/doc/bill-nos', { teamId: store.teamId, ids: ids.join(',') });
+        const next = { ...docNos.value };
+        for (const id of ids) next[id] = map?.[String(id)]?.billNo ?? ('#' + id);
+        docNos.value = next;
+      } catch { /* 单号只是展示信息，失败不影响流水本身 */ }
+    }
+
+    function resetFilter() {
+      productId.value = null; warehouseId.value = null; fRange.value = [];
+      page.value = 1; load();
+    }
+    function onPage(p) { page.value = p; load(); }
+    function onSize(n) { rows.value = n; page.value = 1; load(); }
+    function search() { page.value = 1; load(); }
+
+    function doExport() {
+      if (!list.value.length) return toast('没有可导出的流水', 'warning');
+      exportCsv(
+        `库存流水_${new Date().toISOString().slice(0, 10)}.csv`,
+        ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'],
+        list.value.map((l) => [
+          l.createdAt,
+          store.products.find((p) => p.id === l.productId)?.name ?? '#' + l.productId,
+          store.warehouses.find((w) => w.id === l.warehouseId)?.name ?? '—',
+          l.batchNo || '—',
+          l.direction === 'in' ? '入库' : '出库',
+          l.qty,
+          (l.unitCost / 100).toFixed(2),
+          docNos.value[l.refDocId] ?? ('#' + l.refDocId),
+        ]),
+      );
+    }
+
     onMounted(load);
-    return { productId, list, loading, viewerId, load, store, fmtMoney };
+    return {
+      productId, warehouseId, fRange, list, total, page, rows, loading, viewerId, docNos,
+      load, resetFilter, onPage, onSize, search, doExport, store, fmtMoney,
+    };
   },
   template: `
   <div>
@@ -28,14 +85,20 @@ const LedgerPage = {
       <div class="page-head">
         <span class="hd-title">库存流水</span>
         <span class="hd-sp"></span>
+        <div class="hd-right"><button class="btn" @click="doExport">导出</button></div>
       </div>
       <div class="filterbar">
-        <div class="fctrl" style="width:260px"><el-select v-model="productId" filterable clearable placeholder="全部商品" @change="load">
+        <div class="fctrl" style="width:240px"><el-select v-model="productId" filterable clearable placeholder="全部商品" @change="search">
           <el-option v-for="p in store.products" :key="p.id" :label="p.name + (p.spec ? '（' + p.spec + '）' : '')" :value="p.id"/>
         </el-select></div>
-        <button class="btn" @click="load">查询</button>
+        <el-select v-model="warehouseId" clearable placeholder="全部仓库" style="width:150px" @change="search">
+          <el-option v-for="w in store.warehouses" :key="w.id" :label="w.name" :value="w.id"/>
+        </el-select>
+        <el-date-picker v-model="fRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" class="finp" style="width:240px" @change="search"/>
+        <button class="btn" @click="search">查询</button>
+        <button class="btn icon-only" title="重置" @click="resetFilter"><el-icon><RefreshLeft/></el-icon></button>
         <span class="fb-gap"></span>
-        <span class="muted">共 {{ list.length }} 条<template v-if="list.length >= 200">（仅显示最近 200 条）</template></span>
+        <span class="muted fb-count">共 {{ total }} 条</span>
       </div>
       <div class="tbl-wrap">
         <sk-table v-if="loading && !list.length" :rows="8" :cols="8"/>
@@ -51,13 +114,17 @@ const LedgerPage = {
               <td><span :class="'tag ' + (l.direction === 'in' ? 'tag-audit' : 'tag-void')">{{ l.direction === 'in' ? '入库' : '出库' }}</span></td>
               <td class="r">{{ l.qty }}</td>
               <td class="r money">{{ fmtMoney(l.unitCost) }}</td>
-              <td><span class="link" @click="viewerId = l.refDocId">单据 #{{ l.refDocId }}</span></td>
+              <td><span class="link" @click="viewerId = l.refDocId">{{ docNos[l.refDocId] || ('#' + l.refDocId) }}</span></td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div class="pager" v-if="total > rows">
+        <el-pagination background layout="total, sizes, prev, pager, next" :total="total"
+          :current-page="page" :page-size="rows" :page-sizes="[50, 100, 200]"
+          @current-change="onPage" @size-change="onSize"/>
       </div>
     </div>
     <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
   </div>`,
 };
-

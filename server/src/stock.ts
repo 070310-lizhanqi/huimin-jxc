@@ -154,21 +154,51 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     return res.json(rows);
   });
 
-  // 单商品库存流水
+  /**
+   * 库存流水查询。
+   * 原先固定 `LIMIT 200` 且只支持按商品过滤，超过 200 条的流水直接看不见，
+   * 也没法按仓库/日期查。现在支持 warehouseId/from/to 过滤 + 分页：
+   * 带 page/rows 时返回 { rows, total }，不带时仍返回数组（兼容旧调用）。
+   */
   router.get('/stock/ledger', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const productId = Number(req.query.productId);
+    const warehouseId = Number(req.query.warehouseId);
     const conds: string[] = ['teamId = ?'];
     const args: Array<string | number> = [teamId];
     if (productId) {
       conds.push('productId = ?');
       args.push(productId);
     }
+    if (warehouseId) {
+      conds.push('warehouseId = ?');
+      args.push(warehouseId);
+    }
+    // 流水按 createdAt 存本地时间字符串（YYYY-MM-DD HH:mm:ss），日期区间直接比前缀
+    const from = typeof req.query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : '';
+    const to = typeof req.query.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : '';
+    if (from) {
+      conds.push('substr(createdAt,1,10) >= ?');
+      args.push(from);
+    }
+    if (to) {
+      conds.push('substr(createdAt,1,10) <= ?');
+      args.push(to);
+    }
+    const where = conds.join(' AND ');
+    const paged = req.query.page !== undefined || req.query.rows !== undefined;
+    if (!paged) {
+      const list = db.prepare(`SELECT * FROM stock_ledger WHERE ${where} ORDER BY id DESC LIMIT 200`).all(...args);
+      return res.json(list);
+    }
+    const rows = Math.min(Math.max(Number(req.query.rows) || 50, 1), 200);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const total = (db.prepare(`SELECT COUNT(*) AS c FROM stock_ledger WHERE ${where}`).get(...args) as { c: number }).c;
     const list = db
-      .prepare(`SELECT * FROM stock_ledger WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT 200`)
-      .all(...args);
-    return res.json(list);
+      .prepare(`SELECT * FROM stock_ledger WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(...args, rows, (page - 1) * rows);
+    return res.json({ rows: list, total, page, rowsPerPage: rows });
   });
 
   // 汇总仪表盘：SKU 数、库存总量、库存货值（按最近入库成本估）

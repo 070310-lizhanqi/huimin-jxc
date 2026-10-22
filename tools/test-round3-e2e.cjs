@@ -1,9 +1,9 @@
-/**
+﻿/**
  * 第 3 轮 bug 测试：端到端业务闭环 + 全量回归前置。
  * 场景：建商品 → 采购入库（带付款）→ 销售出库（带收款+折扣）→ 部分退货 →
  *       收付款冲抵 → 库存/往来/报表数字一致 → 作废链路 → 账龄对账。
  */
-const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741';
+const BASE = (process.env.OC_BASE || 'http://127.0.0.1:7741').replace(/\/api\/?$/, '');
 const API = BASE + '/api';
 let token = null;
 let teamId = null;

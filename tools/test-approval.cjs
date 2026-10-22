@@ -1,4 +1,4 @@
-const B = 'http://127.0.0.1:7741/api';
+﻿const B = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 let T = null;
 async function get(p) { const r = await fetch(B + p, { headers: await authHeader() }); return JSON.parse(await r.text()); }

@@ -1,10 +1,10 @@
-/**
+﻿/**
  * 第 1 轮 bug 测试：v0.3.0 优化项专项回归。
  * 覆盖：gzip 压缩完整性 / 列表分页上限 / LIKE 转义 / 条码搜索 / 结算列表过滤与 rows /
  *       结算创建幂等 / 改单类型锁定 / 复制单补字段 / 开单人审核人落库 / 起账期校验 /
  *       xlsx 炸弹防护 / 商品重名拦截。
  */
-const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741';
+const BASE = (process.env.OC_BASE || 'http://127.0.0.1:7741').replace(/\/api\/?$/, '');
 const API = BASE + '/api';
 let token = null;
 let teamId = null;

@@ -59,7 +59,22 @@ const PartnerPage = {
     }
     const LEVEL = { salePrice: '标准售价', wholePrice: '批发价', retailPrice: '零售价' };
     function reload() { return loadBase(); }
-    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, reload };
+    // 往来单位导出（此前只有商品/库存页有导出，客户供应商名单没法带走）
+    function doExport() {
+      if (!list.value.length) return toast('没有可导出的数据', 'warning');
+      const isCus = tab.value === 'cus';
+      const head = ['名称', '手机', '地址', ...(isCus ? ['价格等级'] : []), '备注'];
+      exportCsv(
+        `${isCus ? '客户' : '供应商'}_${new Date().toISOString().slice(0, 10)}.csv`,
+        head,
+        list.value.map((p) => [
+          p.name || '', p.mobile || '', p.address || '',
+          ...(isCus ? [LEVEL[p.priceLevel] || '标准售价'] : []),
+          p.remark || '',
+        ]),
+      );
+    }
+    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, reload, doExport };
   },
   template: `
   <div>
@@ -76,6 +91,7 @@ const PartnerPage = {
         </span>
         <input class="finp w-key" v-model="kw" placeholder="名称 / 手机">
         <button class="btn" @click="reload">查询</button>
+        <button class="btn" @click="doExport">导出</button>
         <span class="fb-gap"></span>
         <span class="muted">共 {{ list.length }} 条</span>
       </div>

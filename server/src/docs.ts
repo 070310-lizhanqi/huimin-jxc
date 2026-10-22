@@ -209,6 +209,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const conds: string[] = ['d.teamId = ?'];
     const args: Value[] = [teamId];
+    /** status 条件在 args 中的下标；没传 status 时为 -1（状态统计要从参数里剔掉它） */
+    let statusArgIndex = -1;
     if (req.query.type) {
       conds.push('d.type = ?');
       args.push(String(req.query.type));
@@ -225,6 +227,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       }
     }
     if (req.query.status) {
+      statusArgIndex = args.length;
       conds.push('d.status = ?');
       args.push(String(req.query.status));
     }
@@ -270,7 +273,17 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
          FROM doc d WHERE ${conds.join(' AND ')} ORDER BY d.id DESC LIMIT ? OFFSET ?`,
       )
       .all(...args, rows, (page - 1) * rows);
-    return res.json({ total: total.c, rows: list, page, pageSize: rows });
+    // 状态统计：与当前筛选（类型/往来/日期/关键词）一致，但不带 status 条件、也不分页，
+    // 供列表页页签显示「草稿 3 / 待审 1 / 已审 20」，用户不必逐个页签点开才知道有没有单据。
+    // 复用去掉 status 条件后的条件与参数（status 条件只有一个 ?，且与它一一对应）。
+    const statConds = conds.filter((c) => c !== 'd.status = ?');
+    const statArgs = statConds.length === conds.length ? args : args.filter((_, i) => i !== statusArgIndex);
+    const statusStats = db
+      .prepare(`SELECT d.status AS s, COUNT(*) AS c FROM doc d WHERE ${statConds.join(' AND ')} GROUP BY d.status`)
+      .all(...statArgs) as Array<{ s: string; c: number }>;
+    const statusCount: Record<string, number> = { draft: 0, pending: 0, audit: 0, void: 0 };
+    for (const r of statusStats) statusCount[r.s] = r.c;
+    return res.json({ total: total.c, rows: list, page, pageSize: rows, statusCount });
   });
 
   // 待审核工作台：列出所有待审核单据（按提交时间升序，先提交先处理）
@@ -295,6 +308,64 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       .prepare(`SELECT type, COUNT(*) AS c, SUM(totalAmount) AS amt FROM doc WHERE teamId = ? AND status = 'pending' GROUP BY type`)
       .all(teamId);
     return res.json({ rows, total: rows.length, byType });
+  });
+
+  /**
+   * 批量取单号：/doc/info 的轻量版。
+   * 收付款列表、明细视图等场景一次要为上百条记录显示单号，
+   * 逐条调 /doc/info 会打出上百个请求（N+1），这里一次拿完。
+   * ids 用逗号分隔，最多 200 个（超出截断，避免超长 URL）。
+   */
+  router.get('/doc/bill-nos', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const ids = String(req.query.ids ?? '')
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0)
+      .slice(0, 200);
+    if (!ids.length) return res.json({});
+    // id 一律走占位符拼接，不拼字符串
+    const stmt = db.prepare(`SELECT id, billNo, type, date FROM doc WHERE teamId = ? AND id IN (${ids.map(() => '?').join(',')})`);
+    const rows = stmt.all(teamId, ...ids) as Array<{ id: number; billNo: string | null; type: string; date: string }>;
+    const out: Record<string, { billNo: string | null; type: string; date: string }> = {};
+    for (const r of rows) out[String(r.id)] = { billNo: r.billNo, type: r.type, date: r.date };
+    return res.json(out);
+  });
+
+  /**
+   * 批量取明细行：单据列表「明细视图」把当前页所有单据的商品行展开，
+   * 逐单调 /doc/info 会有 N 个请求（100 条/页就是 100 个），这里一次查完。
+   * ids 逗号分隔，最多 200 个。
+   */
+  router.get('/doc/items', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const ids = String(req.query.ids ?? '')
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0)
+      .slice(0, 200);
+    if (!ids.length) return res.json({});
+    const stmt = db.prepare(
+      `SELECT i.docId, i.productId, p.name AS prodName, p.spec AS prodSpec, p.unit AS prodUnit,
+              i.qty, i.price, i.amount
+       FROM doc_item i
+       LEFT JOIN product p ON p.id = i.productId
+       WHERE i.docId IN (${ids.map(() => '?').join(',')})
+         AND i.docId IN (SELECT id FROM doc WHERE teamId = ?)
+       ORDER BY i.docId, i.id`,
+    );
+    const rows = stmt.all(...ids, teamId) as Array<Record<string, unknown>>;
+    const out: Record<string, Array<Record<string, unknown>>> = {};
+    for (const r of rows) {
+      const k = String(r.docId);
+      (out[k] ??= []).push({
+        productId: r.productId, prodName: r.prodName, spec: r.prodSpec, unit: r.prodUnit,
+        qty: r.qty, price: r.price, amount: r.amount,
+      });
+    }
+    return res.json(out);
   });
 
   // 单据详情
@@ -414,6 +485,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           clerkId: number | null;
           warehouseId: number;
           remark: string | null;
+          receiverName: string | null;
+          receiverMobile: string | null;
+          receiverAddress: string | null;
         }
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
@@ -477,8 +551,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       const totalAmount = remainItems.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
       const info = db
         .prepare(
-          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
+                           receiverName, receiverMobile, receiverAddress)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           teamId,
@@ -494,6 +569,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           totalQty,
           null,
           id,
+          // 收件人三件套从订单带出（销售订单转销售出库时快递面单信息不丢失）
+          doc.receiverName ?? null,
+          doc.receiverMobile ?? null,
+          doc.receiverAddress ?? null,
         );
       newId = Number(info.lastInsertRowid);
       const insStmt = db.prepare(

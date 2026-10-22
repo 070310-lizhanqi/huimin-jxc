@@ -1,8 +1,8 @@
-/**
+﻿/**
  * 收付款单 修改/删除 的余额冲回测试。
  * 关键不变量：任何操作后，账户余额与往来余额必须与流水推导值一致。
  */
-const BASE = 'http://127.0.0.1:7741/api';
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 function ok(cond, name, detail) {

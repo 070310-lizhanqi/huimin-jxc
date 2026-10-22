@@ -116,10 +116,11 @@ const ProductPage = {
       <div class="page-head">
         <span class="hd-title">商品</span>
         <span class="hd-sp"></span>
-        <button class="btn" @click="exportCsv('商品列表.csv', list.map(p => ({ ...p, purchasePrice: (p.purchasePrice || 0) / 100, salePrice: (p.salePrice || 0) / 100 })), [
-          { key: 'name', label: '名称' }, { key: 'spec', label: '规格' },
+        <button class="btn" @click="exportCsv('商品列表.csv', list.map(p => ({ ...p, purchasePrice: (p.purchasePrice || 0) / 100, salePrice: (p.salePrice || 0) / 100, retailPrice: (p.retailPrice || 0) / 100, wholePrice: (p.wholePrice || 0) / 100, catName: catLabel(p.catId) })), [
+          { key: 'name', label: '名称' }, { key: 'catName', label: '分类' }, { key: 'spec', label: '规格' },
           { key: 'barcode', label: '条码' }, { key: 'unit', label: '单位' },
           { key: 'purchasePrice', label: '进价(元)' }, { key: 'salePrice', label: '售价(元)' },
+          { key: 'retailPrice', label: '零售价(元)' }, { key: 'wholePrice', label: '批发价(元)' },
           { key: 'lowQty', label: '安全库存' }, { key: 'remark', label: '备注' },
         ])"><el-icon><Download/></el-icon> 导出</button>
         <button class="btn" @click="imp.open = true; imp.result = null"><el-icon><Upload/></el-icon> 批量导入</button>

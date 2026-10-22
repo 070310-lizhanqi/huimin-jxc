@@ -1,7 +1,7 @@
-/**
+﻿/**
  * 逐个单据类型的端到端冒烟：确认每种类型都能建单、审核、影响库存方向正确。
  */
-const BASE = 'http://127.0.0.1:7741/api';
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 function ok(c, n, d) { if (c) { pass++; console.log('PASS |', n, d ?? ''); } else { fail++; console.log('FAIL |', n, '|', d ?? ''); } }

@@ -9,9 +9,37 @@ const FinancePage = {
     const editor = reactive({ open: false, form: {} });
     const viewerId = ref(null);
 
+    // 筛选条条件（服务端本来就支持 type/partnerId/from/to，前端此前没把条件传上去）
+    const fType = ref('');          // '' 全部 / receipt / payment
+    const fPartnerType = ref('');   // '' 全部 / cus / ven
+    const fPartnerId = ref(null);
+    const fRange = ref([]);         // [from, to]
+    function resetFilter() {
+      fType.value = ''; fPartnerType.value = ''; fPartnerId.value = null; fRange.value = [];
+      load();
+    }
+    const partnerFilterOpts = computed(() => {
+      if (fPartnerType.value === 'cus') return store.customers;
+      if (fPartnerType.value === 'ven') return store.vendors;
+      // 未选类型时客户+供应商一起给（加类型标记，避免同名混淆）
+      return [
+        ...store.customers.map((c) => ({ ...c, _pt: 'cus' })),
+        ...store.vendors.map((v) => ({ ...v, _pt: 'ven' })),
+      ];
+    });
+
     async function load() {
+      const q = { teamId: store.teamId };
+      if (fType.value) q.type = fType.value;
+      if (fRange.value?.length === 2) { q.from = fRange.value[0]; q.to = fRange.value[1]; }
+      if (fPartnerId.value) {
+        // 往来单位 id 在客户/供应商表里各自自增，会撞号：必须带 partnerType 才能唯一定位
+        const pt = fPartnerType.value || partnerFilterOpts.value.find((p) => p.id === fPartnerId.value)?._pt;
+        if (pt) q.partnerType = pt;
+        q.partnerId = fPartnerId.value;
+      }
       const [s, b] = await Promise.all([
-        api.get('/settlement/list', { teamId: store.teamId }),
+        api.get('/settlement/list', q),
         api.get('/partner/balance', { teamId: store.teamId }),
       ]);
       settlements.value = s;
@@ -20,20 +48,20 @@ const FinancePage = {
     }
     onMounted(load);
 
-    // 关联单据单号缓存：收付款记录里只有 refDocId，需要单独查
+    // 关联单据单号缓存：收付款记录里只有 refDocId，批量接口一次查完（原实现逐条请求，N+1）
     const docNos = ref({});
     async function loadDocNos() {
       const ids = settlements.value.map((s) => s.refDocId).filter(Boolean);
       const uniq = [...new Set(ids)].filter((id) => !docNos.value[id]);
       if (!uniq.length) return;
-      const next = { ...docNos.value };
-      await Promise.all(uniq.map(async (id) => {
-        try {
-          const d = await api.get('/doc/info', { teamId: store.teamId, id });
-          next[id] = d.doc?.billNo ?? ('#' + id);
-        } catch { next[id] = '#' + id; }
-      }));
-      docNos.value = next;
+      try {
+        const map = await api.get('/doc/bill-nos', { teamId: store.teamId, ids: uniq.join(',') });
+        const next = { ...docNos.value };
+        for (const id of uniq) next[id] = map?.[String(id)]?.billNo ?? ('#' + id);
+        docNos.value = next;
+      } catch {
+        // 批量接口失败时不要卡住列表：只影响单号显示，回落到 #id
+      }
     }
     function docNoOf(id) { return docNos.value[id] ?? ('#' + id); }
     function gotoDoc(id) { viewerId.value = id; }
@@ -95,20 +123,56 @@ const FinancePage = {
       editor.open = true;
     }
 
+    function watch1() {
+      // 切换往来单位时清掉已选的 id，避免类型不匹配
+      if (fPartnerType.value && fPartnerId.value) {
+        const pt = partnerFilterOpts.value.find((p) => p.id === fPartnerId.value)?._pt ?? fPartnerType.value;
+        if (pt !== fPartnerType.value) fPartnerId.value = null;
+      }
+      load();
+    }
+    watch(fPartnerType, watch1);
+
+    const delBusy = ref(null);
     async function remove(s) {
+      if (delBusy.value === s.id) return;
       const ok = await confirmBox(
         `确定删除这笔${s.type === 'receipt' ? '收款' : '付款'}记录（${fmtMoney(s.amount)}）？删除后会冲回往来余额与账户余额。`,
         '删除确认',
       );
       if (!ok) return;
+      delBusy.value = s.id;
       try {
         await api.del('/settlement/' + s.id, { teamId: store.teamId });
         toast('已删除');
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
+      finally { delBusy.value = null; }
     }
-    return { settlements, tab, editor, viewerId, receivable, payable, balRows, openNew, openEdit, remove, save, busy, partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney };
+    const filteredSum = computed(() => settlements.value.reduce((a, s) => a + (s.amount || 0), 0));
+
+    // 往来余额导出（此前只有表格，没法带给会计/老板看）
+    function exportBal() {
+      if (!balRows.value.length) return toast('没有可导出的往来余额', 'warning');
+      exportCsv(
+        `往来余额_${new Date().toISOString().slice(0, 10)}.csv`,
+        ['往来单位', '类型', '余额(元)', '说明'],
+        balRows.value.map((b) => [
+          b.name,
+          b.partnerType === 'cus' ? '客户' : '供应商',
+          (b.balance / 100).toFixed(2),
+          b.partnerType === 'cus'
+            ? (b.balance > 0 ? '客户欠款（应收）' : b.balance < 0 ? '客户预付（预收）' : '已结清')
+            : (b.balance > 0 ? '欠供应商（应付）' : b.balance < 0 ? '供应商预付冲抵' : '已结清'),
+        ]),
+      );
+    }
+    return {
+      settlements, tab, editor, viewerId, receivable, payable, balRows, openNew, openEdit, remove, save, busy,
+      partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney, exportBal,
+      fType, fPartnerType, fPartnerId, fRange, partnerFilterOpts, resetFilter, delBusy, filteredSum,
+    };
   },
   template: `
   <div>
@@ -130,9 +194,25 @@ const FinancePage = {
           <span class="tb" :class="{ on: tab === 'bal' }" @click="tab = 'bal'">往来余额</span>
         </div>
         <div class="hd-right">
+          <button class="btn" v-if="tab==='bal'" @click="exportBal">导出</button>
           <button class="btn" @click="openNew('payment')">+ 付款</button>
           <button class="btn primary" @click="openNew('receipt')">+ 收款</button>
         </div>
+      </div>
+      <div class="filterbar" v-if="tab==='settle'">
+        <el-select v-model="fType" clearable placeholder="全部类型" style="width:110px" @change="load">
+          <el-option label="收款" value="receipt"/><el-option label="付款" value="payment"/>
+        </el-select>
+        <el-select v-model="fPartnerType" clearable placeholder="全部往来类型" style="width:130px">
+          <el-option label="客户" value="cus"/><el-option label="供应商" value="ven"/>
+        </el-select>
+        <el-select v-model="fPartnerId" filterable clearable placeholder="全部往来单位" style="width:170px" @change="load">
+          <el-option v-for="p in partnerFilterOpts" :key="(p._pt || fPartnerType || 'x') + '_' + p.id" :label="p.name" :value="p.id"/>
+        </el-select>
+        <el-date-picker v-model="fRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" class="finp" style="width:240px" @change="load"/>
+        <button class="btn icon-only" title="重置" @click="resetFilter"><el-icon><RefreshLeft/></el-icon></button>
+        <span class="fb-gap"></span>
+        <span class="muted fb-count">共 {{ settlements.length }} 笔，合计 <b class="money">{{ fmtMoney(filteredSum) }}</b></span>
       </div>
       <div class="tbl-wrap" v-if="tab==='settle'">
         <table class="tbl">
@@ -152,7 +232,7 @@ const FinancePage = {
               <td class="muted">{{ s.remark || '—' }}</td>
               <td class="c">
                 <a class="lnk" @click="openEdit(s)">编辑</a>
-                <a class="lnk danger" @click="remove(s)">删除</a>
+                <a class="lnk danger" @click="delBusy === s.id ? null : remove(s)">{{ delBusy === s.id ? '删除中…' : '删除' }}</a>
               </td>
             </tr>
           </tbody>

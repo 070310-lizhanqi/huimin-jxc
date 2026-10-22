@@ -73,6 +73,18 @@ const StockPage = {
     function isLowSum(s) { return lowQtyMap.value[s.productId] != null && s.qty <= lowQtyMap.value[s.productId]; }
     const lowCount = computed(() => summary.value.filter(isLowSum).length);
 
+    /** 汇总排序：默认按商品建档顺序；点表头切 数量升序 → 降序 → 默认 */
+    const sortKey = ref('default');
+    function toggleSort() {
+      sortKey.value = sortKey.value === 'default' ? 'qtyAsc' : sortKey.value === 'qtyAsc' ? 'qtyDesc' : 'default';
+    }
+    const sortedSummary = computed(() => {
+      const rows = [...summary.value];
+      if (sortKey.value === 'qtyAsc') rows.sort((a, b) => a.qty - b.qty);
+      else if (sortKey.value === 'qtyDesc') rows.sort((a, b) => b.qty - a.qty);
+      return rows;
+    });
+
     /** 汇总行点「N 条明细」→ 切到明细视图并按商品名过滤，需重新请求后端 */
     async function drillTo(s) {
       view.value = 'detail';
@@ -100,17 +112,17 @@ const StockPage = {
       }
       exportCsv('实时库存.csv', list.value.map((r) => ({
         prodName: r.prodName, spec: r.spec || '', unit: r.unit,
-        warehouse: r.warehouseName || '', reservoirId: r.reservoirId || '', batchNo: r.batchNo || '',
+        warehouse: r.warehouseName || '', reservoir: resvName(r.reservoirId), batchNo: r.batchNo || '',
         qty: r.qty, lowQty: lowQtyMap.value[r.productId] ?? '',
       })), [
         { key: 'prodName', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
-        { key: 'warehouse', label: '仓库' }, { key: 'batchNo', label: '批次' },
+        { key: 'warehouse', label: '仓库' }, { key: 'reservoir', label: '库位' }, { key: 'batchNo', label: '批次' },
         { key: 'qty', label: '数量' }, { key: 'lowQty', label: '安全库存' },
       ]);
     }
     return {
       kw, warehouseId, ifShowZero, list, loading, load, totalQty, isLow, resvName, doExport, lowQtyMap, store,
-      view, summary, isLowSum, lowCount, drillTo, backToSummary, drillKw,
+      view, summary, sortedSummary, sortKey, toggleSort, isLowSum, lowCount, drillTo, backToSummary, drillKw,
     };
   },
   template: `
@@ -143,11 +155,12 @@ const StockPage = {
         <table class="tbl" v-else-if="view === 'prod'">
           <thead><tr>
             <th>商品</th><th>规格</th><th>单位</th><th>所在仓库</th><th class="r">库存行数</th>
-            <th class="r">合计数量</th><th class="r">安全库存</th><th></th>
+            <th class="r">合计数量<span class="th-sort" :class="{ on: sortKey !== 'default' }" @click="toggleSort()"
+              :title="sortKey === 'qtyAsc' ? '当前：数量从少到多（缺货排最前），再点切降序' : sortKey === 'qtyDesc' ? '当前：数量从多到少，再点恢复默认' : '点击按数量升序（缺货排最前）'">{{ sortKey === 'qtyDesc' ? '↓' : sortKey === 'qtyAsc' ? '↑' : '⇅' }}</span></th><th class="r">安全库存</th><th></th>
           </tr></thead>
           <tbody>
             <tr v-if="!summary.length"><td colspan="8"><div class="empty">暂无库存数据</div></td></tr>
-            <tr v-for="s in summary" :key="s.productId">
+            <tr v-for="s in sortedSummary" :key="s.productId">
               <td style="font-weight:500">{{ s.prodName }}</td>
               <td>{{ s.spec || '—' }}</td>
               <td>{{ s.unit }}</td>

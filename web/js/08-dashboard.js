@@ -366,6 +366,7 @@ const DashboardPage = {
 
     return {
       stats, sales, range, trend, recent, viewerId, kpis, lowStockItems, showGuide,
+      goPurchase: () => nav('#/doc/purchase?type=stockin&new=1'),
       arAging, apAging, stockAging, arTop, apTop,
       trendEl, arEl, apEl, stockEl, arTopEl, apTopEl,
       RANK_CARDS, rankData, rankRange, rankBy, rankRefs, loadAllRanks, loadRank,
@@ -555,13 +556,14 @@ const DashboardPage = {
         <el-icon style="vertical-align:-2px"><WarningFilled/></el-icon> 低库存预警（{{ lowStockItems.length }} 项低于安全库存，建议补货）
       </div>
       <table class="tbl">
-        <thead><tr><th>商品</th><th class="r">当前库存</th><th class="r">安全库存</th><th class="r">缺口</th></tr></thead>
+        <thead><tr><th>商品</th><th class="r">当前库存</th><th class="r">安全库存</th><th class="r">缺口</th><th class="c" style="width:96px">操作</th></tr></thead>
         <tbody>
           <tr v-for="r in lowStockItems" :key="r.productId">
             <td style="font-weight:500">{{ r.prodName }}</td>
             <td class="r" style="color:#f56c6c;font-weight:600">{{ r.qty }}</td>
             <td class="r">{{ r.lowQty }}</td>
             <td class="r">{{ Math.max(0, r.lowQty - r.qty) }}</td>
+            <td class="c"><span class="link" @click="goPurchase">去进货</span></td>
           </tr>
         </tbody>
       </table>

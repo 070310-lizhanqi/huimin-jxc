@@ -18,6 +18,8 @@ const DocPage = {
     const rows = ref(20);
     const list = ref([]);
     const total = ref(0);
+    /** 各状态单据数（服务端按当前筛选统计，不受状态页签与分页影响），用于状态页签徽标 */
+    const statusCount = ref({ draft: 0, pending: 0, audit: 0, void: 0 });
     // 筛选条：日期区间 + 往来单位（对齐橙子云列表页密集筛选条）
     const filterFrom = ref('');
     const filterTo = ref('');
@@ -69,6 +71,7 @@ const DocPage = {
           partnerId: filterPartner.value || '',
         });
         list.value = r.rows; total.value = r.total;
+        statusCount.value = r.statusCount || { draft: 0, pending: 0, audit: 0, void: 0 };
         // 翻页/筛选后清空复选：否则「已选 N 单」含已不可见的行
         selected.value = [];
         // 汇总视图停留在当前页时，明细需随筛选/翻页同步刷新
@@ -173,14 +176,18 @@ const DocPage = {
       } catch (e) { toast(e.message, 'error'); }
       finally { busyId.value = null; }
     }
-    /** 明细视图数据：展开当前页所有单据的商品行 */
+    /** 明细视图数据：展开当前页所有单据的商品行（一次批量取，不再逐单请求） */
     const flatItems = ref([]);
+    const flatLoading = ref(false);
     async function loadFlatItems() {
-      const rows = [];
-      for (const d of list.value) {
-        try {
-          const info = await api.get('/doc/info', { teamId: store.teamId, id: d.id });
-          for (const it of (info.items || [])) {
+      if (!list.value.length) { flatItems.value = []; return; }
+      flatLoading.value = true;
+      try {
+        const ids = list.value.map((d) => d.id);
+        const map = await api.get('/doc/items', { teamId: store.teamId, ids: ids.join(',') });
+        const rows = [];
+        for (const d of list.value) {
+          for (const it of (map?.[String(d.id)] || [])) {
             rows.push({
               docId: d.id, billNo: d.billNo, date: d.date, status: d.status,
               partnerName: partnerLabel(d),
@@ -189,9 +196,14 @@ const DocPage = {
               qty: it.qty, price: it.price, amount: it.amount,
             });
           }
-        } catch { /* 单张失败不影响整体 */ }
+        }
+        flatItems.value = rows;
+      } catch (e) {
+        toast('明细加载失败：' + e.message, 'error');
+        flatItems.value = [];
+      } finally {
+        flatLoading.value = false;
       }
-      flatItems.value = rows;
     }
     watch(viewTab, (v) => { if (v === 'summary') loadFlatItems(); });
 
@@ -218,23 +230,53 @@ const DocPage = {
       }
     }
     function doExport() {
-      exportCsv(`${DOC_META[activeType.value].label}列表.csv`, list.value.map((d) => ({
-        billNo: d.billNo, date: (d.date || '').slice(0, 10),
-        partner: partnerLabel(d) || '', warehouse: whLabel(d.warehouseId) || '',
-        totalQty: d.totalQty, totalAmount: (Number(d.totalAmount) / 100).toFixed(2),
-        status: STATUS_TEXT[d.status] || d.status, remark: d.remark || '',
-      })), [
+      const head = [
         { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' },
         { key: 'partner', label: '往来单位' }, { key: 'warehouse', label: '仓库' },
         { key: 'totalQty', label: '合计数量' }, { key: 'totalAmount', label: '合计金额(元)' },
         { key: 'status', label: '状态' }, { key: 'remark', label: '备注' },
-      ]);
+      ];
+      const mapRow = (d) => ({
+        billNo: d.billNo, date: (d.date || '').slice(0, 10),
+        partner: partnerLabel(d) || '', warehouse: whLabel(d.warehouseId) || '',
+        totalQty: d.totalQty, totalAmount: (Number(d.totalAmount) / 100).toFixed(2),
+        status: STATUS_TEXT[d.status] || d.status, remark: d.remark || '',
+      });
+      // 分页时默认只导出当前页容易误解（财务对账要的是「这批筛选结果的全部」）：
+      // 超过一页就询问，确认后按当前筛选条件把剩下的页也拉完再合并导出
+      if (total.value > list.value.length) {
+        confirmBox(
+          `当前只显示了第 ${page.value} 页的 ${list.value.length} 条，共 ${total.value} 条。\n是否导出全部 ${total.value} 条（按当前筛选条件）？`,
+          '导出范围',
+        ).then(async (all) => {
+          if (!all) return exportCsv(`${DOC_META[activeType.value].label}列表_第${page.value}页.csv`, list.value.map(mapRow), head);
+          try {
+            const merged = [];
+            let p = 1;
+            // 单页上限 200，最多 50 页（1 万条），防止误点导出把浏览器拖死
+            while (p <= 50) {
+              const r = await api.get('/doc/list', {
+                teamId: store.teamId, type: activeType.value, status: status.value,
+                kw: kw.value, page: p, rows: 200,
+                from: filterFrom.value || '', to: filterTo.value || '',
+                partnerId: filterPartner.value || '',
+              });
+              merged.push(...r.rows);
+              if (merged.length >= r.total || !r.rows.length) break;
+              p++;
+            }
+            exportCsv(`${DOC_META[activeType.value].label}列表_全部${merged.length}条.csv`, merged.map(mapRow), head);
+          } catch (e) { toast('导出失败：' + e.message, 'error'); }
+        });
+        return;
+      }
+      exportCsv(`${DOC_META[activeType.value].label}列表.csv`, list.value.map(mapRow), head);
     }
     return {
-      grp, activeType, status, kw, page, rows, list, total, pages, pageBtns, viewerId,
+      grp, activeType, status, statusCount, kw, page, rows, list, total, pages, pageBtns, viewerId,
       meta, partners, busyId,
       load, openEditor, closeEditor,
-      viewTab, selected, selAll, toggleAll, toggleOne, flatItems, loadFlatItems,
+      viewTab, selected, selAll, toggleAll, toggleOne, flatItems, flatLoading, loadFlatItems,
       audit, submitDoc, rejectDoc, submitAllDrafts, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
       filterFrom, filterTo, filterPartner, resetFilter, sumQty, sumAmount, sumPaid, sumCols,
       editorOpen, editorEditId, impOpen,
@@ -261,8 +303,11 @@ const DocPage = {
       <el-date-picker v-model="filterFrom" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" class="finp w-date" @change="page=1;load()"/>
       <span class="muted">至</span>
       <el-date-picker v-model="filterTo" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" class="finp w-date" @change="page=1;load()"/>
-      <el-select v-model="status" clearable placeholder="全部状态" style="width:110px" @change="page=1;load()">
-        <el-option label="草稿" value="draft"/><el-option label="待审核" value="pending"/><el-option label="已审核" value="audit"/><el-option label="已作废" value="void"/>
+      <el-select v-model="status" clearable placeholder="全部状态" style="width:130px" @change="page=1;load()">
+        <el-option :label="'草稿 (' + (statusCount.draft || 0) + ')'" value="draft"/>
+        <el-option :label="'待审核 (' + (statusCount.pending || 0) + ')'" value="pending"/>
+        <el-option :label="'已审核 (' + (statusCount.audit || 0) + ')'" value="audit"/>
+        <el-option :label="'已作废 (' + (statusCount.void || 0) + ')'" value="void"/>
       </el-select>
       <el-select v-if="meta.partner" v-model="filterPartner" clearable filterable placeholder="全部往来单位" style="width:170px" @change="page=1;load()">
         <el-option v-for="c in partners" :key="c.id" :label="c.name" :value="c.id"/>
@@ -302,7 +347,7 @@ const DocPage = {
             <td v-if="meta.partner"><span class="ellip d-ib" :title="r.partnerName">{{ r.partnerName || '—' }}</span></td>
             <td><span class="tag" :class="'st-' + r.status">{{ STATUS_TEXT[r.status] || r.status }}</span></td>
           </tr>
-          <tr v-if="!flatItems.length"><td :colspan="meta.partner ? 10 : 9"><div class="empty">暂无明细</div></td></tr>
+          <tr v-if="!flatItems.length"><td :colspan="meta.partner ? 10 : 9"><div class="empty">{{ flatLoading ? '明细加载中…' : '暂无明细' }}</div></td></tr>
         </tbody>
       </table>
 

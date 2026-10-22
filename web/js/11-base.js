@@ -54,6 +54,9 @@ const BasePage = {
       if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
       const body = { teamId: store.teamId, ...editor.form };
       if (k === 'account') body.balance = toCents(body.balance);
+      // 防双击：保存请求未返回前按钮禁用（product/partner 页已有同款 busy 模式）
+      if (busy.value) return;
+      busy.value = true;
       try {
         if (editor.id) await api.put(`/${k}/${editor.id}`, body);
         else await api.post(`/${k}`, body);
@@ -61,16 +64,35 @@ const BasePage = {
         toast('已保存');
         await loadBase();
       } catch (e) { toast(e.message, 'error'); }
+      finally { busy.value = false; }
     }
     async function del(row) {
+      if (busyDel.value === row.id) return;
       if (!(await confirmBox(`删除「${row.name}」？被引用的记录将被拒绝。`))) return;
+      busyDel.value = row.id;
       try { await api.del(`/${tab.value}/${row.id}`, { teamId: store.teamId }); toast('已删除'); await loadBase(); }
       catch (e) { toast(e.message, 'error'); }
+      finally { busyDel.value = null; }
     }
+    const busy = ref(false);
+    const busyDel = ref(null);
+    /** 分类下拉排除自己与自己的子孙（选子孙为父级会成环，服务端也会拒绝） */
+    const catOptions = computed(() => {
+      if (editor.kind !== 'cat' || !editor.id) return store.cats;
+      const banned = new Set([editor.id]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const c of store.cats) {
+          if (c.parentId && banned.has(c.parentId) && !banned.has(c.id)) { banned.add(c.id); grew = true; }
+        }
+      }
+      return store.cats.filter((c) => !banned.has(c.id));
+    });
     const whName = (id) => byId(store.warehouses, id)?.name || `#${id}`;
     const catName = (id) => byId(store.cats, id)?.name || '';
     const typeText = { cash: '现金', bank: '银行', wechat: '微信', alipay: '支付宝' };
-    return { tab, tabs, list, editor, openNew, openEdit, save, del, whName, catName, typeText, fmtMoney, store };
+    return { tab, tabs, list, editor, openNew, openEdit, save, del, whName, catName, typeText, fmtMoney, store, busy, busyDel, catOptions };
   },
   template: `
   <div>
@@ -88,7 +110,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="3"><div class="empty">暂无仓库</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td class="muted">{{ r.remark || '—' }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       <table class="tbl" v-else-if="tab==='reservoir'">
@@ -96,7 +118,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="3"><div class="empty">暂无库位</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td>{{ whName(r.warehouseId) }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       <table class="tbl" v-else-if="tab==='cat'">
@@ -104,7 +126,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="3"><div class="empty">暂无分类</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td class="muted">{{ r.parentId ? catName(r.parentId) : '—' }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       <table class="tbl" v-else-if="tab==='clerk'">
@@ -112,7 +134,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="3"><div class="empty">暂无业务员</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td class="muted">{{ r.mobile || '—' }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       <table class="tbl" v-else-if="tab==='unit'">
@@ -120,7 +142,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="3"><div class="empty">暂无单位</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td class="muted">{{ r.remark || '—' }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       <table class="tbl" v-else>
@@ -128,7 +150,7 @@ const BasePage = {
         <tbody>
           <tr v-if="!list.length"><td colspan="4"><div class="empty">暂无账户</div></td></tr>
           <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td>{{ typeText[r.type] || r.type }}</td><td class="r money">{{ fmtMoney(r.balance) }}</td>
-            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" @click="del(r)">删除</button></td></tr>
+            <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
       </div>
@@ -136,7 +158,7 @@ const BasePage = {
 
     <div class="modal-mask" v-if="editor.open" @click.self="editor.open = false">
       <div class="modal narrow">
-        <div class="modal-head"><span class="mt">编辑档案</span><span class="x" @click="editor.open = false">×</span></div>
+        <div class="modal-head"><span class="mt">{{ editor.id ? '编辑档案' : '新增档案' }}</span><span class="x" @click="editor.open = false">×</span></div>
         <div class="modal-body">
           <div class="fitem"><label>名称</label><input v-model="editor.form.name"/></div>
           <div class="fitem" v-if="editor.kind==='reservoir'"><label>所属仓库</label>
@@ -146,7 +168,7 @@ const BasePage = {
           </div>
           <div class="fitem" v-if="editor.kind==='cat'"><label>上级分类</label>
             <div class="fctrl"><el-select v-model="editor.form.parentId" clearable placeholder="无（顶级分类）">
-              <el-option v-for="c in store.cats.filter(c => c.id !== editor.id)" :key="c.id" :label="c.name" :value="c.id"/>
+              <el-option v-for="c in catOptions" :key="c.id" :label="c.name" :value="c.id"/>
             </el-select></div>
           </div>
           <div class="fitem" v-if="editor.kind==='clerk'"><label>手机</label><input v-model="editor.form.mobile"/></div>
@@ -160,7 +182,7 @@ const BasePage = {
         </div>
         <div class="modal-foot">
           <button class="btn" @click="editor.open = false">取消</button>
-          <button class="btn primary" @click="save">保存</button>
+          <button class="btn primary" :disabled="busy" @click="save">{{ busy ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>

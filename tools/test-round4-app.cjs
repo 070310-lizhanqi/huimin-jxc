@@ -7,7 +7,8 @@ const fs0 = require('fs');
 const path0 = require('path');
 /** 端口可能因占用而自适应后移：优先读数据目录 port.txt 决定 BASE */
 function resolveBase() {
-  if (process.env.OC_BASE) return process.env.OC_BASE;
+  // OC_BASE 可能带 /api 后缀，统一剥掉后由下面拼 API 前缀，避免双 /api
+  if (process.env.OC_BASE) return process.env.OC_BASE.replace(/\/api\/?$/, '');
   const dir = process.env.ORANGE_DATA_DIR || path0.join(process.cwd(), 'data');
   try {
     const p = Number(fs0.readFileSync(path0.join(dir, 'port.txt'), 'utf8').trim());

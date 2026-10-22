@@ -10,8 +10,17 @@
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
 const path = require('node:path');
+const fs = require('node:fs');
 
-const dbPath = path.join(__dirname, '..', 'data', 'orange-clone.db');
+// 数据目录解析与服务端 dataDir() 保持一致：ORANGE_DATA_DIR 优先，否则仓库内 data/
+// （此前只写死仓库 data/，用自定义数据目录起的服务重建后仍是旧库，测出来的全是脏数据）
+const DATA_DIR = process.env.ORANGE_DATA_DIR || path.join(__dirname, '..', 'data');
+const dbPath = path.join(DATA_DIR, 'orange-clone.db');
+if (!fs.existsSync(dbPath)) {
+  console.error(`[rebuild-clean] 数据库不存在：${dbPath}`);
+  console.error('请先启动一次服务（node dist/server/index.js）让 migrate 建表，或检查 ORANGE_DATA_DIR。');
+  process.exit(2);
+}
 const db = new DatabaseSync(dbPath);
 
 /** 与 server/src/auth.ts 的 hashPassword 保持一致 */
@@ -135,6 +144,7 @@ try {
   process.exit(1);
 }
 db.exec('PRAGMA foreign_keys = ON;');
+console.log(`数据目录：${DATA_DIR}`);
 
 // 重新补齐索引/列：清数据不清结构，但老库若曾因重名数据跳过唯一索引创建，
 // 清空后必须重跑 migrate 才能把唯一索引补回来（否则重名拦截失效）

@@ -1,7 +1,7 @@
-// 幂等验证：同一内容连续 POST 两次返回同一张单（防双击/重试重复建单）。
+﻿// 幂等验证：同一内容连续 POST 两次返回同一张单（防双击/重试重复建单）。
 // 用法：node tools/test-idempot.cjs   （需服务器已在 7741 运行，且 data 为干净演示库或空库）
 // 对齐当前 API：/auth/register 注册首个团队，业务接口带 Bearer 令牌。
-const BASE = "http://127.0.0.1:7741/api";
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 let TOKEN = "";
 async function call(method, path, body) {
   const headers = {};

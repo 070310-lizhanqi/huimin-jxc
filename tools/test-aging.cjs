@@ -1,4 +1,4 @@
-const BASE = 'http://127.0.0.1:7741/api';
+﻿const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 async function api(method, path, body) {
   const r = await fetch(BASE + path, {

@@ -70,7 +70,16 @@ const DocViewer = {
           <td>仓库：${escapeHtml(whLabel(d.doc.warehouseId) || '—')}</td>
           <td>业务员：${escapeHtml(clerkLabel(d.doc.clerkId) || '—')}</td>
           <td>状态：${escapeHtml(STATUS_TEXT[d.doc.status] || d.doc.status)}</td>
-        </tr></table>
+        </tr>${
+          // 收件人信息（销售订单/销售出库等有收件人的单据）：打印面单/随货同行单必须带
+          d.doc.receiverName || d.doc.receiverMobile || d.doc.receiverAddress
+            ? `<tr>
+                 <td colspan="2">收件人：${escapeHtml(d.doc.receiverName || '—')}</td>
+                 <td>电话：${escapeHtml(d.doc.receiverMobile || '—')}</td>
+                 <td>地址：${escapeHtml(d.doc.receiverAddress || '—')}</td>
+               </tr>`
+            : ''
+        }</table>
         <table class="items"><thead><tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th><th>批次</th><th>调往仓库</th><th>备注</th></tr></thead>
         <tbody>${items}</tbody></table>
         <div class="total">合计数量：${escapeHtml(String(d.doc.totalQty))}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>

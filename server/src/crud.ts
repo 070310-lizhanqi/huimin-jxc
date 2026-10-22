@@ -89,7 +89,9 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     const id = Number(req.params.id);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     if (cfg.validate) {
-      const err = cfg.validate(req.body as Record<string, unknown>);
+      // PUT 语义补充路由 id：validate 需要区分「新建」与「编辑自身」
+      // （如分类父级成环检测依赖被编辑记录的 id）。
+      const err = cfg.validate({ ...(req.body as Record<string, unknown>), id });
       if (err) return res.status(400).json({ error: err });
     }
     const values: Value[] = updateFields.map((f) => normalize(req.body[f]));

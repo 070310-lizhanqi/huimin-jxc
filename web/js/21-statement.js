@@ -51,6 +51,8 @@ const StatementPage = {
       if (!data.value) return toast('请先查询', 'error');
       const d = data.value;
       const isAr = d.mode === 'ar';
+      // 打印抬头里的公司名（功能设置 → 打印抬头），对账单给对方看，抬头必须有
+      const company = (store.print?.company || '').trim();
       const rowsHtml = d.lines.map((l) => `<tr>
         <td>${l.date}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
@@ -59,12 +61,15 @@ const StatementPage = {
       const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title><style>
         body{font-family:"Microsoft YaHei",sans-serif;font-size:12px;color:#333;padding:18px}
         h2{text-align:center;font-size:17px;margin:0 0 4px}
+        .co{text-align:center;font-size:13px;font-weight:600;margin-bottom:2px}
         .sub{text-align:center;color:#888;font-size:11px;margin-bottom:12px}
         table{width:100%;border-collapse:collapse}
         th,td{border:1px solid #ccc;padding:5px 7px;text-align:left}
         th{background:#f7f9fb}
         .r{text-align:right}.sum{margin-top:10px;text-align:right;font-size:13px}
+        .foot{margin-top:18px;display:flex;justify-content:space-between;font-size:11px;color:#666}
       </style></head><body>
+      ${company ? `<div class="co">${escapeHtml(company)}</div>` : ''}
       <h2>${isAr ? '客户对账单' : '供应商对账单'}</h2>
       <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${d.from} 至 ${d.to}</div>
       <table><thead><tr><th>日期</th><th>单据号</th><th>类型</th><th class="r">${isAr ? '应收' : '应付'}</th>
@@ -75,9 +80,10 @@ const StatementPage = {
       </tbody></table>
       <div class="sum">期间发生 ${fmtMoney(d.periodDebit)} ／ 已${isAr ? '收' : '付'} ${fmtMoney(d.periodCredit)}　
         期末余额 <b>${fmtMoney(d.closing)}</b> 元</div>
+      <div class="foot"><span>对账日期：${today}</span><span>双方签字确认：__________________</span></div>
       </body></html>`;
       const w = window.open('', '_blank');
-      if (!w) return toast('请允许弹出窗口以打印', 'error');
+      if (!w) return toast('打印窗口被浏览器拦截，请允许本站弹出窗口后重试', 'error');
       w.document.write(html);
       w.document.close();
       w.print();
@@ -91,8 +97,8 @@ const StatementPage = {
     <div class="page-head">
       <div class="hd-title">{{ mode === 'ar' ? '客户对账单' : '供应商对账单' }}</div>
       <div class="tabs">
-        <span :class="['tab', { active: mode === 'ar' }]" @click="mode = 'ar'; switchMode()">客户对账单</span>
-        <span :class="['tab', { active: mode === 'ap' }]" @click="mode = 'ap'; switchMode()">供应商对账单</span>
+        <span class="tb" :class="{ on: mode === 'ar' }" @click="mode = 'ar'; switchMode()">客户对账单</span>
+        <span class="tb" :class="{ on: mode === 'ap' }" @click="mode = 'ap'; switchMode()">供应商对账单</span>
       </div>
       <div class="hd-right">
         <button class="btn" @click="doPrint" :disabled="!data"><el-icon><Printer/></el-icon> 打印</button>

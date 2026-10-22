@@ -1,4 +1,4 @@
-/**
+﻿/**
  * UI 端到端测试（playwright，headless Chromium）。
  * 覆盖：登录 → 顶部菜单逐项渲染巡检 → 数据备份页签（v0.4.0 新增 UI）→ 开单页关键控件。
  * 有断言、有退出码：任一失败 exit 1（此前 test-menu-sweep 只打印不判失败）。
@@ -19,6 +19,7 @@ function resolveBase() {
     const p = Number(fs.readFileSync(path.join(dir, 'port.txt'), 'utf8').trim());
     if (p > 0) return `http://127.0.0.1:${p}/`;
   } catch { /* ignore */ }
+  if (process.env.OC_BASE) return process.env.OC_BASE.replace(/\/(api\/?)?$/, '/');
   return 'http://127.0.0.1:7741/';
 }
 const BASE = resolveBase();

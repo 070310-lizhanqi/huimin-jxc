@@ -1,4 +1,4 @@
-/**
+﻿/**
  * UI 业务流端到端测试（playwright，headless Chromium）。
  *
  * 与 test-ui-e2e.cjs 的分工：
@@ -24,6 +24,7 @@ function resolveBase() {
     const p = Number(fs.readFileSync(path.join(dir, 'port.txt'), 'utf8').trim());
     if (p > 0) return `http://127.0.0.1:${p}/`;
   } catch { /* ignore */ }
+  if (process.env.OC_BASE) return process.env.OC_BASE.replace(/\/(api\/?)?$/, '/');
   return 'http://127.0.0.1:7741/';
 }
 const BASE = resolveBase();

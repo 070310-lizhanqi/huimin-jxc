@@ -62,19 +62,47 @@ async function serverUp() {
   let passed = 0;
   let skipped = 0;
   const failed = [];
+  // 因浏览器起不来而跳过的 UI 脚本（汇总时单独说明，避免被误读为「跑过且通过」）
+  const skippedUi = [];
 
   const requiresPlaywright = (file) =>
     /\brequire\(['"]playwright['"]\)/.test(fs.readFileSync(path.join(ROOT, 'tools', file), 'utf8'));
   const hasPlaywright = () =>
     spawnSync(process.execPath, ['-e', "require('playwright')"], { stdio: 'ignore' }).status === 0;
+  /**
+   * 能 require 到 playwright 不等于能起浏览器：
+   * 受限环境（无桌面/沙箱禁用管道）下 launch 会 `spawn EPERM`，
+   * 此时 UI 测试必然全红，应计为跳过而不是失败。探测一次浏览器能否真正启动。
+   */
+  const browserLaunchable = () =>
+    spawnSync(
+      process.execPath,
+      [
+        '-e',
+        "const {chromium}=require('playwright');chromium.launch({headless:true}).then(b=>b.close()).then(()=>process.exit(0)).catch(e=>{console.error(String(e).split('\\n')[0]);process.exit(3)})",
+      ],
+      { stdio: 'ignore', timeout: 60000 },
+    ).status === 0;
+  // 有 UI 脚本要跑时才探测，避免无谓地起一次浏览器
+  const canLaunchBrowser = tests.some(requiresPlaywright) && hasPlaywright() ? browserLaunchable() : false;
 
   for (const t of tests) {
     // 可选 E2E：脚本依赖 playwright，未安装则跳过（不计入失败）
-    if (requiresPlaywright(t) && !hasPlaywright()) {
-      skipped++;
-      console.log(`\n########## ${t} ##########`);
-      console.log('[skip] 未安装 playwright（可选 E2E，需 node_modules 具备 playwright 依赖）');
-      continue;
+    if (requiresPlaywright(t)) {
+      if (!hasPlaywright()) {
+        skipped++;
+        console.log(`\n########## ${t} ##########`);
+        console.log('[skip] 未安装 playwright（可选 E2E，需 node_modules 具备 playwright 依赖）');
+        continue;
+      }
+      // 已安装但浏览器起不来（受限环境）也跳过，并在汇总里说明原因
+      if (!canLaunchBrowser) {
+        skipped++;
+        skippedUi.push(t);
+        console.log(`\n########## ${t} ##########`);
+        console.log('[skip] 当前环境无法启动 Chromium（如沙箱禁用子进程管道），UI E2E 无法执行');
+        continue;
+      }
     }
     console.log(`\n########## ${t} ##########`);
     const start = Date.now();
@@ -101,5 +129,9 @@ async function serverUp() {
       (skipped ? `，跳过 ${skipped}` : '') +
       (failed.length ? `，失败 ${failed.length}：\n  - ${failed.join('\n  - ')}` : '，全部通过'),
   );
+  if (skippedUi.length) {
+    console.log(`跳过的是 UI E2E（浏览器无法启动，非代码失败）：${skippedUi.join('、')}`);
+    console.log('如需跑 UI E2E：在允许启动子进程的环境执行 `node tools/run-tests.cjs`（例如本机终端而非受限沙箱）。');
+  }
   process.exit(failed.length ? 1 : 0);
 })();

@@ -15,9 +15,11 @@ const path = require('path');
 const os = require('os');
 
 const ROOT = path.join(__dirname, '..');
-const PORT = 7742;
+// 管理器自己监听的端口（与橙子云服务端口区分开）；可用 ORANGE_MGR_PORT 覆盖
+const PORT = Number(process.env.ORANGE_MGR_PORT) || 7742;
 const HOST = '127.0.0.1';
-const APP_PORT = 7741;
+// 橙子云服务端口：可用 ORANGE_PORT 覆盖（默认 7741，被占用时服务自身会自适应后移并写 port.txt）
+const APP_PORT = Number(process.env.ORANGE_PORT) || 7741;
 // 运行期产物（pid/日志/二进制）放 .tools/（已在 .gitignore，不进 git）
 const RUNTIME = path.join(__dirname, '..', '.tools');
 fs.mkdirSync(RUNTIME, { recursive: true });
@@ -256,7 +258,7 @@ function pageHtml() {
   <button class="btn start" onclick="act('/api/start/app')">启动</button>
   <button class="btn stop" onclick="act('/api/stop/app')">停止</button>
   <button class="btn stop" style="background:#e5e7eb;color:#374151" onclick="showLog('server')">查看日志</button>
-  <div class="tip">管理地址：http://127.0.0.1:7741 —— 启动后用浏览器打开即可使用系统</div>
+  <div class="tip">管理地址：http://127.0.0.1:${APP_PORT} —— 启动后用浏览器打开即可使用系统</div>
   <pre id="log-server" style="display:none"></pre>
 </div>
 

@@ -1,5 +1,5 @@
-// 认证与隔离的端到端验证
-const BASE = 'http://127.0.0.1:7741/api';
+﻿// 认证与隔离的端到端验证
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 
 async function req(method, path, body, token) {
   const headers = { 'content-type': 'application/json' };

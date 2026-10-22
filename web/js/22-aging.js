@@ -115,9 +115,9 @@ const AgingPage = {
     <div class="page-head">
       <div class="hd-title">{{ mode === 'ar' ? '客户欠款账龄' : mode === 'ap' ? '供应商欠款账龄' : '库存账龄' }}</div>
       <div class="tabs">
-        <span :class="['tab', { active: mode === 'ar' }]" @click="mode = 'ar'; load()">客户欠款账龄</span>
-        <span :class="['tab', { active: mode === 'ap' }]" @click="mode = 'ap'; load()">供应商欠款账龄</span>
-        <span :class="['tab', { active: mode === 'stock' }]" @click="mode = 'stock'; load()">库存账龄</span>
+        <span class="tb" :class="{ on: mode === 'ar' }" @click="mode = 'ar'; load()">客户欠款账龄</span>
+        <span class="tb" :class="{ on: mode === 'ap' }" @click="mode = 'ap'; load()">供应商欠款账龄</span>
+        <span class="tb" :class="{ on: mode === 'stock' }" @click="mode = 'stock'; load()">库存账龄</span>
       </div>
       <div class="hd-right">
         <span class="muted" style="font-size:12.5px;margin-right:8px">截止 {{ asOf }}</span>

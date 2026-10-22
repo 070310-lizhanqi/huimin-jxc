@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { escapeLike } from './crud';
 
 /**
  * 客户价格记忆（price_memory）
@@ -45,7 +46,7 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
     const where: string[] = ['m.teamId = ?'];
     const args: Array<string | number> = [teamId];
     if (partnerId) { where.push('m.partnerId = ?'); args.push(partnerId); }
-    if (kw) { where.push('p.name LIKE ?'); args.push(`%${kw}%`); }
+    if (kw) { where.push('p.name LIKE ? ESCAPE \'\\\''); args.push(`%${escapeLike(kw)}%`); }
     const rows = db
       .prepare(
         `SELECT m.*, p.name AS prodName, p.spec, p.unit, p.salePrice,

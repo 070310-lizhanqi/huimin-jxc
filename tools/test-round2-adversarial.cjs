@@ -1,10 +1,10 @@
-/**
+﻿/**
  * 第 2 轮 bug 测试：对抗性与并发边界。
  * 覆盖：并发审核防超卖 / 并发创建幂等 / 畸形请求体 / 原型污染 / SQL-ish 关键词 /
  *       分页边界值 / 金额小数舍入 / 价格记忆边界 / 并发调拨抢库存 / 大单校验性能 /
  *       未登录拦截 / GBK CSV 导入。
  */
-const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741';
+const BASE = (process.env.OC_BASE || 'http://127.0.0.1:7741').replace(/\/api\/?$/, '');
 const API = BASE + '/api';
 let token = null;
 let teamId = null;

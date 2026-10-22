@@ -1,5 +1,5 @@
-/* 订单转化链 + 新单据类型端到端 */
-const BASE = 'http://127.0.0.1:7741/api';
+﻿/* 订单转化链 + 新单据类型端到端 */
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 const results = [];
 function report(name, pass, detail) { results.push({ name, pass }); console.log((pass ? 'PASS' : 'FAIL') + ' | ' + name + (detail ? ' | ' + detail : '')); }

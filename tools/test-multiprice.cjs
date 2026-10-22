@@ -1,5 +1,5 @@
-// 多价格 + 客户价格等级实测
-const BASE = 'http://127.0.0.1:7741/api';
+﻿// 多价格 + 客户价格等级实测
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 let TEAM = null;
 

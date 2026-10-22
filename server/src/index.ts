@@ -168,14 +168,29 @@ mountCrud(api, db, {
     if (exists(`SELECT COUNT(*) AS c FROM product WHERE catId = ? AND teamId = ?`, id, teamId)) return '分类下还有商品，不能删除';
     return null;
   },
-  // 新建/改分类时校验父分类归属本团队（防把分类挂到别的团队的分类树下）
+  // 新建/改分类时校验父分类归属本团队（防把分类挂到别的团队的分类树下），
+  // 并沿 parentId 向上查环：把祖先挂到自己的子孙下会形成环，导致前端分类树无限递归。
   validate: (body) => {
     const parentId = Number(body.parentId);
     if (parentId) {
-      const p = db.prepare(`SELECT id FROM cat WHERE id = ? AND teamId = ?`).get(parentId, Number(body.teamId)) as
+      const teamId = Number(body.teamId);
+      const p = db.prepare(`SELECT id FROM cat WHERE id = ? AND teamId = ?`).get(parentId, teamId) as
         | { id: number }
         | undefined;
       if (!p) return '父分类不存在';
+      const editId = Number(body.id);
+      if (editId) {
+        // 自引用与间接环检测：从父级沿链上溯，遇到自己即成环
+        let cur = parentId;
+        for (let hop = 0; hop < 100; hop++) {
+          if (cur === editId) return '父分类不能是自己或自己的子分类';
+          const row = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`).get(cur, teamId) as
+            | { parentId: number | null }
+            | undefined;
+          if (!row || !row.parentId) break;
+          cur = row.parentId;
+        }
+      }
     }
     return null;
   },
@@ -399,10 +414,16 @@ app.use(
     },
   }),
 );
-// 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）
-app.get(/^\/(?!api).*/, (_req, res) => {
+// 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）。
+// vendor 静态库文件缺失时按真实 404 返回，而不是兜底回 index.html：
+// 浏览器请求 JS 收到 HTML 会报语法错误且难排查；404 能直接暴露缺文件。
+app.get(/^\/(?!api|vendor\/).*/, (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, '..', '..', 'web', 'index.html'));
+});
+// vendor 兜底 404（express.static 未命中时走到这里）
+app.use('/vendor', (_req: express.Request, res: express.Response) => {
+  res.status(404).json({ error: 'vendor 文件不存在' });
 });
 
 // 全局错误处理：任何路由抛出的异常统一返回 JSON，避免 Express 默认 HTML 错误页
@@ -423,20 +444,47 @@ import http from 'node:http';
 /** 单实例锁：锁文件存在且 pid 活着 → 已有实例在跑，退出（启动器会去唤起已有实例） */
 function acquireLock(): boolean {
   const lockFile = path.join(dataDir(), 'server.lock');
+  // 旧锁存活检测：锁文件存在但 pid 已死 → 视为残留锁，允许覆盖后重建。
   try {
     const old = Number(fs.readFileSync(lockFile, 'utf8').trim());
-    if (old > 0) {
+    if (old > 0 && old !== process.pid) {
       try {
         process.kill(old, 0);
         return false; // 旧进程仍存活
+      } catch { /* 旧进程已死，锁文件是残留，继续走原子重建 */ }
+    }
+  } catch { /* 无锁文件，首次启动 */ }
+  // 原子创建（O_CREAT|O_EXCL）：两个实例同时启动时只有一个能建立锁文件，
+  // 另一个进 EEXIST 分支复核对方 pid，消除原来「读-检-写」之间的竞态窗口。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = fs.openSync(lockFile, 'wx');
+      try {
+        fs.writeSync(fd, String(process.pid));
+      } finally {
+        fs.closeSync(fd);
+      }
+      break; // 抢锁成功
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== 'EEXIST') throw e; // 其他错误（目录不可写等）按原行为上抛
+      // 锁文件已被并发实例抢先创建：复核其中 pid 是否存活
+      let other = 0;
+      try { other = Number(fs.readFileSync(lockFile, 'utf8').trim()); } catch { /* ignore */ }
+      if (!(other > 0) || other === process.pid) {
+        // 内容为空/异常（抢先者刚建文件还没写入，或残留损坏）：删掉重试一次
+        try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+        continue;
+      }
+      try {
+        process.kill(other, 0);
+        return false; // 抢先者存活：本实例退出
       } catch {
-        /* 旧进程已死，锁文件是残留，可覆盖 */
+        // 抢先者已死：清残留后重试原子创建
+        try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
       }
     }
-  } catch {
-    /* 无锁文件，首次启动 */
   }
-  fs.writeFileSync(lockFile, String(process.pid));
   // 退出时清锁（kill -9 等异常退出会留残留文件，由上面的存活检测兜底）
   process.on('exit', () => {
     try {

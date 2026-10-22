@@ -125,6 +125,10 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .tbl-list .btn.sm { padding: 0 6px; }
 .tbl tbody tr:hover td { background: #fafcfe; }
 .tbl .r { text-align: right; }
+/* 可排序表头：小箭头，点一下按升序、再点取消 */
+.tbl th .th-sort { display: inline-block; margin-left: 4px; color: #b6bec9; cursor: pointer; font-size: 11px; user-select: none; }
+.tbl th .th-sort:hover { color: var(--brand); }
+.tbl th .th-sort.on { color: var(--brand); }
 .tbl .c { text-align: center; }
 /* 列表底部合计行 */
 .tbl tfoot .sum-row td { background: #fbfcfd; font-weight: 600; color: var(--text-sub); border-top: 1px solid var(--border); }

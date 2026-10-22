@@ -62,7 +62,23 @@ const PricePage = {
     }
 
     onMounted(load);
-    return { kw, partnerId, rows, loading, editor, load, openEdit, save, del, diffOf, store, fmtMoney };
+    // 排序：默认按最近成交日期，也可按成交次数/与标准售价的偏差看
+    const sortBy = ref('default');
+    const sorted = computed(() => {
+      const arr = [...rows.value];
+      if (sortBy.value === 'times') {
+        arr.sort((a, b) => (b.times ?? 0) - (a.times ?? 0));
+      } else if (sortBy.value === 'diffAsc') {
+        // 低于标准售价最多（对客户最优惠）排前
+        arr.sort((a, b) => (a.price - (a.salePrice ?? 0)) - (b.price - (b.salePrice ?? 0)));
+      } else if (sortBy.value === 'diffDesc') {
+        arr.sort((a, b) => (b.price - (b.salePrice ?? 0)) - (a.price - (a.salePrice ?? 0)));
+      } else if (sortBy.value === 'lastDate') {
+        arr.sort((a, b) => String(b.lastDate || '').localeCompare(String(a.lastDate || '')));
+      }
+      return arr;
+    });
+    return { kw, partnerId, rows, sorted, sortBy, loading, editor, load, openEdit, save, del, diffOf, store, fmtMoney };
   },
   template: `
   <div>
@@ -80,6 +96,12 @@ const PricePage = {
           <el-option v-for="c in store.customers" :key="c.id" :label="c.name" :value="c.id"/>
         </el-select>
         <button class="btn" @click="load">查询</button>
+        <el-select v-model="sortBy" style="width:170px" placeholder="排序">
+          <el-option label="最近成交优先" value="default"/>
+          <el-option label="成交次数高→低" value="times"/>
+          <el-option label="低于标准价最多" value="diffAsc"/>
+          <el-option label="高于标准价最多" value="diffDesc"/>
+        </el-select>
         <span class="muted" style="font-size:12.5px;margin-left:6px">共 {{ rows.length }} 条</span>
       </div>
 
@@ -93,7 +115,7 @@ const PricePage = {
         </tr></thead>
         <tbody>
           <tr v-if="!rows.length"><td colspan="11"><div class="empty">暂无价格记忆。销售类单据审核后，系统会自动记住每个客户的成交价。</div></td></tr>
-          <tr v-for="(r, i) in rows" :key="r.id">
+          <tr v-for="(r, i) in sorted" :key="r.id">
             <td class="r muted">{{ i + 1 }}</td>
             <td>{{ r.cusName || '—' }}</td>
             <td style="font-weight:500">{{ r.prodName }}</td>
@@ -425,10 +447,10 @@ const SettingsPage = {
     <div class="page-head">
       <div class="hd-title">功能设置</div>
       <div class="tabs">
-        <span :class="['tab', { active: tab === 'prefix' }]" @click="tab = 'prefix'">单据编号</span>
-        <span :class="['tab', { active: tab === 'print' }]" @click="tab = 'print'">打印抬头</span>
-        <span :class="['tab', { active: tab === 'user' }]" @click="tab = 'user'; loadUsers(); loadRegConf()">用户与权限</span>
-        <span v-if="isAdmin" :class="['tab', { active: tab === 'backup' }]" @click="tab = 'backup'; loadBackups()">数据备份</span>
+        <span class="tb" :class="{ on: tab === 'prefix' }" @click="tab = 'prefix'">单据编号</span>
+        <span class="tb" :class="{ on: tab === 'print' }" @click="tab = 'print'">打印抬头</span>
+        <span class="tb" :class="{ on: tab === 'user' }" @click="tab = 'user'; loadUsers(); loadRegConf()">用户与权限</span>
+        <span v-if="isAdmin" class="tb" :class="{ on: tab === 'backup' }" @click="tab = 'backup'; loadBackups()">数据备份</span>
       </div>
       <div class="hd-right">
         <button class="btn" @click="reset('all')">恢复默认</button>
@@ -705,22 +727,37 @@ const ApprovalPage = {
     }
 
     /** 一键审核当前筛选下的全部 */
+    const auditProgress = ref('');
     async function auditAll() {
       const rows = shown.value;
       if (!rows.length) return toast('没有待审核单据', 'warning');
       if (!(await confirmBox(`将审核 ${rows.length} 张单据，审核后不可撤销（可作废），确认？`))) return;
-      let okCount = 0, errs = [];
-      for (const r of rows) {
-        try { await api.post('/doc/audit', { teamId: store.teamId, id: r.id, auditBy: store.team?.name || '管理员' }); okCount++; }
-        catch (e) { errs.push(`${r.billNo}: ${e.message}`); }
+      let okCount = 0;
+      const errs = [];
+      for (const [i, r] of rows.entries()) {
+        // 串行审核较慢，逐张回显进度，避免用户以为卡死
+        auditProgress.value = `审核中 ${i + 1}/${rows.length}`;
+        try {
+          await api.post('/doc/audit', { teamId: store.teamId, id: r.id, auditBy: store.team?.name || '管理员' });
+          okCount++;
+        } catch (e) { errs.push(`${r.billNo || '#' + r.id}：${e.message}`); }
       }
+      auditProgress.value = '';
       toast(`审核成功 ${okCount} 张${errs.length ? `，失败 ${errs.length} 张` : ''}`, errs.length ? 'warning' : 'success');
-      if (errs.length) console.warn('审核失败明细', errs);
+      // 失败明细此前只打 console，用户根本看不到：这里弹窗列出，方便逐张处理
+      if (errs.length) {
+        const body = errs.slice(0, 20).join('\n') + (errs.length > 20 ? `\n…其余 ${errs.length - 20} 张` : '');
+        ElMessageBox.alert(body, `审核失败 ${errs.length} 张`, {
+          type: 'warning',
+          confirmButtonText: '知道了',
+          customStyle: { whiteSpace: 'pre-line', maxWidth: '520px' },
+        }).catch(() => {});
+      }
       load();
     }
 
     onMounted(load);
-    return { list, allRows, byType, filterType, shown, loading, busyId, viewerId, load, doAudit, doReject, auditAll, TYPE_LABEL, TYPE_COLOR, store, fmtMoney, partnerLabel, whLabel, STATUS_TEXT };
+    return { list, allRows, byType, filterType, shown, loading, busyId, viewerId, load, doAudit, doReject, auditAll, auditProgress, TYPE_LABEL, TYPE_COLOR, store, fmtMoney, partnerLabel, whLabel, STATUS_TEXT };
   },
   template: `
   <div class="page-card">
@@ -734,7 +771,7 @@ const ApprovalPage = {
       </div>
       <div class="hd-right">
         <button class="btn" @click="load">刷新</button>
-        <button class="btn primary" :disabled="loading || !shown.length" @click="auditAll"><el-icon><Select/></el-icon> 一键审核{{ filterType ? '本类' : '全部' }}</button>
+        <button class="btn primary" :disabled="loading || auditProgress || !shown.length" @click="auditAll"><el-icon><Select/></el-icon> {{ auditProgress || ('一键审核' + (filterType ? '本类' : '全部')) }}</button>
       </div>
     </div>
 

@@ -1,5 +1,6 @@
 /* 真实用户模拟测试 v2：并发/异常输入/极端场景，全在 API 层模拟 UI 会发出的请求序列 */
-const BASE = 'http://127.0.0.1:7741';
+// 本脚本的路径自带 /api 前缀，因此基址要剥掉 OC_BASE 末尾的 /api
+const BASE = (process.env.OC_BASE || 'http://127.0.0.1:7741').replace(/\/api\/?$/, '');
 const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 const issues = [];

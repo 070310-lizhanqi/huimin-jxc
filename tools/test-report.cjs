@@ -1,5 +1,5 @@
-/** 报表/单据复制/商品导入 三个新功能的端到端测试 */
-const BASE = 'http://127.0.0.1:7741/api';
+﻿/** 报表/单据复制/商品导入 三个新功能的端到端测试 */
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const { authHeader } = require('./test-helpers.cjs');
 let pass = 0, fail = 0;
 function ok(cond, label, extra = '') {

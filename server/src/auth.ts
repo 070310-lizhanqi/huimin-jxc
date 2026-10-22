@@ -206,6 +206,37 @@ function safeEqual(a: string, b: string): boolean {
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
+/**
+ * 弱密码黑名单：命中即拒绝（注册 / 管理员建用户 / 改密共用）。
+ * 单机自用场景不做复杂强度分级，但常见弱口令必须挡住——
+ * 服务一旦经隧道暴露，admin123 这类密码等于不设防。
+ */
+const WEAK_PASSWORDS = new Set([
+  '123456', '1234567', '12345678', '123456789', '1234567890',
+  'password', 'password1', 'passw0rd', 'admin123', 'admin888',
+  'admin666', 'admin000', 'root123', 'abc123', 'abc123456',
+  '111111', '11111111', '000000', '666666', '888888', '88888888',
+  'a123456', '123123', '654321', '112233', '123321', '1qaz2wsx',
+  'qwe123', 'qq123456', 'taobao123', '1111111', '1111',
+]);
+
+/** 密码强度统一校验：长度 ≥6 且不命中弱密码黑名单 */
+function checkPasswordStrength(password: string): string | null {
+  if (password.length < 6) return '密码至少 6 位';
+  if (password.length > 64) return '密码过长（最多 64 位）';
+  if (WEAK_PASSWORDS.has(password.toLowerCase())) {
+    return '密码过于简单（常见弱口令），请换一个包含字母与数字的密码';
+  }
+  return null;
+}
+
+/** 用户名统一校验：2-30 个字符 */
+function checkUsername(username: string): string | null {
+  if (!username || username.length < 2) return '用户名至少 2 个字符';
+  if (username.length > 30) return '用户名过长（最多 30 个字符）';
+  return null;
+}
+
 /** Express 4 不捕获 async 路由抛出的错误；包装后统一返回 500 JSON，避免未处理 rejection 导致请求挂起 */
 function safe(fn: (req: Request, res: Response) => unknown) {
   return (req: Request, res: Response): void => {
@@ -233,8 +264,11 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       recordFail(clientIp(req));
       return res.status(status).json({ error });
     };
-    if (!username || username.length < 2) return fail(400, '用户名至少 2 个字符');
-    if (password.length < 6) return fail(400, '密码至少 6 位');
+    const nameErr = checkUsername(username);
+    if (nameErr) return fail(400, nameErr);
+    const pwdErr = checkPasswordStrength(password);
+    if (pwdErr) return fail(400, pwdErr);
+    if (teamName.length > 60) return fail(400, '账套名称过长（最多 60 个字符）');
 
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username) as { id: number } | undefined;
     if (dup) return fail(400, '该用户名已被使用');
@@ -332,7 +366,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     if (!u) return res.status(401).json({ error: '未登录' });
     const oldPwd = String(req.body.oldPassword ?? '');
     const newPwd = String(req.body.newPassword ?? '');
-    if (newPwd.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
+    const pwdErr = checkPasswordStrength(newPwd);
+    if (pwdErr) return res.status(400).json({ error: '新' + pwdErr });
     const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
     if (!row || !(await verifyPassword(oldPwd, row.password))) return res.status(400).json({ error: '原密码不正确' });
     // 改密后 tokenVer + 1：吊销该用户全部旧令牌（含泄漏在外的），并为当前会话重签新令牌
@@ -374,10 +409,11 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     return res.json({ ok: true, enabled, inviteCode: enabled ? inviteCode : '' });
   });
 
-  /** 团队内用户列表（管理员用） */
+  /** 团队内用户列表：仅管理员可看（员工账号信息也是敏感数据） */
   router.get('/auth/users', requireAuth, (req, res) => {
     const u = req.auth;
     if (!u) return res.status(401).json({ error: '未登录' });
+    if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以查看用户列表' });
     const rows = db
       .prepare(`SELECT id, name, role, createdAt FROM "user" WHERE teamId = ? ORDER BY id`)
       .all(u.teamId);
@@ -392,8 +428,10 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const username = String(req.body.username ?? '').trim();
     const password = String(req.body.password ?? '');
     const role = req.body.role === 'clerk' ? 'clerk' : 'admin';
-    if (!username || username.length < 2) return res.status(400).json({ error: '用户名至少 2 个字符' });
-    if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+    const nameErr = checkUsername(username);
+    if (nameErr) return res.status(400).json({ error: nameErr });
+    const pwdErr = checkPasswordStrength(password);
+    if (pwdErr) return res.status(400).json({ error: pwdErr });
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
     if (dup) return res.status(400).json({ error: '该用户名已被使用' });
     const hashed = await hashPassword(password);

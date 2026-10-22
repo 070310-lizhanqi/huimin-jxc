@@ -1,10 +1,11 @@
-/* 验证 v0.2.7 前端行为：全局错误捕获 / 401 去抖清理 / 登录后回跳原页面 */
+﻿/* 验证 v0.2.7 前端行为：全局错误捕获 / 401 去抖清理 / 登录后回跳原页面 */
 let chromium;
 try { ({ chromium } = require('playwright')); } catch { console.log('[skip] no playwright'); process.exit(0); }
 const fs = require('fs'), path = require('path');
 function resolveBase() {
   const dir = process.env.ORANGE_DATA_DIR || path.join(process.cwd(), 'data');
   try { const p = Number(fs.readFileSync(path.join(dir, 'port.txt'), 'utf8').trim()); if (p > 0) return `http://127.0.0.1:${p}/`; } catch {}
+  if (process.env.OC_BASE) return process.env.OC_BASE.replace(/\/(api\/?)?$/, '/');
   return 'http://127.0.0.1:7741/';
 }
 const BASE = resolveBase();

@@ -1,1 +1,4 @@
-﻿
+# pnpm 12 会对 lockfile 逐条跑 supply-chain policy 校验（minimumReleaseAge/trustPolicy），
+# 在部分 Windows 环境递归过深导致栈溢出。本仓库 lockfile 是随源码提交的受信文件，
+# 直接标记信任以跳过该校验。
+trustLockfile: true

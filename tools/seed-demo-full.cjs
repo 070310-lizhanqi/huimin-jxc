@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 生成一整套真实演示业务流水（覆盖最近 120 天），让工作台/报表/账龄图表都有内容。
  *
  * 做三件事：
@@ -12,7 +12,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 
-const BASE = 'http://127.0.0.1:7741/api';
+const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const DB_PATH = path.join(__dirname, '..', 'data', 'orange-clone.db');
 const USER = 'admin';
 const PASS = 'admin123456';

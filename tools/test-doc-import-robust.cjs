@@ -8,6 +8,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { api, authHeader } = require('./test-helpers.cjs');
 const { buildXlsx } = require('./xlsx-writer.cjs');
+// 服务端口可能因占用自动后移，统一从环境变量取基址（run-tests.cjs 会注入）
+const OC_BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 
 let pass = 0, fail = 0, skip = 0;
 function check(name, cond, detail) {
@@ -19,7 +21,7 @@ function skipCheck(name) { skip++; console.log('  skip - ' + name); }
 async function uploadImport(buf, qs) {
   const h = await authHeader();
   const res = await fetch(
-    `http://127.0.0.1:7741/api/doc/import${qs || ''}`,
+    `${OC_BASE}/doc/import${qs || ''}`,
     { method: 'POST', headers: { ...h, 'content-type': 'application/octet-stream' }, body: buf },
   );
   const j = await res.json().catch(() => ({ error: 'non-json' }));
