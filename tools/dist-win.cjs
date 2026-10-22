@@ -58,6 +58,41 @@ cpDir(path.join(ROOT, 'tools'), path.join(PAYLOAD, 'tools'));
 for (const f of ['launcher.cjs', '橙子进销存.cmd', 'package.json', 'README.md']) {
   if (fs.existsSync(path.join(ROOT, f))) fs.copyFileSync(path.join(ROOT, f), path.join(PAYLOAD, f));
 }
+
+// 原生无窗口启动器：编译 launcher.cs → 橙子进销存.exe（winexe，图标内嵌）。
+// 没有它就只能用 .cmd 入口：双击必弹黑色终端窗口，且快捷方式图标取不到 .ico（显示 cmd 默认图标）。
+// 用 Windows 自带的 csc.exe 编译，零第三方依赖。
+{
+  const cscCandidates = [
+    path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
+    path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe'),
+  ];
+  const csc = cscCandidates.find((p) => fs.existsSync(p));
+  const csFile = path.join(ROOT, 'tools', 'launcher.cs');
+  const icoFile = path.join(ROOT, 'assets', 'icon-app.ico');
+  const outExe = path.join(PAYLOAD, '橙子进销存.exe');
+  if (!csc) {
+    console.warn('[payload] 未找到 csc.exe（.NET Framework 编译器）——跳过原生启动器编译。');
+    console.warn('           桌面快捷方式将退回 .cmd 入口（会弹终端窗口且无自定义图标）。');
+  } else if (!fs.existsSync(icoFile)) {
+    console.warn(`[payload] 未找到 ${icoFile}——跳过原生启动器编译（缺图标）。`);
+  } else {
+    // 注意：参数用 -xxx 形式且路径用 Windows 绝对路径；
+    // Git Bash 会把 /xxx 误当路径转换，csc 会报「未能找到源文件」
+    const r = spawnSync(csc, [
+      '-nologo',
+      '-target:winexe',
+      `-win32icon:${icoFile}`,
+      `-out:${outExe}`,
+      csFile,
+    ], { stdio: 'inherit', windowsHide: true });
+    if (r.status !== 0) {
+      console.error('[dist:win] 原生启动器编译失败——桌面快捷方式将退回 .cmd 入口。');
+      process.exit(r.status ?? 1);
+    }
+    console.log('[payload] 已编译原生无窗口启动器（橙子进销存.exe，图标已内嵌）');
+  }
+}
 // 便携模式标记：启动器（launcher.cjs）以此文件判断「数据放程序目录/data」。
 // payload 直接拿去当便携版分发时，用户拷走目录即可随身带数据。
 // 注意：Inno 脚本的 [Files] 必须 Excludes 掉本文件——安装版数据要落 %APPDATA%，

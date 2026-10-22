@@ -40,6 +40,17 @@ const PID_FILE = path.join(DATA, 'server.pid');
 
 // ---------- 工具 ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/**
+ * 日志输出：安装版由原生启动器以「无控制台 + 脱离会话」方式拉起，
+ * 此时 stdout/stderr 句柄指向 NUL，console.log 虽不报错但内容会丢；
+ * 这里统一写进 server.log，既不依赖控制台，也留得下排障痕迹。
+ */
+const LOG_FILE_PATH = path.join(DATA, 'server.log');
+function logLine(msg) {
+  try {
+    fs.appendFileSync(LOG_FILE_PATH, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch { /* 日志写不进去也不能影响启动 */ }
+}
 /** 日志体积上限：超过则将当前日志改名为 .old（只保留一代），避免跨年堆积成几十 MB 纯文本 */
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 /**
@@ -112,7 +123,7 @@ async function ensureServer() {
 }
 
 async function main() {
-  console.log(`[启动器] 数据目录：${DATA}`);
+  logLine(`启动器：数据目录 ${DATA}`);
   await ensureServer();
 
   // 轮询就绪（最多 ~60s：恢复大量数据的库首启可能较慢）
@@ -123,11 +134,11 @@ async function main() {
     if (await probe(p)) { port = p; break; }
   }
   if (!port) {
-    console.error('[启动器] 服务 60 秒内未就绪，详见 ' + LOG_FILE);
+    logLine('服务 60 秒内未就绪');
     // 仍保持等待：服务可能稍后起来（守护循环会探测到并打开浏览器）
   } else {
     const url = `http://127.0.0.1:${port}/`;
-    console.log(`[启动器] 服务就绪：${url}`);
+    logLine(`服务就绪：${url}`);
     if (opening !== port) { opening = port; openBrowser(url); }
   }
 
@@ -136,7 +147,7 @@ async function main() {
   for (;;) {
     await sleep(2000);
     if (child && child.exitCode !== null) {
-      console.log('[启动器] 服务进程退出，2 秒后重新拉起……');
+      logLine('服务进程退出，2 秒后重新拉起……');
       await sleep(2000);
       await ensureServer();
       lastPort = null; // 端口可能变化，强制重新探测
@@ -145,13 +156,13 @@ async function main() {
     if (p && p !== lastPort && (await probe(p))) {
       lastPort = p;
       const url = `http://127.0.0.1:${p}/`;
-      console.log(`[启动器] 服务在 ${url} 就绪（重启完成）`);
+      logLine(`服务在 ${url} 就绪（重启完成）`);
       openBrowser(url);
     }
   }
 }
 
 main().catch((e) => {
-  console.error('[启动器] 异常退出：', e);
+  logLine('异常退出：' + (e && e.stack ? e.stack : e));
   process.exit(1);
 });
