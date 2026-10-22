@@ -51,6 +51,12 @@ cpDir(path.join(ROOT, 'tools'), path.join(PAYLOAD, 'tools'));
 for (const f of ['launcher.cjs', '橙子进销存.cmd', 'package.json', 'README.md']) {
   if (fs.existsSync(path.join(ROOT, f))) fs.copyFileSync(path.join(ROOT, f), path.join(PAYLOAD, f));
 }
+// 便携模式标记：启动器（launcher.cjs）以此文件判断「数据放程序目录/data」。
+// payload 直接拿去当便携版分发时，用户拷走目录即可随身带数据。
+// 注意：Inno 脚本的 [Files] 必须 Excludes 掉本文件——安装版数据要落 %APPDATA%，
+// 且安装目录会被卸载清理，标记一旦装进去会导致数据被卸载流程删掉。
+fs.writeFileSync(path.join(PAYLOAD, 'portable.flag'), 'portable\n');
+console.log('[payload] 已写入 portable.flag（便携模式：数据落程序目录 data/）');
 // node.exe：内置运行时（~80MB）。手工放置：把官方 zip 里的 node.exe 拷到 .tools/node.exe
 const nodeSrc = path.join(ROOT, '.tools', 'node.exe');
 if (fs.existsSync(nodeSrc)) {

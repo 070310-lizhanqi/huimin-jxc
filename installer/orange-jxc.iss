@@ -39,7 +39,9 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [Files]
 ; 应用全部文件（dist、web、tools、launcher、node.exe …）
-Source: "installer\payload\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; 排除 portable.flag：安装版数据必须落 %APPDATA%\orange-jxc；若把该标记装进安装目录，
+;   launcher 会把数据改放 {app}\data，而 {app} 在卸载时会被清理 → 用户数据随卸载丢失
+Source: "installer\payload\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; Excludes: "portable.flag"
 
 [Icons]
 ; 开始菜单 + 桌面快捷方式 → 启动器（cmd 壳：双击即开服务+浏览器）
