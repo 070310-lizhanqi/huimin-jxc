@@ -21,7 +21,14 @@ const PAYLOAD = path.join(ROOT, 'installer', 'payload');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
 function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32', ...opts });
+  // Windows 下 shell:true 会拼成命令行字符串，含空格的路径必须自行加引号——
+  // 否则 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' 会被拆成
+  // 'C:\Program Files (x86)\Inno' 而报「不是内部或外部命令」，安装包根本编不出来。
+  const useShell = process.platform === 'win32';
+  const q = (s) => (useShell && /\s/.test(s) ? `"${s}"` : s);
+  const r = useShell
+    ? spawnSync([q(cmd), ...args.map(q)].join(' '), { stdio: 'inherit', cwd: ROOT, shell: true, ...opts })
+    : spawnSync(cmd, args, { stdio: 'inherit', cwd: ROOT, shell: false, ...opts });
   if (r.status !== 0) {
     console.error(`[dist:win] 命令失败：${cmd} ${args.join(' ')}`);
     process.exit(r.status ?? 1);
@@ -185,14 +192,30 @@ async function selfCheck() {
     process.env.ISCC,
     'C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe',
     'C:\\Program Files\\Inno Setup 6\\ISCC.exe',
+    // winget 默认装到当前用户目录，不带管理员权限也能装上
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Inno Setup 6', 'ISCC.exe') : null,
   ].filter(Boolean);
-  const iscc = isccCandidates.find((p) => fs.existsSync(p));
+  let iscc = isccCandidates.find((p) => fs.existsSync(p));
+  if (!iscc) {
+    // 兜底：从注册表读安装位置（winget / 手工安装都可能落在自定义目录）
+    try {
+      const out = require('node:child_process').execSync(
+        'powershell -NoProfile -Command "Get-ItemProperty \'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\',\'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\',\'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*\' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like \'*Inno Setup*\' } | Select-Object -First 1 -ExpandProperty InstallLocation"',
+        { encoding: 'utf8', windowsHide: true },
+      ).trim();
+      if (out) {
+        const p = path.join(out, 'ISCC.exe');
+        if (fs.existsSync(p)) iscc = p;
+      }
+    } catch { /* 注册表查询失败则按未安装处理 */ }
+  }
   if (!iscc) {
     console.warn('[dist:win] 未找到 Inno Setup 6（ISCC.exe），安装包未编译。');
     console.warn('  安装：winget install JRSoftware.InnoSetup   或到 https://jrsoftware.org/isinfo.php 下载');
     console.warn('  已生成 installer/payload/ —— 可直接作为「便携版」目录分发。');
     process.exit(0);
   }
+  console.log(`[dist:win] 使用 ISCC：${iscc}`);
   run(iscc, [path.join(ROOT, 'installer', 'orange-jxc.iss')]);
 
   // ---------- 出包后冒烟：把 Setup.exe 静默装到临时目录，再从安装产物起服务 ----------

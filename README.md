@@ -314,19 +314,25 @@ node tools/run-tests.cjs --with-rounds   # 额外纳入三轮专项对抗测试
 
 ```bash
 # 1) 把官方 node.exe 放到 .tools/node.exe（从 nodejs.org LTS zip 解压取出，~80MB）
-# 2) 安装 Inno Setup（未安装则只产出便携版目录）
+#    也可直接复制本机已装的 node.exe（要求 Node ≥ 22.5，因为用到了 node:sqlite）
+# 2) 安装 Inno Setup 6（未安装则只产出便携版目录，不出安装包）
 winget install JRSoftware.InnoSetup
 # 3) 一键出包
 pnpm run dist:win
 ```
 
-流水线：编译 TS → 组装 `installer/payload/`（应用文件 + 自带 `node.exe` + 独立安装 express 运行时依赖）→ 写版本号 → **隔离目录产物自检**（防「产物缺依赖却交付」）→ ISCC 编译安装包 → **出包后冒烟**（把 Setup.exe 静默装到临时目录、从安装产物独立起服务探测，堵住 Inno 脚本引用错文件）。
+说明：
+
+- **Inno Setup 路径**：脚本会自动探测常见安装位置（含 winget 的用户目录）、`ISCC` 环境变量与注册表，找不到就只产出便携版。手工指定：`$env:ISCC="C:\...\ISCC.exe"`。
+- **中文界面**：简体中文语言文件（`installer/languages/ChineseSimplified.isl`）随仓库携带——Inno 官方安装包**不含**中文翻译，若改用 `compiler:Languages\...` 会直接编译中止。
+- **流水线**：编译 TS → 组装 `installer/payload/`（应用文件 + 自带 `node.exe` + 独立安装 express 运行时依赖）→ 写版本号 → **隔离目录产物自检**（防「产物缺依赖却交付」）→ ISCC 编译安装包 → **出包后冒烟**（把 Setup.exe 静默装到临时目录、从安装产物独立起服务探测，堵住 Inno 脚本引用错文件 / 路径写错这类打包层问题）。
 
 产物：
-- `installer/out/橙子进销存-Setup-<版本>.exe` —— 安装包。
-- `installer/payload/` —— 便携版目录。
 
-自动上传 Release（可选）：设置 `ORANGE_RELEASE_TAG=v0.2.7` 且本机有 `gh` CLI 时，出包后自动把 Setup.exe 传到对应 Release。
+- `installer/out/橙子进销存-Setup-<版本>.exe` —— 安装包（自带 Node 运行时，目标机器无需装 Node.js）。
+- `installer/payload/` —— 便携版目录（含 `portable.flag`，数据落程序目录 `data/`；可与 exe 一起分发）。
+
+**自动上传 Release（可选）**：设置 `ORANGE_RELEASE_TAG=v0.2.7` 且本机有 `gh` CLI（已登录）时，出包后自动把 Setup.exe 传到对应 Release；否则手动 `gh release upload v0.2.7 "<exe 路径>" --clobber`。
 
 ---
 

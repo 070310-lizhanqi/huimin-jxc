@@ -5,13 +5,15 @@
 ; 安装位置：%LOCALAPPDATA%\OrangeJXC（普通用户权限，无需管理员）
 ; 数据位置：%APPDATA%\orange-jxc（卸载/升级均保留；便携模式 data/ 由用户自管）
 ;
-; 打包前先运行 pnpm run dist:prep（见 package.json）：
+; 打包前先运行 pnpm run dist:win：
 ;   产出 installer/payload/ 完整运行目录（应用文件 + 自带 node.exe）
+; 注意：本文件位于 installer/ 下，Inno 的 SourcePath 即 installer/，
+;      故相对路径不要重复写 installer\ 前缀（否则会变成 installer\installer\…）
 ; ============================================================
 
 #define MyAppName "橙子进销存"
 #define MyAppNameEn "OrangeJXC"
-#define MyAppVersion ReadIni(SourcePath + "\installer\version.ini", "app", "version", "0.0.0")
+#define MyAppVersion ReadIni(SourcePath + "\version.ini", "app", "version", "0.0.0")
 #define MyAppExeName "橙子进销存.cmd"
 
 [Setup]
@@ -24,7 +26,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; 非管理员可安装；privilegesRequired=lowest 允许直接双击安装
 PrivilegesRequired=lowest
-OutputDir=installer\out
+OutputDir=out
 OutputBaseFilename=橙子进销存-Setup-{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
@@ -35,13 +37,15 @@ UninstallDisplayName={#MyAppName}
 ; 卸载时不删除数据目录（%APPDATA%\orange-jxc 不在 {app} 内，天然保留）
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 简体中文语言文件随仓库携带：Inno Setup 官方安装包不含中文翻译（compiler:Languages 下没有
+; ChineseSimplified.isl），依赖它会导致「Couldn't open include file」编译中止。
+Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 
 [Files]
 ; 应用全部文件（dist、web、tools、launcher、node.exe …）
 ; 排除 portable.flag：安装版数据必须落 %APPDATA%\orange-jxc；若把该标记装进安装目录，
 ;   launcher 会把数据改放 {app}\data，而 {app} 在卸载时会被清理 → 用户数据随卸载丢失
-Source: "installer\payload\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; Excludes: "portable.flag"
+Source: "payload\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; Excludes: "portable.flag"
 
 [Icons]
 ; 开始菜单 + 桌面快捷方式 → 启动器（cmd 壳：双击即开服务+浏览器）

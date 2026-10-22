@@ -28,6 +28,10 @@
 - **CHANGELOG 独立**：版本历史从 README 拆出为本文件，README 只保留最新一条与链接。
 - **README 增补使用手册**：新增安装三种方式、首次初始化、按模块的使用步骤（记账核心规则、采购/销售流程、库存业务、资金结算、报表对账、导入/打印/编号/权限）、数据与备份、环境变量表、常见问题，共约 300 行。
 - **便携版模式修复**：`launcher.cjs` 一直按 `portable.flag` 判断「数据落程序目录」，但**打包流程从未创建该文件**——照文档把 `payload/` 当便携版分发时，数据实际落到了 `%APPDATA%\orange-jxc`，与「拷走目录即带走数据」的说明不符。现 `dist:win` 组装 payload 时写入该标记；同时 Inno 安装脚本 `[Files]` 用 `Excludes` 排除它（安装版数据必须在 `%APPDATA%`，否则会落进 `{app}\data` 并随卸载被清理）。
+- **打包链路三处缺陷修复**（此前出包从未真正跑通过，本轮首次跑通完整链路——含装机冒烟）：
+  1. `dist-win` 用 `shell:true` 拼接命令行却未给路径加引号，`C:\Program Files (x86)\Inno Setup 6\ISCC.exe` 被拆成 `...\Inno` 而报「不是内部或外部命令」——**默认安装位置下安装包根本编不出来**；现统一加引号，并增加 winget 用户目录与注册表两处 ISCC 定位兜底。
+  2. `orange-jxc.iss` 的相对路径重复带了 `installer\` 前缀（Inno 的 `SourcePath` 已是 `installer/`），导致 `ReadIni` 读不到 `version.ini`（版本号静默变成 `0.0.0`）、产物输出到 `installer\installer\out`、`[Files]` 找不到 `installer\installer\payload`。
+  3. `orange-jxc.iss` 引用 `compiler:Languages\ChineseSimplified.isl`，但 Inno Setup 官方安装包**不含中文语言文件**，编译直接中止；现把该 .isl 随仓库携带并改用相对路径引用。
 
 ### 测试发现的问题
 
