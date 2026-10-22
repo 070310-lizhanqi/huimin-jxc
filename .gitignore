@@ -100,5 +100,7 @@ web/__dsh_tok.json
 # 安装包构建产物（不入库）
 installer/payload/
 installer/out/
+# Inno OutputDir 曾误配成 installer\out 产生的嵌套目录（已修，留个 ignore 兜底）
+installer/installer/
 .tools/node.exe
 data-payload/

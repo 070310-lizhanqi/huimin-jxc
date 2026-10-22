@@ -29,7 +29,7 @@ function resolveBase() {
 }
 const BASE = resolveBase();
 const DATA_DIR = process.env.ORANGE_DATA_DIR || path.join(process.cwd(), 'data');
-const DB_PATH = process.env.ORANGE_DB_PATH || path.join(DATA_DIR, 'orange-clone.db');
+const DB_PATH = process.env.ORANGE_DB_PATH || path.join(DATA_DIR, 'huimin-clone.db');
 
 let pass = 0;
 let fail = 0;

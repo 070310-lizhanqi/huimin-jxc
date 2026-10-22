@@ -1,0 +1,16 @@
+merge: 合并远端 v0.3.0 品牌改名（橙子云 → 惠民云），与本地 v0.3.7 改进共存
+
+远端 57fd3b3 是并发会话推送的品牌改名 + 数据目录迁移，与本地第五轮审查
+改动大量重叠但没有逻辑冲突（它只改品牌字符串与库文件名，不改逻辑）。
+
+冲突解决原则：品牌名取远端（惠民云 / huimin-clone.db），功能改动取本地。
+
+- package.json：name 取 huimin-clone，version 保留 0.3.7。
+- tools/rebuild-clean.cjs：保留 ORANGE_DATA_DIR 解析逻辑，库文件名改 huimin-clone.db。
+- tools/seed-demo-full.cjs：保留 OC_BASE 环境变量支持，库文件名改 huimin-clone.db。
+- web/js/13-doc.js：保留 statusCount（本地），注释品牌改惠民云。
+- web/js/16-help.js：保留本地新增的 4 条 FAQ 与备份说明，库名改 huimin-clone.db。
+- CHANGELOG.md / README.md：v0.3.7 与 v0.3.0 两条并列，最新在上。
+
+验证：语法检查与 tsc 均通过；全量回归 28/31 通过、3 项 UI E2E 跳过
+（沙箱无法启动 Chromium）；远端新增的 test-data-migration 通过。

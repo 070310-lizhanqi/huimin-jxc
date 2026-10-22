@@ -10,12 +10,12 @@
  * 结果卸载完机器上还留着跑着的服务，而安装目录已被删掉。
  *
  * pid 文件可能落在两处（都要找）：
- *   - 数据目录 %APPDATA%\orange-jxc\{launcher,server}.pid
+ *   - 数据目录 %APPDATA%\huimin-yun\{launcher,server}.pid
  *   - 安装目录 {app}\.tools\server.pid（服务端自写，与启动器无关）
  * 两者都找不到时，退化为「按端口找监听进程」兜底。
  *
  * 数据目录默认保留——账套数据删了就没了；是否连带删除由安装包的
- * 「同时删除数据目录」附加任务决定（见 installer/orange-jxc.iss）。
+ * 「同时删除数据目录」附加任务决定（见 installer/huimin-yun.iss）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -24,6 +24,8 @@ const { execFileSync } = require('child_process');
 const APP_DIR = path.join(__dirname, '..');
 const DATA_DIRS = [
   process.env.ORANGE_DATA_DIR,
+  process.env.APPDATA ? path.join(process.env.APPDATA, 'huimin-yun') : null,
+  // 旧品牌名目录（还没升级的老用户数据在这，也要能停掉/清理）
   process.env.APPDATA ? path.join(process.env.APPDATA, 'orange-jxc') : null,
   path.join(APP_DIR, 'data'),
 ].filter(Boolean);
@@ -134,4 +136,4 @@ try {
 } catch { /* 无 .tools 目录 */ }
 
 console.log(`[卸载] 共停止 ${killed.size} 个进程；运行期文件已清理。`);
-console.log('[卸载] 数据目录保留：' + (process.env.APPDATA ? path.join(process.env.APPDATA, 'orange-jxc') : '(见安装说明)'));
+console.log('[卸载] 数据目录保留：' + (process.env.APPDATA ? path.join(process.env.APPDATA, 'huimin-yun') : '(见安装说明)'));

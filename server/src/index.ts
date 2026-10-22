@@ -523,14 +523,14 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
 
 (async () => {
   if (!acquireLock()) {
-    console.log('[单实例] 已有一个橙子进销存实例在运行（锁文件指向存活进程），本次启动退出。');
+    console.log('[单实例] 已有一个惠民云进销存实例在运行（锁文件指向存活进程），本次启动退出。');
     process.exit(0);
   }
   const firstPort = PORT;
   const { server, port } = await listenOn(firstPort, 20);
   writePortFile(port);
   const actualPort = port;
-  console.log(`orange-clone server listening on http://127.0.0.1:${actualPort}`);
+  console.log(`huimin-clone server listening on http://127.0.0.1:${actualPort}`);
   if (actualPort !== firstPort) {
     console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${actualPort}（port.txt 已更新）。`);
   }

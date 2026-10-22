@@ -15,7 +15,7 @@ const fs = require('node:fs');
 // 数据目录解析与服务端 dataDir() 保持一致：ORANGE_DATA_DIR 优先，否则仓库内 data/
 // （此前只写死仓库 data/，用自定义数据目录起的服务重建后仍是旧库，测出来的全是脏数据）
 const DATA_DIR = process.env.ORANGE_DATA_DIR || path.join(__dirname, '..', 'data');
-const dbPath = path.join(DATA_DIR, 'orange-clone.db');
+const dbPath = path.join(DATA_DIR, 'huimin-clone.db');
 if (!fs.existsSync(dbPath)) {
   console.error(`[rebuild-clean] 数据库不存在：${dbPath}`);
   console.error('请先启动一次服务（node dist/server/index.js）让 migrate 建表，或检查 ORANGE_DATA_DIR。');

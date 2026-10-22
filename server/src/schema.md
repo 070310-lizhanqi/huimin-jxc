@@ -1,6 +1,6 @@
-# 数据库 Schema（orange-clone）
+# 数据库 Schema（huimin-clone）
 
-对应橙子云 jxc 线业务模型，来源：逆向 API 结构（orange-reverse/web 接口文档）。
+对应惠民云 jxc 线业务模型，来源：逆向 API 结构（orange-reverse/web 接口文档）。
 
 ## 基础档案
 - team（团队/账套）：id, name, startPeriod(YYYYMM 期账)

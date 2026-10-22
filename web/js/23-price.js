@@ -493,7 +493,7 @@ const SettingsPage = {
     <div v-else-if="tab === 'print'" class="card">
       <div class="card-title" style="margin-bottom:10px">打印抬头（显示在单据打印页顶部）</div>
       <div class="de-grid">
-        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市橙子商贸有限公司" maxlength="60"/></div></div>
+        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市惠民商贸有限公司" maxlength="60"/></div></div>
         <div class="fi"><label>联系电话</label><div class="fc"><input v-model="print.phone" placeholder="如：0755-12345678" maxlength="40"/></div></div>
         <div class="fi span-all"><label>公司地址</label><div class="fc"><input v-model="print.address" placeholder="如：深圳市南山区科技园" maxlength="120"/></div></div>
         <div class="fi span-all"><label>页脚备注</label><div class="fc"><input v-model="print.footer" placeholder="如：本单为业务往来凭证，如有疑问请及时联系。" maxlength="200"/></div></div>

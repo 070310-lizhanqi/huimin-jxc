@@ -10,7 +10,7 @@
  *  4) 写 installer/version.ini（ISS 读版本号）
  *  5) 产物自检（隔离目录独立起服务探测）+ 编译安装包；未装 Inno Setup 则产出便携版目录
  *
- * 产物：installer/out/橙子进销存-Setup-<版本>.exe 与可独立分发的 installer/payload/（便携版）
+ * 产物：installer/out/惠民云进销存-Setup-<版本>.exe 与可独立分发的 installer/payload/（便携版）
  */
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -55,11 +55,11 @@ fs.mkdirSync(PAYLOAD, { recursive: true });
 cpDir(path.join(ROOT, 'dist'), path.join(PAYLOAD, 'dist'));
 cpDir(path.join(ROOT, 'web'), path.join(PAYLOAD, 'web'));
 cpDir(path.join(ROOT, 'tools'), path.join(PAYLOAD, 'tools'));
-for (const f of ['launcher.cjs', '橙子进销存.cmd', 'package.json', 'README.md']) {
+for (const f of ['launcher.cjs', '惠民云进销存.cmd', 'package.json', 'README.md']) {
   if (fs.existsSync(path.join(ROOT, f))) fs.copyFileSync(path.join(ROOT, f), path.join(PAYLOAD, f));
 }
 
-// 原生无窗口启动器：编译 launcher.cs → 橙子进销存.exe（winexe，图标内嵌）。
+// 原生无窗口启动器：编译 launcher.cs → 惠民云进销存.exe（winexe，图标内嵌）。
 // 没有它就只能用 .cmd 入口：双击必弹黑色终端窗口，且快捷方式图标取不到 .ico（显示 cmd 默认图标）。
 // 用 Windows 自带的 csc.exe 编译，零第三方依赖。
 {
@@ -70,7 +70,7 @@ for (const f of ['launcher.cjs', '橙子进销存.cmd', 'package.json', 'README.
   const csc = cscCandidates.find((p) => fs.existsSync(p));
   const csFile = path.join(ROOT, 'tools', 'launcher.cs');
   const icoFile = path.join(ROOT, 'assets', 'icon-app.ico');
-  const outExe = path.join(PAYLOAD, '橙子进销存.exe');
+  const outExe = path.join(PAYLOAD, '惠民云进销存.exe');
   if (!csc) {
     console.warn('[payload] 未找到 csc.exe（.NET Framework 编译器）——跳过原生启动器编译。');
     console.warn('           桌面快捷方式将退回 .cmd 入口（会弹终端窗口且无自定义图标）。');
@@ -90,7 +90,7 @@ for (const f of ['launcher.cjs', '橙子进销存.cmd', 'package.json', 'README.
       console.error('[dist:win] 原生启动器编译失败——桌面快捷方式将退回 .cmd 入口。');
       process.exit(r.status ?? 1);
     }
-    console.log('[payload] 已编译原生无窗口启动器（橙子进销存.exe，图标已内嵌）');
+    console.log('[payload] 已编译原生无窗口启动器（惠民云进销存.exe，图标已内嵌）');
   }
 }
 // 便携模式标记：启动器（launcher.cjs）以此文件判断「数据放程序目录/data」。
@@ -116,7 +116,7 @@ console.log('========== 3/5 安装运行时依赖（express）==========');
 {
   // payload 内的 package.json 只保留生产依赖，避免 npm 去装 devDependencies
   const payloadPkg = {
-    name: 'orange-jxc-payload',
+    name: 'huimin-yun-payload',
     version: pkg.version,
     private: true,
     type: 'commonjs',
@@ -251,7 +251,7 @@ async function selfCheck() {
     process.exit(0);
   }
   console.log(`[dist:win] 使用 ISCC：${iscc}`);
-  run(iscc, [path.join(ROOT, 'installer', 'orange-jxc.iss')]);
+  run(iscc, [path.join(ROOT, 'installer', 'huimin-yun.iss')]);
 
   // ---------- 出包后冒烟：把 Setup.exe 静默装到临时目录，再从安装产物起服务 ----------
   // 这一步专门堵住「Inno 脚本引用错文件」这类只在安装后才暴露的打包层错误——
@@ -267,7 +267,7 @@ async function selfCheck() {
  * 探测成功后立即静默卸载并清理临时目录。找不到 Setup.exe 时跳过（不阻断交付）。
  */
 async function packageSmoke(version) {
-  const setup = path.join(ROOT, 'installer', 'out', `橙子进销存-Setup-${version}.exe`);
+  const setup = path.join(ROOT, 'installer', 'out', `惠民云进销存-Setup-${version}.exe`);
   if (!fs.existsSync(setup)) {
     console.warn(`[冒烟] 未找到安装产物 ${setup}，跳过安装后冒烟。`);
     return;
@@ -276,8 +276,11 @@ async function packageSmoke(version) {
   const checkPort = 7851;
   try {
     console.log('========== 冒烟：静默安装到临时目录并启动服务 ==========');
-    // /DIR 指定安装位置；/VERYSILENT 无界面；不建快捷方式（避免污染用户桌面）
-    const inst = spawnSync(setup, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', `/DIR=${tmpDir}`,
+    // /SP- 关闭「即将安装」询问框（无人值守时它会挡住流程）
+    // /DIR 指定安装位置——**必须带**：ISS 里 DisableDirPage=no（用户可自选路径），
+    //   而 /VERYSILENT 并不会自动跳过目录页，漏了 /DIR 会停在「选择目标位置」等输入。
+    // /VERYSILENT 无界面；不建快捷方式（避免污染用户桌面）
+    const inst = spawnSync(setup, ['/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', `/DIR=${tmpDir}`,
       '/MERGETASKS=!desktopicon'], { stdio: 'inherit', shell: false });
     if (inst.status !== 0) {
       fail(`安装包静默安装失败（exit ${inst.status}）`, '安装包 Inno 脚本可能在装机阶段出错。');
@@ -340,7 +343,7 @@ function fail(msg, hint) {
 function maybeUploadRelease(version) {
   const tag = process.env.ORANGE_RELEASE_TAG;
   if (!tag) return;
-  const setup = path.join(ROOT, 'installer', 'out', `橙子进销存-Setup-${version}.exe`);
+  const setup = path.join(ROOT, 'installer', 'out', `惠民云进销存-Setup-${version}.exe`);
   if (!fs.existsSync(setup)) {
     console.warn('[release] 未找到 Setup.exe，跳过上传。');
     return;
@@ -349,7 +352,7 @@ function maybeUploadRelease(version) {
   // 先确保 tag 的 release 存在（不存在则创建），再上传产物
   let r = spawnSync('gh', ['release', 'view', tag], { stdio: 'ignore', shell: process.platform === 'win32' });
   if (r.status !== 0) {
-    r = spawnSync('gh', ['release', 'create', tag, '--title', `橙子进销存 v${version}`, '--notes', `v${version}`, '--target', 'HEAD'],
+    r = spawnSync('gh', ['release', 'create', tag, '--title', `惠民云进销存 v${version}`, '--notes', `v${version}`, '--target', 'HEAD'],
       { stdio: 'inherit', shell: process.platform === 'win32' });
     if (r.status !== 0) {
       console.warn('[release] 创建 Release 失败（检查 gh 登录状态），跳过上传。');
