@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title 橙子服务管理
+title 惠民服务管理
 cd /d "%~dp0"
 start "" http://127.0.0.1:7742
 node tools\service-manager.cjs

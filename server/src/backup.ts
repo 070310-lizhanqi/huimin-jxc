@@ -93,7 +93,7 @@ function pruneBackups(dir: string, keepFile?: string): string[] {
 function dbFilePath(): string {
   const override = process.env.ORANGE_DB_PATH;
   if (override && override.trim()) return path.resolve(override.trim());
-  return path.join(dataDir(), 'orange-clone.db');
+  return path.join(dataDir(), 'huimin-clone.db');
 }
 
 /** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照 */

@@ -18,7 +18,7 @@ const DocPage = {
     const rows = ref(20);
     const list = ref([]);
     const total = ref(0);
-    // 筛选条：日期区间 + 往来单位（对齐橙子云列表页密集筛选条）
+    // 筛选条：日期区间 + 往来单位（对齐惠民云列表页密集筛选条）
     const filterFrom = ref('');
     const filterTo = ref('');
     const filterPartner = ref(null);
@@ -28,7 +28,7 @@ const DocPage = {
     const editorEditId = ref(0);
     const impOpen = ref(false);
     const busyId = ref(null);
-    /** 列表/明细分页签（真实橙子云有这个二级切换，明细=展开商品行） */
+    /** 列表/明细分页签（真实惠民云有这个二级切换，明细=展开商品行） */
     const viewTab = ref('list');
     /** 复选框选中的单据 id（批量操作/批量提交用） */
     const selected = ref([]);
@@ -414,7 +414,7 @@ const DocPage = {
     </div>
   </div>
 
-  <!-- ===== 整页开单态（对齐橙子云）：独立子组件，自持编辑状态 ===== -->
+  <!-- ===== 整页开单态（对齐惠民云）：独立子组件，自持编辑状态 ===== -->
   <doc-editor v-else :type="activeType" :doc-id="editorEditId" @close="closeEditor"/>
 
   <!-- ===== Excel/CSV 智能导入弹窗：独立子组件 ===== -->

@@ -11,7 +11,7 @@ const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
 const path = require('node:path');
 
-const dbPath = path.join(__dirname, '..', 'data', 'orange-clone.db');
+const dbPath = path.join(__dirname, '..', 'data', 'huimin-clone.db');
 const db = new DatabaseSync(dbPath);
 
 /** 与 server/src/auth.ts 的 hashPassword 保持一致 */

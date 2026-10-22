@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * 橙子服务管理器 —— 本地服务控制页
+ * 惠民服务管理器 —— 本地服务控制页
  *
- * 管理 1) 橙子云服务器（node dist/server/index.js，端口 7741）
+ * 管理 1) 惠民云服务器（node dist/server/index.js，端口 7741）
  *      2) Cloudflare 隧道（cloudflared.exe，trycloudflare 快速隧道）
  *
  * 仅监听 127.0.0.1:7742，不暴露公网。
@@ -55,7 +55,7 @@ function pidByPort(port) {
   } catch { return null; }
 }
 
-/** 探测橙子云服务器 HTTP 是否可达 */
+/** 探测惠民云服务器 HTTP 是否可达 */
 function probeApp() {
   return new Promise((resolve) => {
     const req = http.get(`http://${HOST}:${APP_PORT}/api/auth/status`, { timeout: 2000 }, (res) => {
@@ -220,7 +220,7 @@ function pageHtml() {
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>橙子服务管理</title>
+<title>惠民服务管理</title>
 <style>
   * { box-sizing: border-box; margin: 0; }
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: #f3f5f9; color: #1f2937; padding: 24px; }
@@ -245,12 +245,12 @@ function pageHtml() {
 </style>
 </head>
 <body>
-<h1>🍊 橙子服务管理</h1>
+<h1>🍊 惠民服务管理</h1>
 <div class="sub">本地控制台 · 仅本机可访问 · 关闭本页面不影响服务运行</div>
 
 <div class="card">
   <div class="head">
-    <span class="name"><span class="dot" id="app-dot" class="off"></span>橙子云服务器</span>
+    <span class="name"><span class="dot" id="app-dot" class="off"></span>惠民云服务器</span>
     <span class="state" id="app-state">检查中…</span>
   </div>
   <button class="btn start" onclick="act('/api/start/app')">启动</button>

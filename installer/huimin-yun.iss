@@ -1,10 +1,10 @@
 ; ============================================================
-; 橙子进销存 —— Windows 安装包脚本（Inno Setup 6）
+; 惠民云进销存 —— Windows 安装包脚本（Inno Setup 6）
 ;
-; 产物：橙子进销存-Setup-<版本>.exe
-; 安装位置：默认 %LOCALAPPDATA%\OrangeJXC，用户可在安装向导里改到任意目录
-; 数据位置：%APPDATA%\orange-jxc（卸载默认保留；卸载时询问是否一并删除）
-; 启动方式：桌面/开始菜单快捷方式指向「橙子进销存.exe」（无控制台窗口 + 自带图标）
+; 产物：惠民云进销存-Setup-<版本>.exe
+; 安装位置：默认 %LOCALAPPDATA%\HuiminYun，用户可在安装向导里改到任意目录
+; 数据位置：%APPDATA%\huimin-yun（卸载默认保留；卸载时询问是否一并删除）
+; 启动方式：桌面/开始菜单快捷方式指向「惠民云进销存.exe」（无控制台窗口 + 自带图标）
 ;
 ; 打包前先运行 pnpm run dist:win：
 ;   产出 installer/payload/ 完整运行目录（应用文件 + 自带 node.exe + 原生启动器）
@@ -12,11 +12,11 @@
 ;      故相对路径不要重复写 installer\ 前缀（否则会变成 installer\installer\…）
 ; ============================================================
 
-#define MyAppName "橙子进销存"
-#define MyAppNameEn "OrangeJXC"
+#define MyAppName "惠民云进销存"
+#define MyAppNameEn "HuiminYun"
 #define MyAppVersion ReadIni(SourcePath + "\version.ini", "app", "version", "0.0.0")
 ; 原生无窗口启动器（自带图标，替代原先会弹终端窗口的 .cmd 入口）
-#define MyAppExeName "橙子进销存.exe"
+#define MyAppExeName "惠民云进销存.exe"
 
 [Setup]
 AppId={{8A3E1C62-5B7D-4B8E-9A21-ORANGEJXC001}
@@ -29,7 +29,7 @@ DisableProgramGroupPage=yes
 ; 非管理员可安装；privilegesRequired=lowest 允许直接双击安装
 PrivilegesRequired=lowest
 OutputDir=out
-OutputBaseFilename=橙子进销存-Setup-{#MyAppVersion}
+OutputBaseFilename=惠民云进销存-Setup-{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -55,7 +55,7 @@ Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 
 [Files]
 ; 应用全部文件（dist、web、tools、launcher、node.exe、原生启动器 …）
-; 排除 portable.flag：安装版数据必须落 %APPDATA%\orange-jxc；若把该标记装进安装目录，
+; 排除 portable.flag：安装版数据必须落 %APPDATA%\huimin-yun；若把该标记装进安装目录，
 ;   launcher 会把数据改放 {app}\data，而 {app} 在卸载时会被清理 → 用户数据随卸载丢失
 Source: "payload\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; Excludes: "portable.flag"
 
@@ -76,7 +76,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 ; （实测 Selected Tasks 变成 desktopicon,deletedata），结果是「卸载即删账套数据」——
 ; 对用户是数据丢失事故。
 ; 因此改为：卸载一律保留数据目录；需要彻底清除时用独立的
-; 「彻底清除工具」（tools/clean-install.cjs）或手动删除 %APPDATA%\orange-jxc。
+; 「彻底清除工具」（tools/clean-install.cjs）或手动删除 %APPDATA%\huimin-yun。
 
 [Run]
 ; 安装完成可选立即启动（nowait + 无窗口 exe，用户不会看到黑窗）
@@ -90,5 +90,5 @@ Filename: "{app}\node\node.exe"; Parameters: """{app}\tools\uninstall-stop.cjs""
 ; 清理安装目录内的运行期产物
 Type: filesandordirs; Name: "{app}\.tools"
 Type: files; Name: "{app}\data\*.pid"
-; 刻意**不**删除 %APPDATA%\orange-jxc：账套数据保留，重装即恢复。
+; 刻意**不**删除 %APPDATA%\huimin-yun：账套数据保留，重装即恢复。
 ; 需要彻底清除时用 tools/clean-install.cjs（会二次确认）。

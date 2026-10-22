@@ -74,7 +74,7 @@ const LoginPage = {
     <div class="login-card">
       <div class="login-brand">
         <span v-html="BRAND_SVG"></span>
-        <span class="t">橙子进销存</span>
+        <span class="t">惠民云进销存</span>
       </div>
       <p class="login-sub">{{ mode === 'login' ? '登录你的账套，开始今天的经营' : (firstRun ? '首次使用，请创建管理员账号与账套' : '新建管理员账号') }}</p>
       <el-form @submit.prevent="submit" label-position="top">
@@ -240,7 +240,7 @@ const App = {
       <span class="nav-ind" :style="navInd"></span>
       <div class="brand" @click="nav('#/dashboard')">
         <span class="brand-mark" v-html="BRAND_SVG"></span>
-        <span class="brand-txt">橙子进销存</span>
+        <span class="brand-txt">惠民云进销存</span>
       </div>
       <div class="nav-item" v-for="(g, i) in MENU" :key="g.label">
         <div class="nav-link" :class="{ on: curKey.startsWith(g.page || '__none') || (g.items && g.items.some(m => m.page === curKey)) }" @click.stop="onNavClick(i, g)">

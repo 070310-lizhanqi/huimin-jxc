@@ -43,7 +43,7 @@ export function validBizDate(v: unknown): string | null {
 }
 
 /**
- * 数据目录：环境变量 ORANGE_DATA_DIR 优先（安装版由启动器指向 %APPDATA%\orange-jxc），
+ * 数据目录：环境变量 ORANGE_DATA_DIR 优先（安装版由启动器指向 %APPDATA%\huimin-yun），
  * 缺省保持「当前工作目录/data」的开发行为（测试脚本与手工运行不受影响）。
  */
 export function dataDir(): string {
@@ -71,7 +71,7 @@ function applyPendingRestore(dbPath: string): void {
 }
 
 export function openDb(dbPath?: string): DB {
-  const p = dbPath ?? path.join(dataDir(), 'orange-clone.db');
+  const p = dbPath ?? path.join(dataDir(), 'huimin-clone.db');
   const fs = require('node:fs') as typeof import('node:fs');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   applyPendingRestore(p);
@@ -165,7 +165,7 @@ export function migrate(db: DB): void {
     type TEXT NOT NULL DEFAULT 'cash',
     balance INTEGER DEFAULT 0
   );
-  -- 商品单位档案（对齐橙子云「资料 - 商品单位」，建档案后开单可下拉选择）
+  -- 商品单位档案（对齐惠民云「资料 - 商品单位」，建档案后开单可下拉选择）
   CREATE TABLE IF NOT EXISTS unit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     teamId INTEGER NOT NULL,
@@ -288,7 +288,7 @@ export function migrate(db: DB): void {
   addColumn('doc', 'submitAt', 'TEXT');
   addColumn('doc', 'auditBy', 'TEXT');
   addColumn('doc', 'rejectReason', 'TEXT');
-  // 单据扩展字段（对齐橙子云开单页）：收件人信息 / 整单折扣 / 本次收款 / 收款账户 / 抵扣订金
+  // 单据扩展字段（对齐惠民云开单页）：收件人信息 / 整单折扣 / 本次收款 / 收款账户 / 抵扣订金
   addColumn('doc', 'receiverName', 'TEXT');
   addColumn('doc', 'receiverMobile', 'TEXT');
   addColumn('doc', 'receiverAddress', 'TEXT');

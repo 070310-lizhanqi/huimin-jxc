@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 橙子进销存 —— 应用启动器（安装版/便携版共用）。
+ * 惠民云进销存 —— 应用启动器（安装版/便携版共用）。
  *
  * 职责：
  * 1) 计算数据目录（%APPDATA%\orange-jxc，便携模式为安装目录\data）并注入 ORANGE_DATA_DIR
@@ -22,14 +22,143 @@ const PORTABLE_FLAG = path.join(APP_ROOT, 'portable.flag');
 const PREFERRED_PORT = Number(process.env.ORANGE_PORT || 7741);
 
 // ---------- 数据目录 ----------
+/**
+ * 品牌改名后的数据目录名，以及旧名（用于一次性迁移）。
+ * 环境变量名 ORANGE_DATA_DIR 保持不变——它是外部约定（安装器、脚本、用户自设），
+ * 改名会破坏既有部署。
+ */
+const DATA_DIR_NAME = 'huimin-yun';
+const LEGACY_DATA_DIR_NAME = 'orange-jxc';
+/** 库文件名也随品牌改了：旧的 orange-clone.db → 新的 huimin-clone.db */
+const DB_FILE_NAME = 'huimin-clone.db';
+const LEGACY_DB_FILE_NAME = 'orange-clone.db';
+
+function appDataDir() {
+  return process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming');
+}
 function dataDir() {
   if (process.env.ORANGE_DATA_DIR) return process.env.ORANGE_DATA_DIR;
   if (fs.existsSync(PORTABLE_FLAG)) return path.join(APP_ROOT, 'data');
-  const appData = process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming');
-  return path.join(appData, 'orange-jxc');
+  return path.join(appDataDir(), DATA_DIR_NAME);
 }
-const DATA = dataDir();
+
+/**
+ * 旧数据目录迁移：%APPDATA%\orange-jxc → %APPDATA%\huimin-yun。
+ *
+ * 安全要点（数据丢了就没了）：
+ *  1. 只在「新目录还不存在或为空」时才搬——绝不覆盖已有数据；
+ *  2. 搬之前先把 WAL 合并进主库（WAL 里可能还有未落盘的账），
+ *     用完 node:sqlite 的 checkpoint 能力，保证 .db 是完整快照；
+ *  3. 整个目录用「先复制 → 校验 → 再删旧目录」的方式，
+ *     中途失败旧目录还在，数据不会丢；
+ *  4. 失败只告警不阻断启动——服务仍可用旧目录（见下面的回退逻辑）。
+ *
+ * 返回值约定：
+ *   null      → 用新目录继续（迁移成功，或本来就没什么可迁的）
+ *   旧目录路径 → 迁移失败，调用方应回退到旧目录继续（数据还在那，不会丢）
+ */
+function migrateLegacyDataDir(target) {
+  const legacy = path.join(appDataDir(), LEGACY_DATA_DIR_NAME);
+  if (legacy === target) return null;
+  if (!fs.existsSync(legacy)) return null;
+
+  // 目标已有数据 → 不动（避免覆盖）
+  try {
+    const existing = fs.readdirSync(target);
+    const meaningful = existing.filter((f) => f !== 'launcher.pid' && f !== 'port.txt' && f !== 'server.lock');
+    if (meaningful.length > 0) {
+      console.log(`[启动器] 检测到旧数据目录 ${legacy}，但新目录已有数据，跳过迁移（不覆盖）。`);
+      return null;
+    }
+  } catch {
+    // 目标目录读不到：当作空，继续
+  }
+
+  try {
+    // 1) 先把旧库 WAL 合并进主库，得到完整快照
+    const oldDb = path.join(legacy, LEGACY_DB_FILE_NAME);
+    if (fs.existsSync(oldDb)) {
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(oldDb);
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        db.close();
+      } catch (e) {
+        console.warn('[启动器] 旧库 checkpoint 失败（继续尝试搬运）：' + e.message);
+      }
+    }
+
+    // 2) 复制整个目录（不删旧的）；库文件要改新名，否则服务端找不到
+    fs.mkdirSync(target, { recursive: true });
+    for (const name of fs.readdirSync(legacy)) {
+      const src = path.join(legacy, name);
+      const dstName = name === LEGACY_DB_FILE_NAME ? DB_FILE_NAME : name;
+      const dst = path.join(target, dstName);
+      if (fs.existsSync(dst)) continue; // 目标已有同名文件，不覆盖
+      fs.cpSync(src, dst, { recursive: true });
+    }
+    // 库文件改名后，其 WAL/SHM 副产物也要跟着改名（服务端按新库名找副产物）
+    for (const suffix of ['-wal', '-shm']) {
+      const oldSide = path.join(target, LEGACY_DB_FILE_NAME + suffix);
+      if (fs.existsSync(oldSide)) {
+        try { fs.renameSync(oldSide, path.join(target, DB_FILE_NAME + suffix)); } catch { /* ignore */ }
+      }
+    }
+
+    // 3) 校验：新库必须存在且大小一致
+    if (fs.existsSync(oldDb)) {
+      const newDb = path.join(target, DB_FILE_NAME);
+      if (!fs.existsSync(newDb)) throw new Error('迁移后主库缺失');
+      const a = fs.statSync(oldDb).size;
+      const b = fs.statSync(newDb).size;
+      if (a !== b) throw new Error(`迁移后大小不一致（${a} vs ${b}）`);
+    }
+
+    // 4) 校验通过才删旧目录
+    //    删除前先把旧库句柄彻底释放（WAL 模式下 .db/-wal/-shm 仍被占用会 EPERM）；
+    //    删除本身也可能因句柄未释放失败 → 重试若干次，仍失败则保留旧目录
+    //    （旧目录留着只是多占点空间，不删反而更安全——下次启动会再判定一次）。
+    try {
+      const oldDbHandle = new DatabaseSync(oldDb, { readOnly: true });
+      oldDbHandle.close();
+    } catch { /* 打不开就算了，删不掉就保留旧目录 */ }
+    fs.rmSync(path.join(legacy, LEGACY_DB_FILE_NAME + '-wal'), { force: true });
+    fs.rmSync(path.join(legacy, LEGACY_DB_FILE_NAME + '-shm'), { force: true });
+    let removed = false;
+    for (let attempt = 0; attempt < 5 && !removed; attempt++) {
+      try {
+        fs.rmSync(legacy, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        removed = !fs.existsSync(legacy);
+      } catch {
+        // 句柄未释放，稍等再试
+        const until = Date.now() + 300;
+        while (Date.now() < until) { /* 短暂等待 */ }
+      }
+    }
+    if (!removed) {
+      console.warn(`[启动器] 旧数据目录未能删除（可能仍被占用），已保留：${legacy}`);
+    }
+    console.log(`[启动器] 数据目录已从 ${LEGACY_DATA_DIR_NAME} 迁移到 ${DATA_DIR_NAME}。`);
+    // 迁移成功：返回 null，表示「继续用新目录」（不触发回退）
+    return null;
+  } catch (e) {
+    console.error('[启动器] 数据目录迁移失败：' + e.message);
+    console.error('           为避免丢数据，仍使用旧目录 ' + legacy + '（可手动改名后重试）。');
+    return legacy; // 回退：继续用旧目录
+  }
+}
+
+let DATA = dataDir();
 fs.mkdirSync(DATA, { recursive: true });
+// 迁移只在「默认安装目录」场景发生：用户显式指定 ORANGE_DATA_DIR 或便携模式时不插手
+if (!process.env.ORANGE_DATA_DIR && !fs.existsSync(PORTABLE_FLAG)) {
+  const fellBack = migrateLegacyDataDir(DATA);
+  // 迁移失败 → 回退继续用旧目录启动（数据还在那，不会丢）
+  if (fellBack && fellBack !== DATA) {
+    DATA = fellBack;
+    fs.mkdirSync(DATA, { recursive: true });
+  }
+}
 const LAUNCHER_PID = path.join(DATA, 'launcher.pid');
 // 记录启动器自身 pid：卸载/管理脚本可据此停止看护进程
 try { fs.writeFileSync(LAUNCHER_PID, String(process.pid)); } catch { /* ignore */ }
@@ -144,13 +273,24 @@ async function main() {
 
   // 守护循环：服务退出（含「恢复备份」重启）→ 重新拉起并重开浏览器
   let lastPort = port;
+  // 连续启动失败计数：超过上限就停止自动拉起（避免坏数据导致无限重启刷屏）
+  let restartFails = 0;
+  const MAX_RESTART_FAILS = 5;
   for (;;) {
     await sleep(2000);
     if (child && child.exitCode !== null) {
-      logLine('服务进程退出，2 秒后重新拉起……');
+      // 连续拉起失败（如数据文件损坏/结构不兼容）就停下，别无限重启刷日志
+      restartFails++;
+      if (restartFails >= MAX_RESTART_FAILS) {
+        logLine(`服务已连续 ${restartFails} 次启动失败，停止自动拉起。请查看 ${LOG_FILE} 里的错误信息。`);
+        break;
+      }
+      logLine(`服务进程退出，2 秒后重新拉起（第 ${restartFails} 次）……`);
       await sleep(2000);
       await ensureServer();
       lastPort = null; // 端口可能变化，强制重新探测
+    } else {
+      restartFails = 0; // 跑起来了就清零
     }
     const p = readPort();
     if (p && p !== lastPort && (await probe(p))) {

@@ -83,7 +83,7 @@ function ok(cond, name, detail) {
     const cases = [
       '..%2F..%2F..%2Fwindows%2Fwin.ini',
       'backup-20260101-000000.db%00.exe',
-      '../../orange-clone.db',
+      '../../huimin-clone.db',
       'backup-..-..db',
     ];
     let blocked = true;

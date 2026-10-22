@@ -2,15 +2,58 @@
 
 本项目遵循「版本 = 一轮审查 + 修复」的节奏。带 ⚠️ 的条目为影响账务正确性或安全性的修复。
 
+## v0.3.0（2026-10-22）
+
+**项目更名：橙子云 / 橙子进销存 → 惠民云 / 惠民云进销存。**
+
+### 数据目录自动迁移（老用户无感升级）
+
+数据目录与库文件名都随品牌改了：%APPDATA%\orange-jxc（orange-clone.db）→ %APPDATA%\huimin-yun（huimin-clone.db）。
+若不迁移，老用户升级后会「数据消失」——新目录是空的，旧目录还在却没人读。
+
+迁移由启动器执行（它决定数据目录并注入 ORANGE_DATA_DIR，早于服务端开库），安全设计：
+
+1. **不覆盖**：新目录已有数据时跳过迁移，旧目录原样保留。
+2. **先 checkpoint**：搬之前用 `PRAGMA wal_checkpoint(TRUNCATE)` 把 WAL 合并进主库，
+   保证尚未落盘的账不会丢（WAL 模式下数据可能还只存在于 -wal 文件里）。
+3. **先复制后校验再删**：复制整个目录 → 校验主库存在且大小一致 → 才删旧目录。
+   中途任何失败旧目录都还在，数据不会丢。
+4. **失败即回退**：迁移失败时告警并回退到旧目录继续启动（服务照常可用）。
+5. **删目录重试**：旧库句柄未释放会导致删除 EPERM，重试若干次；仍失败就保留旧目录
+   （留着只是占点空间，下次启动还会再判定一次）。
+6. **库文件改名**：旧库复制过去时改名为新库名，其 -wal / -shm 副产物一并改名
+   （服务端按库名找副产物，不改会导致读不到事务状态）。
+
+### 品牌替换范围
+
+- 产品名：README 标题、登录页、顶栏、工作台欢迎语、安装包名、快捷方式、卸载项、窗口标题。
+- 图标：桌面/开始菜单图标由「橙」字改为「惠」字（`assets/make-icons.py` 重新生成）。
+- 注释与文档里所有「橙子云」表述一并替换。
+- 文件重命名：橙子进销存.cmd → 惠民云进销存.cmd、橙子服务管理.bat → 惠民云服务管理.bat、
+  installer/orange-jxc.iss → installer/huimin-yun.iss。
+
+### 刻意不改的部分
+
+- **环境变量名** `ORANGE_DATA_DIR` / `ORANGE_JWT_SECRET` 等：外部约定（安装器、脚本、用户自设
+  都在用），改名会破坏既有部署。
+- **安装标识 AppId**：必须保持不变，否则老用户升级会被当成全新安装（触发重新引导、数据目录不同）。
+- **GitHub 仓库名**：改了等于换项目，链接全部失效。
+
+### 测试
+
+新增 `tools/test-data-migration.cjs`（19 条断言）：旧目录不存在 / 正常迁移 / 新目录已有数据不覆盖 /
+WAL 未落盘数据不丢 / 库文件改名 / 返回值语义（成功返回 null，失败返回旧目录路径以触发回退）。
+全量回归 **31/31 脚本通过**；另在本机做了真实迁移验证（造旧数据目录 → 启动 → 数据完好 → 旧目录自动清理）。
+
 ## v0.2.8（2026-10-22）
 
 面向真实用户安装体验的一轮改进：**图标、安装向导、启动体验、卸载**。
 
 ### 安装体验
 
-- **桌面图标不再"像病毒"**：原先入口是 `.cmd`，快捷方式取不到 `.ico` 只能显示 cmd 的默认图标。现新增**原生无窗口启动器** `橙子进销存.exe`（`tools/launcher.cs`，用 Windows 自带的 `csc.exe` 编译成 winexe，图标内嵌在 exe 里），快捷方式显式绑定 `IconLocation`。安装包自身也用了应用图标。
+- **桌面图标不再"像病毒"**：原先入口是 `.cmd`，快捷方式取不到 `.ico` 只能显示 cmd 的默认图标。现新增**原生无窗口启动器** `惠民云进销存.exe`（`tools/launcher.cs`，用 Windows 自带的 `csc.exe` 编译成 winexe，图标内嵌在 exe 里），快捷方式显式绑定 `IconLocation`。安装包自身也用了应用图标。
 - **启动不再弹黑色终端窗口**：原生启动器以 `CREATE_NO_WINDOW | DETACHED_PROCESS` 拉起服务，标准句柄重定向到 NUL，全程无窗口、无闪烁。`launcher.cjs` 的输出改写入 `server.log`（无控制台时 stdout 指向 NUL，日志才不会丢）。
-- **安装路径可自选**：向导的「安装文件夹」页恢复可用（`DisableDirPage=no`），默认仍是 `%LOCALAPPDATA%\OrangeJXC`，用户可改到任意可写目录。
+- **安装路径可自选**：向导的「安装文件夹」页恢复可用（`DisableDirPage=no`），默认仍是 `%LOCALAPPDATA%\HuiminYun`，用户可改到任意可写目录。
 - **原生启动器由打包流程自动编译**：`dist:win` 用系统 `csc.exe` 编译 `tools/launcher.cs` 并把图标嵌进去，零第三方依赖；找不到 `csc.exe` 时降级提示并退回 `.cmd` 入口。
 
 ### 卸载
@@ -53,11 +96,11 @@
 - **打包流水线清理竞态修复**：`dist-win` 的隔离目录自检在 kill 子进程后立即 `rmSync` 临时目录，Windows 上因句柄未释放抛 `EPERM` 并中断整个流水线（导致走不到 ISCC 出包步骤）。现改为等子进程真正退出、并对目录删除做重试与降级告警。
 - **CHANGELOG 独立**：版本历史从 README 拆出为本文件，README 只保留最新一条与链接。
 - **README 增补使用手册**：新增安装三种方式、首次初始化、按模块的使用步骤（记账核心规则、采购/销售流程、库存业务、资金结算、报表对账、导入/打印/编号/权限）、数据与备份、环境变量表、常见问题，共约 300 行。
-- **便携版模式修复**：`launcher.cjs` 一直按 `portable.flag` 判断「数据落程序目录」，但**打包流程从未创建该文件**——照文档把 `payload/` 当便携版分发时，数据实际落到了 `%APPDATA%\orange-jxc`，与「拷走目录即带走数据」的说明不符。现 `dist:win` 组装 payload 时写入该标记；同时 Inno 安装脚本 `[Files]` 用 `Excludes` 排除它（安装版数据必须在 `%APPDATA%`，否则会落进 `{app}\data` 并随卸载被清理）。
+- **便携版模式修复**：`launcher.cjs` 一直按 `portable.flag` 判断「数据落程序目录」，但**打包流程从未创建该文件**——照文档把 `payload/` 当便携版分发时，数据实际落到了 `%APPDATA%\huimin-yun`，与「拷走目录即带走数据」的说明不符。现 `dist:win` 组装 payload 时写入该标记；同时 Inno 安装脚本 `[Files]` 用 `Excludes` 排除它（安装版数据必须在 `%APPDATA%`，否则会落进 `{app}\data` 并随卸载被清理）。
 - **打包链路三处缺陷修复**（此前出包从未真正跑通过，本轮首次跑通完整链路——含装机冒烟）：
   1. `dist-win` 用 `shell:true` 拼接命令行却未给路径加引号，`C:\Program Files (x86)\Inno Setup 6\ISCC.exe` 被拆成 `...\Inno` 而报「不是内部或外部命令」——**默认安装位置下安装包根本编不出来**；现统一加引号，并增加 winget 用户目录与注册表两处 ISCC 定位兜底。
-  2. `orange-jxc.iss` 的相对路径重复带了 `installer\` 前缀（Inno 的 `SourcePath` 已是 `installer/`），导致 `ReadIni` 读不到 `version.ini`（版本号静默变成 `0.0.0`）、产物输出到 `installer\installer\out`、`[Files]` 找不到 `installer\installer\payload`。
-  3. `orange-jxc.iss` 引用 `compiler:Languages\ChineseSimplified.isl`，但 Inno Setup 官方安装包**不含中文语言文件**，编译直接中止；现把该 .isl 随仓库携带并改用相对路径引用。
+  2. `huimin-yun.iss` 的相对路径重复带了 `installer\` 前缀（Inno 的 `SourcePath` 已是 `installer/`），导致 `ReadIni` 读不到 `version.ini`（版本号静默变成 `0.0.0`）、产物输出到 `installer\installer\out`、`[Files]` 找不到 `installer\installer\payload`。
+  3. `huimin-yun.iss` 引用 `compiler:Languages\ChineseSimplified.isl`，但 Inno Setup 官方安装包**不含中文语言文件**，编译直接中止；现把该 .isl 随仓库携带并改用相对路径引用。
 
 ### 测试发现的问题
 
@@ -81,7 +124,7 @@
 
 **② 业务正确性**：修「改单可换类型导致负数出库反向加库存」的错账漏洞；`qty:null`（JSON 化的 Infinity）绕过校验落库为 0 数量行——已改为强制有限数值；负折扣/负收款/负订金直接拒绝；单据复制补齐收件人/折扣/账户；开单人与审核人 userId 落库；收付款创建双击幂等；结算列表 `rows` 参数真正生效并支持 partnerId/日期/refDocId 过滤；档案列表支持条码/规格搜索；前端请求 30s 超时 + 登录页记住用户名；CORS 白名单跟随实际端口。
 
-**③ 应用化（可安装分发）**：数据目录外置 `ORANGE_DATA_DIR`（安装版 `%APPDATA%\orange-jxc`，便携版程序目录 data/）；默认仅监听 127.0.0.1（`ORANGE_BIND=0.0.0.0` 显式开局域网）；端口被占自动后移并写 `port.txt`；单实例文件锁；**数据备份与恢复**（管理员页签：WAL checkpoint 快照、同秒防冲突、下载到本机外、恢复需二次验密且由内置重启助手自动重启生效、文件名白名单防路径穿越）；Host 头白名单防 DNS rebinding；应用启动器 `launcher.cjs`（免参启动→探测就绪→自动开浏览器→进程退出自动拉起，含 launcher.pid）；Windows 安装包流水线 `pnpm run dist:win`（payload 内置 node.exe + 独立安装 express 运行时依赖 + 隔离目录产物自检，缺依赖直接阻止交付）。
+**③ 应用化（可安装分发）**：数据目录外置 `ORANGE_DATA_DIR`（安装版 `%APPDATA%\huimin-yun`，便携版程序目录 data/）；默认仅监听 127.0.0.1（`ORANGE_BIND=0.0.0.0` 显式开局域网）；端口被占自动后移并写 `port.txt`；单实例文件锁；**数据备份与恢复**（管理员页签：WAL checkpoint 快照、同秒防冲突、下载到本机外、恢复需二次验密且由内置重启助手自动重启生效、文件名白名单防路径穿越）；Host 头白名单防 DNS rebinding；应用启动器 `launcher.cjs`（免参启动→探测就绪→自动开浏览器→进程退出自动拉起，含 launcher.pid）；Windows 安装包流水线 `pnpm run dist:win`（payload 内置 node.exe + 独立安装 express 运行时依赖 + 隔离目录产物自检，缺依赖直接阻止交付）。
 
 **④ 缺陷修复**：修复 `DocPage` 模板多根片段与外层 `<transition mode="out-in">` 冲突导致的**单据子路由切换整页空白并级联污染后续路由**（如采购入库↔销售出库）；前端 JS/CSS/HTML 改为 `no-cache` 协商缓存，升级程序后不再复用旧前端；`.cmd` 改 CRLF 行尾。
 

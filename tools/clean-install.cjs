@@ -9,8 +9,8 @@
  *   node tools/clean-install.cjs --yes    # 不再询问，直接清除（谨慎）
  *
  * 清除范围：
- *   1) 安装目录（%LOCALAPPDATA%\OrangeJXC，或注册表里记录的路径）
- *   2) 数据目录（%APPDATA%\orange-jxc）—— 账套数据，不可恢复
+ *   1) 安装目录（%LOCALAPPDATA%\HuiminYun，或注册表里记录的路径）
+ *   2) 数据目录（%APPDATA%\huimin-yun）—— 账套数据，不可恢复
  *   3) 桌面 / 开始菜单快捷方式
  *   4) 卸载注册表项
  *   5) 残留的 node 进程（先停启动器再停服务，顺序不能反）
@@ -21,14 +21,18 @@ const { execFileSync, spawnSync } = require('child_process');
 
 const ASSUME_YES = process.argv.includes('--yes');
 const APP_ID = '{8A3E1C62-5B7D-4B8E-9A21-ORANGEJXC001}_is1';
-const APP_NAME = '橙子进销存';
+const APP_NAME = '惠民云进销存';
+// 旧品牌名（数据目录）——未升级的老用户数据在这
+const LEGACY_DATA_DIR_NAME = 'orange-jxc';
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '';
 const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local');
 const APPDATA = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
 
-const DATA_DIR = path.join(APPDATA, 'orange-jxc');
-const DEFAULT_INSTALL_DIR = path.join(LOCALAPPDATA, 'OrangeJXC');
+const DATA_DIR = path.join(APPDATA, 'huimin-yun');
+// 旧品牌名目录：还没升级的老用户数据在这，一并清除
+const LEGACY_DATA_DIR = path.join(APPDATA, 'orange-jxc');
+const DEFAULT_INSTALL_DIR = path.join(LOCALAPPDATA, 'HuiminYun');
 // 桌面路径必须用系统 API 取：OneDrive 重定向后桌面可能不在 %USERPROFILE%\Desktop
 // （实测本机桌面在 D:\HP-Li\Desktop），写死 USERPROFILE 会漏删快捷方式。
 function systemFolder(name) {
@@ -162,9 +166,11 @@ function rmLnk(dir, name) {
   }
   if (dirDone) console.log('[4/5] 安装目录清理完成');
 
-  // 5) 数据目录
+  // 5) 数据目录（新旧两个都清）
   const dataDone = rmrf(DATA_DIR);
-  console.log(`[5/5] 数据目录：${dataDone ? '已删除' : (fs.existsSync(DATA_DIR) ? '删除失败（服务可能仍在跑）' : '已删除')}`);
+  const legacyDone = rmrf(LEGACY_DATA_DIR);
+  console.log(`[5/5] 数据目录：${dataDone ? '已删除' : (fs.existsSync(DATA_DIR) ? '删除失败（服务可能仍在跑）' : '已删除')}` +
+    `（旧目录 ${LEGACY_DATA_DIR_NAME}：${legacyDone ? '已删除' : (fs.existsSync(LEGACY_DATA_DIR) ? '删除失败' : '不存在')}）`);
 
   console.log('\n完成。');
 })();

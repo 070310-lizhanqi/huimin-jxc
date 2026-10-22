@@ -1,6 +1,6 @@
 'use strict';
 /* web/js/08-dashboard.js —— 由 app.js 拆分（lines 368-938） */
-/* ================= 工作台（对齐橙子云 6 格图表墙） ================= */
+/* ================= 工作台（对齐惠民云 6 格图表墙） ================= */
 const DashboardPage = {
   components: { DocViewer },
   setup() {
@@ -24,7 +24,7 @@ const DashboardPage = {
     const charts = [];
 
     /**
-     * 三张独立排行卡（对齐真实橙子云工作台）：
+     * 三张独立排行卡（对齐真实惠民云工作台）：
      * 销售订单排行 / 销售出库排行 / 销售收款排行，各自独立切维度与时间范围
      */
     const DIM_ALL = [
@@ -42,7 +42,7 @@ const DashboardPage = {
     const rankData = reactive({ order: [], out: [], receipt: [] });
     const rankBy = reactive({ order: 'cus', out: 'cus', receipt: 'cus' });
     const rankRefs = reactive({});
-    /** 常用功能快捷入口（对齐橙子云工作台，可在页面上增删，存 localStorage） */
+    /** 常用功能快捷入口（对齐惠民云工作台，可在页面上增删，存 localStorage） */
     const QUICK_DEFAULT = [
       { label: '销售出库', icon: 'Sell', to: '#/doc/sale?type=stockout&new=1' },
       { label: '采购入库', icon: 'ShoppingCart', to: '#/doc/purchase?type=stockin&new=1' },
@@ -92,7 +92,7 @@ const DashboardPage = {
       quickEdit.value = false;
     }
 
-    /** 四项 KPI（对齐橙子云「新增销售数据」） */
+    /** 四项 KPI（对齐惠民云「新增销售数据」） */
     const kpis = computed(() => {
       const s = sales.value;
       if (!s) return [];
@@ -377,13 +377,13 @@ const DashboardPage = {
   },
   template: `
   <div>
-    <!-- 团队标题条（对齐橙子云：白卡左上角团队名） -->
+    <!-- 团队标题条（对齐惠民云：白卡左上角团队名） -->
     <div class="team-bar">
       <span class="team-name">{{ store.team?.name || '当前账套' }}</span>
       <span class="team-sub">欢迎回来，祝您生意兴隆</span>
     </div>
 
-    <!-- 常用功能（对齐橙子云工作台：右侧 添加/移除） -->
+    <!-- 常用功能（对齐惠民云工作台：右侧 添加/移除） -->
     <div class="chart-card" style="margin-bottom:14px">
       <div class="ct">
         常用功能
@@ -407,7 +407,7 @@ const DashboardPage = {
 
     <!-- 新手引导 -->
     <div v-if="showGuide" class="card" style="margin-bottom:14px;padding:18px 20px;border-left:4px solid var(--brand)">
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用橙子进销存 —— 3 步开账</div>
+      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用惠民云进销存 —— 3 步开账</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:var(--text)">
         <div style="flex:1;min-width:200px">
           <div style="font-weight:600;margin-bottom:4px;color:var(--brand)">① 第 1 步 · 建档</div>
@@ -517,7 +517,7 @@ const DashboardPage = {
       </div>
     </div>
 
-    <!-- 第 3 行：三张独立销售排行卡（对齐橙子云：订单/出库/收款各一格） -->
+    <!-- 第 3 行：三张独立销售排行卡（对齐惠民云：订单/出库/收款各一格） -->
     <div class="dash-row">
       <div class="chart-card" v-for="rk in RANK_CARDS" :key="rk.k">
         <div class="ct">

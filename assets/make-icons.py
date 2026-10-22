@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成桌面快捷方式图标：assets/icon-app.ico（进销存，橙底白「橙」）、assets/icon-manager.ico（服务管理，深灰底橙色齿轮）。"""
+"""生成桌面快捷方式图标：assets/icon-app.ico（惠民云，橙底白「惠」）、assets/icon-manager.ico（服务管理，深灰底橙齿轮）。"""
 import math
 import os
 
@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 S = 256
 RADIUS = 58
-ORANGE = (242, 111, 33, 255)      # 品牌橙 #F26F21
+BRAND = (242, 111, 33, 255)       # 品牌主色（橙）#F26F21
 SLATE = (52, 58, 66, 255)         # 深灰 #343A42
 WHITE = (255, 255, 255, 255)
 
@@ -47,9 +47,9 @@ def apply_sheen(img):
 def make_app():
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([8, 8, S - 8, S - 8], radius=RADIUS, fill=ORANGE)
-    font = load_font(158)
-    text = "橙"
+    d.rounded_rectangle([8, 8, S - 8, S - 8], radius=RADIUS, fill=BRAND)
+    font = load_font(168)
+    text = "惠"
     bbox = d.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((S - w) / 2 - bbox[0], (S - h) / 2 - bbox[1] - 4), text, font=font, fill=WHITE)
@@ -70,8 +70,8 @@ def make_manager():
 
     for i in range(n):
         a = 2 * math.pi * i / n
-        d.polygon([polar(r1, a - half), polar(r2, a - half), polar(r2, a + half), polar(r1, a + half)], fill=ORANGE)
-    d.ellipse([cx - (r1 + 3), cy - (r1 + 3), cx + (r1 + 3), cy + (r1 + 3)], fill=ORANGE)
+        d.polygon([polar(r1, a - half), polar(r2, a - half), polar(r2, a + half), polar(r1, a + half)], fill=BRAND)
+    d.ellipse([cx - (r1 + 3), cy - (r1 + 3), cx + (r1 + 3), cy + (r1 + 3)], fill=BRAND)
     d.ellipse([cx - 25, cy - 25, cx + 25, cy + 25], fill=SLATE)
     return apply_sheen(img)
 

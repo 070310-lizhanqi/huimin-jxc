@@ -13,7 +13,7 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 
 const BASE = 'http://127.0.0.1:7741/api';
-const DB_PATH = path.join(__dirname, '..', 'data', 'orange-clone.db');
+const DB_PATH = path.join(__dirname, '..', 'data', 'huimin-clone.db');
 const USER = 'admin';
 const PASS = 'admin123456';
 

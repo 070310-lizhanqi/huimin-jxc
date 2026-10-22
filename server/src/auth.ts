@@ -16,7 +16,7 @@ import { localDate } from './db';
 /** 令牌有效期（秒）：7 天 */
 const TOKEN_TTL = 7 * 24 * 3600;
 /** 签名密钥：优先环境变量，否则用固定本地密钥（单机部署可接受） */
-const SECRET = process.env.ORANGE_JWT_SECRET ?? 'orange-clone-local-secret-v1';
+const SECRET = process.env.ORANGE_JWT_SECRET ?? 'huimin-clone-local-secret-v1';
 
 export interface AuthUser {
   userId: number;

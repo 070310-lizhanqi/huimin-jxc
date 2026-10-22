@@ -5,7 +5,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 
-const db = new DatabaseSync(path.join(__dirname, '..', 'data', 'orange-clone.db'));
+const db = new DatabaseSync(path.join(__dirname, '..', 'data', 'huimin-clone.db'));
 // 只清业务流水，保留档案
 const flowTables = [
   'doc_item', 'doc', 'stock_ledger', 'stock', 'settlement', 'partner_balance',
