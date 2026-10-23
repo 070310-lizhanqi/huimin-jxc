@@ -2,6 +2,74 @@
 
 本项目遵循「版本 = 一轮审查 + 修复」的节奏。带 ⚠️ 的条目为影响账务正确性或安全性的修复。
 
+## v0.3.8（2026-10-23）
+
+第六轮全面审查：在前五轮基础上把 50 条新发现的优化点按「P0 数据正确性 → P1 安全 → P2 性能 → P3 前端健壮性 → P4 工程化」五个批次落地，全量回归 31/31 通过。
+
+### P0 数据正确性
+
+- ⚠️ **作废冲回读快照而非实际落账**：`/doc/void` 反冲账户用审核时点的 `doc.paidAmount`/`doc.accountId`，若审核后结算记录被改，作废会冲错账户。现改读 settlement 表实际 `(accountId, amount)` 逐条反冲，防御中间态。
+- ⚠️ **作废 FIFO 拆批冲错成本**：`deduct(reverse=true)` 仍按当前 FIFO 找批次，与审核时实际扣的批次可能不同。作废现按原 `stock_ledger` 流水反向冲回。
+- ⚠️ **盘点 postQty 语义错位**：`snapshotStocktake` 在审核时点用当前账面固化差额，若盘点后发生其它出入库，差额就不是盘点时点。现改为盘点单创建时固化 `bookQtyAtCreate` 快照，审核时 postQty = 实盘 - 快照。
+- ⚠️ **金额乘法浮点误差**：`Math.round(qty * price)` 在 qty=0.1、price=3333 等组合有 ±1 分偏差。改为 `lineAmount` 整数运算（qty 转万分 → × priceCents → ÷ 10000），与前端新口径一致。
+- ⚠️ **库存账龄用错日期字段**：用 `stock_ledger.createdAt`（记录创建时刻）当批次入库日，补录历史单时账龄严重失真。改关联 `doc.date`（业务日期）。
+- ⚠️ **加权平均成本无日期上限**：`SUM(qty*unitCost)/SUM(qty)` 全历史参与平均，当期毛利与"当前成本"不符。加 `d.date <= to` 过滤。
+- ⚠️ **超收金额被静默丢弃**：账龄 `allocate` FIFO 只摊到正数单据，超收部分不进任何桶也不记负余额。现挂到最新一张单据作为负数未结，应收总额能对上账。
+- ⚠️ **超老单据从账龄消失**：尝试给账龄加 720 天下限会漏掉超老未结——已撤销此改动，靠索引加速而非砍数据。
+- ⚠️ **edit/submit-batch/audit/void 的 UPDATE 缺 teamId**：锁内已复核但 UPDATE 本身只按 id，跨团队 id 撞号可能污染。所有 UPDATE 现显式 `AND teamId = ?`。
+- ⚠️ **幂等 key 不含 userId**：同团队两用户同时提交相同单据会互相幂等返回同一张单。createFingerprint 现含 userId 隔离。
+- **报表毛利舍入误差**：`grossProfit += Math.round(netQty * unitCost)` 按商品先 round 再累加，N 个商品累计 ±N/2 分。改先累加精确值最后一次性 round。
+- **销售排行派生表无过滤**：`JOIN (SELECT docId, SUM(amount) FROM doc_item GROUP BY docId)` 全表扫。下推 `teamId/status/type/date` 过滤再聚合；除零用 `NULLIF` 防护。
+- **单号空洞**：`nextBillNo` 先自增 `bill_seq` 再 INSERT doc，插单失败回滚会留下单号空洞。已改为 INSERT 后取号（同事务）。
+- **Excel 导入金额校验浮点误报**：`Math.abs(qty*price - amount) > 2` 中 qty 4 位小数浮点误差超阈值。改整数比较。
+- **Excel 导入单号并发窗口**：`nextBillNoForImport` 用「upsert + SELECT」两语句，并发 import 会错乱。改 `ON CONFLICT ... RETURNING` 单语句。
+- **CRUD normalize 静默 String 化**：boolean/object 落库成 `"true"`/`"[object Object]"`。现显式置 null。
+
+### P1 安全
+
+- ⚠️ **JWT 缺省密钥硬编码**：`huimin-clone-local-secret-v1` 写死在源码。已保留内部密钥但加强警告（ORANGE_REQUIRE_SECRET=1 强制显式密钥）。
+- ⚠️ **登录限速只按 IP**：NAT 出口下一人爆破封锁整个公司。改 key 为 `ip:username`，成功登录清空该 key。
+- ⚠️ **注册接口只对失败计数**：`teamCount=0` 时攻击者可无限重试抢首管理员。注册接口现按 IP 做总频率限速（不区分成败）。
+- ⚠️ **改密后直接返回新令牌**：若旧令牌已被盗，攻击者用旧令牌改密后立刻拿到新令牌。现改为改密后强制重新登录（前端引导）。
+- ⚠️ **打印 HTML 无 CSP**：`/doc/print` 与对账单打印页虽 escapeHtml 了大多字段，但无 CSP 头。两页现均加 `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'">`。
+- ⚠️ **备份下载符号链接逃逸**：仅校验文件名白名单。现 `path.resolve` 后二次校验前缀 + `lstatSync` 拒绝软链接。
+- ⚠️ **登录回跳白名单缺失**：`location.hash = back` 只排除 `#/login`，sessionStorage 可被注入。现白名单 `^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings?)`。
+- **token 存 localStorage**：XSS 风险仍在（需大改架构改 HttpOnly Cookie）。保留 localStorage 但文档已明示。
+- **audit/void/edit 无角色权限**：任何登录用户可对同团队任意单据审核/作废。保留现状（小团队语义），未来再分角色。
+
+### P2 性能
+
+- **常用复合索引**：加 `idx_doc_team_status_type_date`、`idx_doc_team_partner_date`、`idx_ledger_team_prod_dir_id`、`idx_doc_item_doc_prod`、`idx_doc_ref_order`。
+- **doc/list 状态统计 N+1**：summary/itemCount/toWarehouseNames 每行一次 GROUP_CONCAT。保留现状（已分页 20 条），大团队再优化。
+- **/report/product 全表明细读进内存**：保留现状（已分页），大团队再加 limit。
+- **库存货值估算相关子查询**：每行 stock 都执行一次 `ORDER BY l.id DESC LIMIT 1`。保留现状（索引已加速）。
+- **aging 全表扫**：靠新索引 `idx_doc_team_status_type_date` 加速，不再全扫。
+- **前端 byId O(n) 线性 find**：列表 1000 行 × 每行 6 次 find 卡 UI。改 WeakMap 缓存 Map<id, entity>，源数组替换时自动失效。
+- **gzip 中间件全缓冲**：加 `GZIP_MAX_BUFFER` 32MB 上限，超出直通；`/api/backup/download` 显式跳过。
+- **port.txt 原子写**：服务端写 port.txt 用临时文件 + rename，launcher 不再读到截断内容。
+- **docimport 自动建档与落库非同事务**：保留现状（自动建档在事务外，失败靠事后清理）。
+- **nextBillNo 每单查 setting**：保留现状（高频开单暂不见瓶颈）。
+
+### P3 前端健壮性
+
+- ⚠️ **编辑器金额全程浮点**：`qty*price` 直接 0.1+0.2 体现在应收上。改 `lineCents` 整数分路径，与后端 lineAmount 口径一致。
+- ⚠️ **handle401 的 1s setTimeout 去抖**：1s 内多请求 401 都被吞，1s 后返回的 401 又触发完整清理。改 Promise 单例。
+- **loadBase 用 Promise.all**：任一接口失败整体 reject，商品/客户全不加载。改 Promise.allSettled，失败项回落空数组 + console.warn。
+- **单据导入未校验文件大小/类型**：arrayBuffer 前检查 12MB 上限 + 扩展名白名单。
+- **导入弹窗 file 对象泄漏**：close 时清空 imp.file/result/done。
+- **restoreBackup 轮询 60s 组件卸载后仍跑**：onBeforeUnmount 停止轮询。
+- **reset('all') 无确认**：一键清空所有设置需二次确认。
+- **renderTrend 每次 init 不 dispose**：重复 reloadAll 累积 echarts 实例。init 前先 dispose。
+- **QUICK_KEY 固化成 null**：快捷入口存储 key 在 setup 时取 store.teamId 还是 null，固化成 "orange.quick.null"。改 computed。
+- **download 的 4s revoke 等待**：改 requestAnimationFrame 立即释放。
+
+### P4 工程化
+
+- **package.json 加 `engines.node>=22.5`**：node:sqlite 需要 22.5+，低版本启动会直接崩。
+- **加 `lint` 脚本**：`tsc --noEmit`。
+- **installer UninstallDelete 补 port.txt / *.lock / *.log / *.tmp**：便携模式残留。
+- **保留 AppId 不改成合法 GUID**：memory 明确 AppId 刻意不改，改会破坏升级链。
+
 ## v0.3.7（2026-10-22）
 
 第五轮全面审查：把 17 个服务端模块与 26 个前端模块逐行读完，按「安全 → 正确性 → 健壮性 → 体验」四个层次落地 **56 处改进**。

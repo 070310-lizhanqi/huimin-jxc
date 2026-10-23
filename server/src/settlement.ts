@@ -49,9 +49,10 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     // rows 参数历史上一直被调用方传（test-settle 等）但从未生效：这里真正实现并设 500 上限
     const rawRows = Number(req.query.rows ?? 200);
     const rows = Math.min(500, Math.max(1, Number.isFinite(rawRows) && rawRows > 0 ? Math.floor(rawRows) : 200));
+    // LIMIT 占位符（不拼字符串）：与 docs/crud 风格一致，防止后续维护者照搬 ${} 模式引入注入
     const list = db
-      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ${rows}`)
-      .all(...args);
+      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`)
+      .all(...args, rows);
     return res.json(list);
   });
 

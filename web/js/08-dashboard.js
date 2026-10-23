@@ -57,12 +57,15 @@ const DashboardPage = {
       { label: '库存预估', icon: 'TrendCharts', to: '#/forecast' },
       { label: '客户对账单', icon: 'Tickets', to: '#/statement?mode=ar' },
     ];
-    const QUICK_KEY = 'orange.quick.' + store.teamId;
+    // 快捷入口存储 key 按 teamId 动态生成：原先在 setup 时取 store.teamId 还是 null，
+    // 固化成 "orange.quick.null"，换账套后读到别的账号的快捷配置。
+    // 改 computed 让 key 随 teamId 变化自动重算。
+    const QUICK_KEY = computed(() => 'orange.quick.' + (store.teamId ?? 'anon'));
     const quickEdit = ref(false);
 
     function loadQuick() {
       try {
-        const raw = localStorage.getItem(QUICK_KEY);
+        const raw = localStorage.getItem(QUICK_KEY.value);
         const arr = raw ? JSON.parse(raw) : null;
         if (Array.isArray(arr) && arr.length) {
           // 只保留仍存在的默认项（防止旧版本残留失效入口）
@@ -74,9 +77,11 @@ const DashboardPage = {
       return QUICK_DEFAULT.slice();
     }
     const QUICK = ref(loadQuick());
+    // teamId 变化（换账套）时重新加载该账号的快捷配置
+    watch(() => store.teamId, () => { QUICK.value = loadQuick(); });
 
     function persistQuick() {
-      try { localStorage.setItem(QUICK_KEY, JSON.stringify(QUICK.value.map((x) => x.label))); } catch (e) { /* 存储满时忽略 */ }
+      try { localStorage.setItem(QUICK_KEY.value, JSON.stringify(QUICK.value.map((x) => x.label))); } catch (e) { /* 存储满时忽略 */ }
     }
     function removeQuick(label) {
       QUICK.value = QUICK.value.filter((x) => x.label !== label);
@@ -264,6 +269,10 @@ const DashboardPage = {
         inData.push(row ? row.inQty : 0);
         outData.push(row ? row.outQty : 0);
       }
+      // 重复调用前先 dispose 旧实例：每次 reloadAll 重新 init 会累积 echarts 实例，
+      // 长会话内存持续上涨。getInstanceByDom 是官方查重接口。
+      const existing = echarts.getInstanceByDom(trendEl.value);
+      if (existing) existing.dispose();
       const c = echarts.init(trendEl.value);
       c.setOption({
         grid: { left: 44, right: 12, top: 34, bottom: 26 },

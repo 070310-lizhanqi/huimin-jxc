@@ -190,16 +190,18 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const rows = [...aggMap.entries()]
       .map(([pid, a]) => ({ productId: pid, ...prodMeta.get(pid)!, ...a }))
       .sort((x, y) => y.saleAmount - x.saleAmount || y.retAmount - x.retAmount);
-    // 加权平均入库成本：仅统计已审核采购入库单的入库流水
-    // （作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
+    // 加权平均入库成本：仅统计已审核采购入库单的入库流水，且限定入库日期 ≤ 报表 to
+    // （不加日期上限会把"报表期之后才入库"的采购价算进当期成本，毛利失真；
+    //  作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
     const costs = db
       .prepare(
         `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
+           AND d.date <= ?
          GROUP BY l.productId`,
       )
-      .all(teamId) as Array<{ productId: number; avgCost: number }>;
+      .all(teamId, to) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
     const out: ProductReportRow[] = rows.map((r) => {
       const avgCost = costMap.get(r.productId) ?? r.purchasePrice;

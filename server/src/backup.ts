@@ -96,13 +96,11 @@ function dbFilePath(): string {
   return path.join(dataDir(), 'huimin-clone.db');
 }
 
-/** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照 */
+/** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照。
+ *  失败必须抛错：checkpoint 失败说明主库文件可能不是完整快照，
+ *  继续复制会得到一个缺最新事务的备份——用户日后恢复才发现丢数据。 */
 function checkpoint(db: DatabaseSync): void {
-  try {
-    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-  } catch {
-    /* checkpoint 失败不阻断备份：WAL 未清零时主库文件仍自洽（可能少最新一笔） */
-  }
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
 }
 
 /**
@@ -229,9 +227,23 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     if (!requireAdmin(req, res)) return;
     const file = String(req.query.file ?? '');
     if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
-    const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
-    return res.download(full, file);
+    // 防符号链接逃逸：仅文件名白名单不够，攻击者若能把 backupDir 里的文件替换成
+    // 指向敏感文件的软链接，res.download 会读到任意文件。resolve 后必须仍落在 backupDir 内。
+    const dir = backupDir();
+    const full = path.join(dir, file);
+    const resolved = path.resolve(full);
+    if (!resolved.startsWith(path.resolve(dir) + path.sep)) {
+      return res.status(400).json({ error: '备份文件路径非法' });
+    }
+    // 拒绝软链接/硬链接：lstat 与 stat 比较，符号链接直接拒绝
+    try {
+      const lst = fs.lstatSync(resolved);
+      if (lst.isSymbolicLink()) return res.status(400).json({ error: '备份文件类型非法' });
+    } catch {
+      return res.status(404).json({ error: '备份文件不存在' });
+    }
+    if (!fs.existsSync(resolved)) return res.status(404).json({ error: '备份文件不存在' });
+    return res.download(resolved, file);
   });
 
   /** 恢复备份：需二次验证当前管理员密码（高危不可逆操作），排队后自动重启生效 */

@@ -56,10 +56,14 @@ const LoginPage = {
         if (mode.value === 'login') localStorage.setItem(REMEMBER_KEY, form.username.trim());
         else localStorage.removeItem(REMEMBER_KEY);
         toast(mode.value === 'login' ? '登录成功' : '账套创建成功');
-        // 会话过期被踢回登录页时，登录成功后回到原页面（否则去工作台）
+        // 会话过期被踢回登录页时，登录成功后回到原页面（否则去工作台）。
+        // 白名单校验：sessionStorage 里的 RETURN_KEY 可能被脚本注入篡改，
+        // 仅允许本站已知路由前缀，防止跳到伪协议/站外。
         const back = sessionStorage.getItem(RETURN_KEY);
         sessionStorage.removeItem(RETURN_KEY);
-        location.hash = back && !back.startsWith('#/login') ? back : '#/dashboard';
+        const ALLOW = /^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings?)(\/|$|\?)/;
+        const target = back && !back.startsWith('#/login') && ALLOW.test(back) ? back : '#/dashboard';
+        location.hash = target;
       } catch (e) {
         err.value = e.message;
       } finally {

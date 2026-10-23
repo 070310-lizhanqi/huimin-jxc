@@ -58,7 +58,10 @@ const StatementPage = {
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
         <td class="r">${l.credit ? fmtMoney(l.credit) : ''}</td>
         <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`).join('');
-      const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title><style>
+      // 日期 from/to 来自服务端 safeRange，理论上合法 YYYY-MM-DD；此处仍显式转义兜底（防后端被注入异常值）
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title>
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; font-src 'none'">
+      <style>
         body{font-family:"Microsoft YaHei",sans-serif;font-size:12px;color:#333;padding:18px}
         h2{text-align:center;font-size:17px;margin:0 0 4px}
         .co{text-align:center;font-size:13px;font-weight:600;margin-bottom:2px}
@@ -71,7 +74,7 @@ const StatementPage = {
       </style></head><body>
       ${company ? `<div class="co">${escapeHtml(company)}</div>` : ''}
       <h2>${isAr ? '客户对账单' : '供应商对账单'}</h2>
-      <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${d.from} 至 ${d.to}</div>
+      <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${escapeHtml(d.from)} 至 ${escapeHtml(d.to)}</div>
       <table><thead><tr><th>日期</th><th>单据号</th><th>类型</th><th class="r">${isAr ? '应收' : '应付'}</th>
       <th class="r">${isAr ? '收款' : '付款'}</th><th class="r">余额</th><th>备注</th></tr></thead>
       <tbody>
@@ -80,7 +83,7 @@ const StatementPage = {
       </tbody></table>
       <div class="sum">期间发生 ${fmtMoney(d.periodDebit)} ／ 已${isAr ? '收' : '付'} ${fmtMoney(d.periodCredit)}　
         期末余额 <b>${fmtMoney(d.closing)}</b> 元</div>
-      <div class="foot"><span>对账日期：${today}</span><span>双方签字确认：__________________</span></div>
+      <div class="foot"><span>对账日期：${escapeHtml(today)}</span><span>双方签字确认：__________________</span></div>
       </body></html>`;
       const w = window.open('', '_blank');
       if (!w) return toast('打印窗口被浏览器拦截，请允许本站弹出窗口后重试', 'error');

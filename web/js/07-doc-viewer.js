@@ -46,6 +46,7 @@ const DocViewer = {
            </div>`
         : '';
       w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(d.doc.billNo)}</title>
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; font-src 'none'">
         <style>
           body { font-family: 'Microsoft YaHei', sans-serif; padding: 28px; color: #222; font-size: 13px; }
           .head { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #e0e0e0; padding-bottom: 10px; margin-bottom: 14px; }

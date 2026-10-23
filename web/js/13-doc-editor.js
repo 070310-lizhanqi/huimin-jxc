@@ -32,12 +32,23 @@ const DocEditor = {
     const emeta = computed(() => DOC_META[props.type] || {});
     const epartners = computed(() => emeta.value.partner === 'ven' ? store.vendors : store.customers);
 
-    /* 编辑态合计 */
-    const grossAmt = computed(() => editor.form
-      ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0) : 0);
+    /* 编辑态合计：全程整数分路径消除浮点误差。
+     *  0.1 + 0.2 = 0.30000000000000004 这类浮点噪声在数量大时会直接体现在应收金额上。
+     *  口径与后端 lineAmount 一致：qty 转"万分"整数 → × 单价分 → ÷ 10000 取整。 */
+    const lineCents = (it) => {
+      const qtyScaled = Math.round((Number(it.qty) || 0) * 10000);
+      const priceCents = Math.round((Number(it.price) || 0) * 100);
+      return Math.round((qtyScaled * priceCents) / 10000);
+    };
+    const grossCents = computed(() => editor.form
+      ? editor.form.items.reduce((s, it) => s + lineCents(it), 0) : 0);
+    const grossAmt = computed(() => grossCents.value / 100);
     const totalQty = computed(() => editor.form ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0) : 0);
-    const totalAmt = computed(() => Math.max(0, grossAmt.value - (Number(editor.form?.discount) || 0)));
-    const oweAmt = computed(() => Math.max(0, totalAmt.value - (Number(editor.form?.paidAmount) || 0) - (Number(editor.form?.deposit) || 0)));
+    const totalCents = computed(() => Math.max(0, grossCents.value - Math.round((Number(editor.form?.discount) || 0) * 100)));
+    const totalAmt = computed(() => totalCents.value / 100);
+    const oweCents = computed(() => Math.max(0,
+      totalCents.value - Math.round((Number(editor.form?.paidAmount) || 0) * 100) - Math.round((Number(editor.form?.deposit) || 0) * 100)));
+    const oweAmt = computed(() => oweCents.value / 100);
 
     async function loadStock(warehouseId) {
       if (!warehouseId) { stockMap.value = {}; return; }
@@ -181,15 +192,16 @@ const DocEditor = {
       scanBarcode(scanCode.value);
       scanCode.value = '';
     }
-    function lineAmt(it) { return ((Number(it.qty) || 0) * (Number(it.price) || 0)).toFixed(2); }
+    function lineAmt(it) { return (lineCents(it) / 100).toFixed(2); }
     function stockOf(pid) { return stockMap.value[pid] ?? 0; }
     function setFullPaid() {
       if (!editor.form) return;
-      editor.form.paidAmount = Number(totalAmt.value.toFixed(2));
+      // 直接用整数分换算回元，避免 totalAmt.value.toFixed(2) 二次浮点
+      editor.form.paidAmount = totalCents.value / 100;
     }
     function fullDiscount() {
       if (!editor.form) return;
-      editor.form.discount = Number(grossAmt.value.toFixed(2));
+      editor.form.discount = grossCents.value / 100;
     }
 
     async function persist() {
@@ -205,8 +217,8 @@ const DocEditor = {
         // 调拨单必须指定调往仓库：后端不校验必填，空值过账会变成「源仓出又入源仓」的无效调拨
         if (m.toWarehouse && !it.toWarehouseId) throw new Error(`第 ${i + 1} 行未选择调往仓库`);
       }
-      if (Number(f.discount) > grossAmt.value) throw new Error('整单折扣不能超过单据金额');
-      if (Number(f.paidAmount) + Number(f.deposit) > totalAmt.value) {
+      if (Math.round(Number(f.discount) * 100) > grossCents.value) throw new Error('整单折扣不能超过单据金额');
+      if (Math.round(Number(f.paidAmount) * 100) + Math.round(Number(f.deposit) * 100) > totalCents.value) {
         throw new Error('本次收款 + 抵扣订金不能超过应收金额');
       }
       const body = {

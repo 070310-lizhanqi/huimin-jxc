@@ -100,22 +100,26 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
         `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
+           AND d.date <= ?
          GROUP BY l.productId`,
       )
-      .all(teamId) as Array<{ productId: number; avgCost: number }>;
+      .all(teamId, to) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
     const priceRows = db
       .prepare('SELECT id, purchasePrice FROM product WHERE teamId = ?')
       .all(teamId) as Array<{ id: number; purchasePrice: number }>;
     const priceMap = new Map<number, number>(priceRows.map((p) => [p.id, p.purchasePrice]));
 
-    let grossProfit = 0;
+    // 毛利：先累加精确浮点再一次性 round。每个商品先 Math.round 再累加，
+    // N 个商品会累计 ±N/2 分的舍入误差——大团队月结能与对账单差出几毛钱。
+    let grossProfitFloat = 0;
     for (const r of profitRows) {
       const netQty = r.saleQty - r.retQty;
       const netAmt = r.saleAmt - r.retAmt;
       const unitCost = costMap.get(r.productId) ?? priceMap.get(r.productId) ?? 0;
-      grossProfit += netAmt - Math.round(netQty * unitCost);
+      grossProfitFloat += netAmt - netQty * unitCost;
     }
+    const grossProfit = Math.round(grossProfitFloat);
 
     res.json({
       range,
@@ -184,22 +188,31 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     if (by === 'product') {
       // 金额必须与单据净额口径一致：整单折扣会让 doc.totalAmount < 明细合计，
       // 因此按「该行金额 / 本单明细合计」比例把单据净额分摊到各商品行。
+      // dt 派生表先按 (teamId,status,type,date) 过滤再聚合：原先全表扫 doc_item 再 JOIN，
+      // 大团队卡死接口；NULLIF 防 sumAmt=0 除零（虽然 0 金额单罕见但导入数据可能存在）。
       const rows = db
         .prepare(
           `SELECT i.productId AS key, p.name AS name,
-                  SUM(CASE WHEN dt.sumAmt = 0 THEN 0
-                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / dt.sumAmt END) AS amount,
+                  SUM(CASE WHEN dt.sumAmt IS NULL OR dt.sumAmt = 0 THEN 0
+                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / NULLIF(dt.sumAmt, 0) END) AS amount,
                   SUM(CASE WHEN d.type = 'sret' THEN -i.qty ELSE i.qty END) AS qty,
                   COUNT(DISTINCT d.id) AS count
            FROM doc_item i
            JOIN doc d ON d.id = i.docId
            JOIN product p ON p.id = i.productId
-           JOIN (SELECT docId, SUM(amount) AS sumAmt FROM doc_item GROUP BY docId) dt ON dt.docId = i.docId
+           JOIN (
+             SELECT i2.docId, SUM(i2.amount) AS sumAmt
+             FROM doc_item i2
+             JOIN doc d2 ON d2.id = i2.docId
+             WHERE d2.teamId = ? AND d2.status = 'audit' AND d2.type IN ${docTypes}
+               AND d2.date >= ? AND d2.date <= ?
+             GROUP BY i2.docId
+           ) dt ON dt.docId = i.docId
            WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ${docTypes}
              AND d.date >= ? AND d.date <= ?
            GROUP BY i.productId ORDER BY amount DESC LIMIT ?`,
         )
-        .all(teamId, from, to, limit) as unknown as RankRow[];
+        .all(teamId, from, to, teamId, from, to, limit) as unknown as RankRow[];
       res.json({ dimension, by, from, to, rows });
       return;
     }

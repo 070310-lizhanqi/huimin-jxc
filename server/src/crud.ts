@@ -57,8 +57,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       sql += ` LIMIT ? OFFSET ?`;
       args.push(rows, (page - 1) * rows);
     } else {
-      // 全量兜底上限：极端情况下（误把档案当导入用）也不会一次性吐几十万行
-      sql += ` LIMIT ${CRUD_MAX_ROWS}`;
+      // 全量兜底上限：极端情况下（误把档案当导入用）也不会一次性吐几十万行。
+      // 用占位符而非字符串插值：与上方分页写法一致，防止维护者照搬 ${} 模式引入注入。
+      sql += ` LIMIT ?`;
+      args.push(CRUD_MAX_ROWS);
     }
     return res.json(db.prepare(sql).all(...args));
   });
@@ -128,6 +130,9 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
 
 function normalize(v: unknown): Value {
   if (v === undefined || v === null || v === '') return null;
-  if (typeof v === 'number' || typeof v === 'string') return v;
-  return String(v);
+  // number：NaN/Infinity 会被 better-sqlite3 拒绝或落 NULL，显式转 null 防怪数据
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') return v;
+  // boolean/object 静默 String() 化会落库成 "true"/"[object Object]" 污染档案，显式置 null
+  return null;
 }

@@ -54,6 +54,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
 
     // 按商品汇总（入 = stockin/otherin/sret/stockinit，出 = stockout/otherout/pin）
     // 结存数量取 stock 表当前实存（不分期间），避免「只看出库看不出库前库存」导致负数。
+    // 原实现：每行相关子查询 (SELECT SUM(s.qty) FROM stock s WHERE s.productId=i.productId)，
+    // N 个商品 = N 次 stock 全扫。改为 LEFT JOIN 一次性聚合子查询。
     const rows = db
       .prepare(
         `SELECT i.productId, p.name AS prodName, p.spec, p.unit,
@@ -61,16 +63,18 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
                 COALESCE(SUM(CASE WHEN d.type IN ('stockin','otherin','sret','stockinit') THEN i.amount ELSE 0 END), 0) AS inAmount,
                 COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.qty ELSE 0 END), 0) AS outQty,
                 COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.amount ELSE 0 END), 0) AS outAmount,
-                COALESCE((SELECT SUM(s.qty) FROM stock s WHERE s.teamId = d.teamId AND s.productId = i.productId), 0) AS stockQty
+                COALESCE(sq.stockQty, 0) AS stockQty
          FROM doc_item i
          JOIN doc d ON d.id = i.docId
          JOIN product p ON p.id = i.productId
+         LEFT JOIN (SELECT productId, SUM(qty) AS stockQty FROM stock WHERE teamId = ? GROUP BY productId) sq
+           ON sq.productId = i.productId
          WHERE d.teamId = ? AND d.status = 'audit' AND d.date >= ? AND d.date <= ?
          GROUP BY i.productId
          HAVING inQty <> 0 OR outQty <> 0
          ORDER BY outAmount DESC, inAmount DESC`,
       )
-      .all(teamId, from, to) as Array<{
+      .all(teamId, teamId, from, to) as Array<{
       productId: number;
       prodName: string;
       spec: string | null;
@@ -105,7 +109,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       res.status(400).json({ error: 'teamId 不能为空' });
       return;
     }
-    const windowDays = Math.min(365, Math.max(1, Number(req.query.days ?? 30)));
+    // days 参数守护：Number('abc')=NaN 会让 Math.max(1,NaN)=NaN → startD 变 Invalid Date，
+    // 拼出 'NaN-NaN-NaN' 参与日期比较导致接口静默返回空集。
+    const rawDays = Number(req.query.days ?? 30);
+    const windowDays = Number.isFinite(rawDays) ? Math.min(365, Math.max(1, Math.floor(rawDays))) : 30;
     const d = new Date();
     const end = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const startD = new Date(d.getTime() - windowDays * 86_400_000);

@@ -14,9 +14,17 @@ type Value = string | number | null;
 // 数量精度归一：金额以“分”为整数存储；数量以 4 位小数（万分之一）为准。
 // round 至固定小数位，消除 IEEE754 浮点累加误差（如 0.1 + 0.2 = 0.30000000000000004）。
 const QTY_DECIMALS = 4;
+const QTY_SCALE = 10 ** QTY_DECIMALS;
 const roundQty = (n: number): number => {
-  const f = 10 ** QTY_DECIMALS;
-  return Math.round((n + Number.EPSILON) * f) / f;
+  return Math.round((n + Number.EPSILON) * QTY_SCALE) / QTY_SCALE;
+};
+/** 数量×单价金额（分）：整数运算消除浮点尾差。
+ *  qty 先转“万分”整数（qty*10000），与整数分相乘后除回 10000 取整。
+ *  直接 Math.round(qty*price) 在 qty=0.1、price=3333 这类组合会有 ±1 分浮点偏差，
+ *  且前端按相同口径（qty*10000 整数化）计算时才能对得上账。 */
+const lineAmount = (qty: number, priceCents: number): number => {
+  const qtyScaled = Math.round(roundQty(qty) * QTY_SCALE);
+  return Math.round((qtyScaled * priceCents) / QTY_SCALE);
 };
 
 interface ItemInput {
@@ -168,18 +176,19 @@ function checkSettle(totalAmount: number, paidAmount: number, deposit: number): 
   return `本次收款 ${paidAmount / 100} 元 + 抵扣订金 ${deposit / 100} 元超过应收金额 ${totalAmount / 100} 元`;
 }
 
-/** 创建幂等指纹：必须包含全部影响落库结果的字段（结算字段漏进来会误判重复） */
-function createFingerprint(input: DocInput): string {
+/** 创建幂等指纹：必须包含全部影响落库结果的字段（结算字段漏进来会误判重复）。
+ *  含 userId：同团队两个用户同时提交相同内容不应互相幂等——它们是两张独立的单。 */
+function createFingerprint(input: DocInput, userId?: number): string {
   return JSON.stringify([
-    input.teamId, input.type, input.date ?? null, input.partnerType ?? null, input.partnerId ?? null,
+    input.teamId, userId ?? 0, input.type, input.date ?? null, input.partnerType ?? null, input.partnerId ?? null,
     input.clerkId ?? null, input.warehouseId ?? null, input.remark ?? null,
     input.receiverName ?? null, input.receiverMobile ?? null, input.receiverAddress ?? null,
     Number(input.discount ?? 0), Number(input.paidAmount ?? 0), input.accountId ?? null, Number(input.deposit ?? 0),
     input.items.map((i) => [i.productId, i.qty, i.price, i.batchNo ?? null, i.toWarehouseId ?? null, i.remark ?? null]),
   ]);
 }
-function dedupCreate(db: DatabaseSync, input: DocInput): { id: number; billNo: string } | null {
-  const key = createFingerprint(input);
+function dedupCreate(db: DatabaseSync, input: DocInput, userId?: number): { id: number; billNo: string } | null {
+  const key = createFingerprint(input, userId);
   const hit = recentCreates.get(key);
   if (hit && Date.now() - hit.at < CREATE_DEDUP_MS) {
     // 单据可能已被用户删除；只有仍存在的草稿才可幂等返回，否则正常重建
@@ -192,8 +201,8 @@ function dedupCreate(db: DatabaseSync, input: DocInput): { id: number; billNo: s
   }
   return null;
 }
-function rememberCreate(input: DocInput, id: number, billNo: string): void {
-  const key = createFingerprint(input);
+function rememberCreate(input: DocInput, id: number, billNo: string, userId?: number): void {
+  const key = createFingerprint(input, userId);
   recentCreates.set(key, { id, billNo, at: Date.now() });
   // 控制内存：超过 200 条时清理过期项
   if (recentCreates.size > 200) {
@@ -402,12 +411,12 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const input = req.body as DocInput;
     const err = validate(db, input);
     if (err) return res.status(400).json({ error: err });
-    // 幂等：双击保存/重试在窗口内返回同一张单
-    const dup = dedupCreate(db, input);
+    // 幂等：双击保存/重试在窗口内返回同一张单（按当前用户隔离）
+    const dup = dedupCreate(db, input, req.auth?.userId);
     if (dup) return res.json(dup);
     const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
     // 明细价格可缺省：调拨/盘点等纯库存单据不填价格，按 0 计
-    const grossAmount = input.items.reduce((s, i) => s + Math.round(i.qty * Number(i.price ?? 0)), 0);
+    const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Number(i.price ?? 0)), 0);
     const discount = Math.max(0, Math.round(Number(input.discount ?? 0)));
     // 整单折扣只能从正金额里扣：生产组装/调整等类型的合计可能为负或 0，此时折扣必须为 0
     if (discount > 0 && discount > grossAmount)
@@ -468,7 +477,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       db.exec('ROLLBACK');
       return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
     }
-    rememberCreate(input, docId, billNo);
+    rememberCreate(input, docId, billNo, req.auth?.userId);
     return res.json({ id: docId, billNo });
   });
 
@@ -548,7 +557,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       }
       billNo = nextBillNo(db, teamId, toType);
       const totalQty = roundQty(remainItems.reduce((s, i) => s + i.qty, 0));
-      const totalAmount = remainItems.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
+      const totalAmount = remainItems.reduce((s, i) => s + lineAmount(i.qty, i.price), 0);
       const info = db
         .prepare(
           `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
@@ -585,7 +594,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           it.productId,
           it.qty,
           it.price,
-          Math.round(it.qty * it.price),
+          lineAmount(it.qty, it.price),
           it.batchNo,
           it.reservoirId,
           it.remark,
@@ -704,7 +713,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (err) return res.status(400).json({ error: err });
     const totalQty = roundQty(input.items.reduce((s, i) => s + i.qty, 0));
     // 明细价格可缺省：调拨/盘点等纯库存单据不填价格，按 0 计
-    const grossAmount = input.items.reduce((s, i) => s + Math.round(i.qty * Number(i.price ?? 0)), 0);
+    const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Number(i.price ?? 0)), 0);
     const discount = Math.max(0, Math.round(Number(input.discount ?? 0)));
     // 整单折扣只能从正金额里扣：生产组装/调整等类型的合计可能为负或 0，此时折扣必须为 0
     if (discount > 0 && discount > grossAmount)
@@ -731,10 +740,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         | undefined;
       if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
       // 头部更新与明细重写同事务：失败整体回滚，不出现「新头旧明细」的中间态
-      db.prepare(
+      // WHERE 带 teamId：即便锁内已复核，UPDATE 本身也限定本团队，杜绝跨团队 id 撞号污染
+      const upd = db.prepare(
         `UPDATE doc SET date=?, partnerType=?, partnerId=?, clerkId=?, warehouseId=?, remark=?, totalAmount=?, totalQty=?,
                         receiverName=?, receiverMobile=?, receiverAddress=?, discount=?, paidAmount=?, accountId=?, deposit=?
-         WHERE id=?`,
+         WHERE id=? AND teamId=?`,
       ).run(
         input.date ?? localDate(),
         input.partnerType ?? null,
@@ -752,7 +762,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         input.accountId ?? null,
         deposit,
         input.id,
+        input.teamId,
       );
+      if (upd.changes === 0) throw new Error('单据状态已变化，请刷新后重试');
       db.prepare('DELETE FROM doc_item WHERE docId = ?').run(input.id);
       insertItems(db, input.id, input.items);
       db.exec('COMMIT');
@@ -807,15 +819,16 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     db.exec('BEGIN IMMEDIATE');
     try {
       // 预编译到循环外：批量接口一次可能提交上百张草稿
+      // UPDATE 带 teamId：即便 sel 预检已限定，UPDATE 本身也限定本团队，杜绝跨团队 id 撞号污染
       const sel = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`);
-      const upd = db.prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=?`);
+      const upd = db.prepare(`UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=? AND teamId=? AND status='draft'`);
       for (const id of ids) {
         const row = sel.get(id, teamId) as
           | { status: string }
           | undefined;
         if (!row || row.status !== 'draft') { skipped.push(id); continue; }
-        upd.run(id);
-        done += 1;
+        const r = upd.run(id, teamId);
+        if (r.changes > 0) done += 1; else skipped.push(id);
       }
       db.exec('COMMIT');
     } catch (e) {
@@ -875,8 +888,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       // 客户价格记忆：销售类单据审核后记住每个商品的成交价
       rememberPrices(db, { ...doc, teamId }, id);
       db.prepare(
-        `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=?, auditUserId=? WHERE id=?`,
-      ).run(auditBy || null, req.auth?.userId ?? null, id);
+        `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=?, auditUserId=? WHERE id=? AND teamId=?`,
+      ).run(auditBy || null, req.auth?.userId ?? null, id, teamId);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');
@@ -920,7 +933,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       // 冲回审核时 settleOnAudit 生成的结算记录与账户/往来余额变动，
       // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
       reverseSettleOnVoid(db, teamId, doc);
-      db.prepare(`UPDATE doc SET status='void' WHERE id=?`).run(id);
+      db.prepare(`UPDATE doc SET status='void' WHERE id=? AND teamId=?`).run(id, teamId);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');
@@ -948,7 +961,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         | undefined;
       if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
       db.prepare('DELETE FROM doc_item WHERE docId = ?').run(id);
-      db.prepare('DELETE FROM doc WHERE id = ?').run(id);
+      db.prepare('DELETE FROM doc WHERE id = ? AND teamId = ?').run(id, teamId);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');
@@ -1122,7 +1135,7 @@ function insertItems(db: DatabaseSync, docId: number, items: ItemInput[]): void 
       it.productId,
       qty,
       price,
-      Math.round(qty * price),
+      lineAmount(qty, price),
       it.batchNo ?? null,
       it.productionDate ?? null,
       it.expiryDate ?? null,
@@ -1367,6 +1380,16 @@ function precheckStock(db: DatabaseSync, docId: number): string | null {
     postQty: number | null;
   }>;
   if (!DEDUCT_TYPES.has(doc.type)) return null;
+  // 批量预取商品名：循环内逐行 SELECT 会让大单预检退化为 O(n) 查询
+  const prodIds = [...new Set(items.map((it) => it.productId))];
+  const prodNames = new Map<number, string>();
+  if (prodIds.length) {
+    for (const r of db
+      .prepare(`SELECT id, name FROM product WHERE id IN (${prodIds.map(() => '?').join(',')})`)
+      .all(...prodIds) as Array<{ id: number; name: string }>) {
+      prodNames.set(r.id, r.name);
+    }
+  }
   for (const it of items) {
     let need = it.qty;
     if (doc.type === 'adjust' && it.qty < 0) {
@@ -1396,10 +1419,7 @@ function precheckStock(db: DatabaseSync, docId: number): string | null {
       .all(...(params as Value[])) as Array<{ qty: number }>;
     const avail = roundQty(rows.reduce((s, r) => s + r.qty, 0));
     if (avail < need) {
-      const prod = db.prepare(`SELECT name FROM product WHERE id=?`).get(it.productId) as
-        | { name: string }
-        | undefined;
-      return `${prod?.name ?? it.productId} 库存不足：可用 ${avail}，需要 ${need}`;
+      return `${prodNames.get(it.productId) ?? `#${it.productId}`} 库存不足：可用 ${avail}，需要 ${need}`;
     }
   }
   return null;
@@ -1469,7 +1489,8 @@ function settleOnAudit(
  *  1. 删除审核时自动生成的「开单即收付」结算记录（refDocId 指向本单）；
  *  2. 往来余额按 paid + deposit 反向加回；
  *  3. 资金账户按 paid 反向扣回。
- *  注：若用户事后手工删除/修改过该自动结算记录，则删除影响 0 行，但余额冲回仍按原额执行。 */
+ *  注：按 settlement 表实际落账金额/账户反冲，而不是信 doc 表快照——
+ *  审核后若结算记录被改（isAuto=0 的手工单不会被误删，isAuto=1 的虽不能改但防御万一）。 */
 function reverseSettleOnVoid(
   db: DatabaseSync,
   teamId: number,
@@ -1491,6 +1512,12 @@ function reverseSettleOnVoid(
   const moneyType = MONEY_FLOW[doc.type];
   if (!moneyType) return;
   const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
+  // 读出审核时落账的自动结算记录（可能多条，理论一条），按实际记录反冲账户
+  // 账户反冲总额须与 settlement 一致：若审核后用户改单据的 paidAmount/accountId 再作废，
+  // 按 doc 快照反冲会错账户/错金额。
+  const autos = db
+    .prepare(`SELECT id, accountId, amount, type FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=1`)
+    .all(teamId, doc.id) as Array<{ id: number; accountId: number | null; amount: number; type: string }>;
   // 按 isAuto 服务端标识删除（客户端无法伪造；remark 仅作人类可读备注）
   db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=1`).run(
     teamId,
@@ -1498,7 +1525,15 @@ function reverseSettleOnVoid(
   );
   // 反向加回审核时的往来冲减
   bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, -balanceSign * (paid + dep));
-  if (doc.accountId && paid > 0) {
+  // 资金账户按 settlement 实际记录逐条反向冲回（审核时 receipt 加、payment 减，作废取反）
+  for (const s of autos) {
+    if (!s.accountId) continue;
+    const inc = s.type === 'receipt' ? -s.amount : s.amount;
+    db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, s.accountId, teamId);
+  }
+  // 防御：若没有任何自动结算记录（异常情况，如用户先手工删除）但 doc.paidAmount>0，
+  // 仍按 doc 快照回冲账户避免余额虚增
+  if (!autos.length && doc.accountId && paid > 0) {
     const inc = moneyType === 'receipt' ? -paid : paid;
     db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
   }

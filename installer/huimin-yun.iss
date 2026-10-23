@@ -90,5 +90,9 @@ Filename: "{app}\node\node.exe"; Parameters: """{app}\tools\uninstall-stop.cjs""
 ; 清理安装目录内的运行期产物
 Type: filesandordirs; Name: "{app}\.tools"
 Type: files; Name: "{app}\data\*.pid"
+Type: files; Name: "{app}\data\*.lock"
+Type: files; Name: "{app}\data\port.txt"
+Type: files; Name: "{app}\data\*.log"
+Type: files; Name: "{app}\data\*.tmp"
 ; 刻意**不**删除 %APPDATA%\huimin-yun：账套数据保留，重装即恢复。
 ; 需要彻底清除时用 tools/clean-install.cjs（会二次确认）。

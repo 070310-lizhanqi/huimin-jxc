@@ -22,8 +22,24 @@ const specOf = (id) => (byId(store.products, id)?.spec || '—');
 /** 商品单位 */
 const unitOf = (id) => (byId(store.products, id)?.unit || '—');
 
-/* 名称解析 */
-const byId = (arr, id) => arr.find(x => x.id === id) || null;
+/* 名称解析：byId 是 O(n) 线性 find，在模板每行都被调用（prodLabel/whLabel/partnerLabel 等），
+ * 列表 1000 行 × 每行 6 次 find = 6000 次线性扫，直接卡 UI 线程。
+ * 这里对常用档案建 Map<id, entity> 缓存；源数组被替换时（loadBase/档案编辑）通过
+ * 版本号比对失效重建。 */
+const _mapCache = new WeakMap();
+function toMap(arr) {
+  let m = _mapCache.get(arr);
+  if (m && m._size === arr.length) return m;
+  m = new Map();
+  for (const x of arr) m.set(x.id, x);
+  m._size = arr.length;
+  _mapCache.set(arr, m);
+  return m;
+}
+const byId = (arr, id) => {
+  if (!arr || !arr.length) return null;
+  return toMap(arr).get(id) || null;
+};
 const prodLabel = (id) => {
   const p = byId(store.products, id);
   return p ? p.name + (p.spec ? `（${p.spec}）` : '') : `商品#${id}`;

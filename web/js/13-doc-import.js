@@ -8,8 +8,26 @@ const DocImport = {
   emits: ['close', 'imported'],
   setup(_, { emit }) {
     const imp = reactive({ file: null, autoCreate: false, busy: false, result: null, done: null });
+    // 前端单文件上限：与后端 limit 对齐（12MB），xlsx 二进制会 base64 读进 arrayBuffer，
+    // 更大文件会让页面瞬间 OOM。
+    const MAX_FILE_BYTES = 12 * 1024 * 1024;
+    const ALLOW_EXT = /\.(xlsx|csv)$/i;
     function onImpFile(ev) {
-      imp.file = ev.target.files && ev.target.files[0] || null;
+      const f = ev.target.files && ev.target.files[0] || null;
+      // 同一文件连续选：input change 只在 value 变化时触发，选完清空才能再选同一文件
+      ev.target.value = '';
+      if (!f) { imp.file = null; return; }
+      if (!ALLOW_EXT.test(f.name || '')) {
+        imp.file = null;
+        toast('只支持 .xlsx 或 .csv 文件', 'error');
+        return;
+      }
+      if (f.size > MAX_FILE_BYTES) {
+        imp.file = null;
+        toast(`文件过大（${(f.size / 1024 / 1024).toFixed(1)}MB），单文件最大 12MB`, 'error');
+        return;
+      }
+      imp.file = f;
       imp.result = null; imp.done = null;
     }
     async function impUpload(dryRun) {
@@ -35,7 +53,11 @@ const DocImport = {
       } catch (e) { toast(e.message, 'error'); }
       finally { imp.busy = false; }
     }
-    function close() { emit('close'); }
+    function close() {
+      // 释放 File 对象引用：弹窗关闭后 imp.file 还持有二进制，长会话内存累积
+      imp.file = null; imp.result = null; imp.done = null;
+      emit('close');
+    }
     const impTypeName = (t) => (DOC_META[t] ? DOC_META[t].label : t);
     return { imp, onImpFile, impUpload, close, impTypeName, fmtMoney };
   },

@@ -214,6 +214,9 @@ const SettingsPage = {
     }
 
     async function reset(scope) {
+      // 一键重置所有设置是不可逆操作，必须二次确认（对齐恢复备份的交互等级）
+      const label = scope === 'all' ? '所有设置（编号前缀 + 编号方式 + 打印抬头）' : scope === 'prefix' ? '所有单据编号前缀' : scope === 'noMode' ? '编号方式' : '打印抬头';
+      if (!(await confirmBox(`确定要恢复${label}为默认值吗？此操作不可撤销。`, '恢复默认设置'))) return;
       try {
         const r = await api.post('/setting/reset', { teamId: store.teamId, scope });
         Object.keys(prefix).forEach((k) => delete prefix[k]);
@@ -410,12 +413,17 @@ const SettingsPage = {
       try {
         await api.post('/backup/restore', { file: row.file, password });
         toast('恢复已排队，服务正在重启……页面稍后自动重连');
-        // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态
-        setTimeout(function poll(retries) {
+        // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态。
+        // 组件卸载时必须停轮：否则路由切走后 setTimeout 还在跑 60s。
+        let stopped = false;
+        onBeforeUnmount(() => { stopped = true; });
+        const poll = (retries) => {
+          if (stopped) return;
           api.get('/auth/status')
-            .then(() => { location.reload(); })
-            .catch(() => { if (retries > 0) setTimeout(() => poll(retries - 1), 2000); });
-        }, 3000, 30);
+            .then(() => { if (!stopped) location.reload(); })
+            .catch(() => { if (!stopped && retries > 0) setTimeout(() => poll(retries - 1), 2000); });
+        };
+        setTimeout(() => poll(30), 3000);
       } catch (e) {
         toast(e.message, 'error');
         backupBusy.value = false;

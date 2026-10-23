@@ -24,21 +24,27 @@ function logout() {
   location.hash = '#/login';
 }
 
-/** 令牌失效的统一清理（多个并发请求同时 401 时只执行一次） */
-let handling401 = false;
+/** 令牌失效的统一清理：Promise 单例模式替代 setTimeout 去抖锁。
+ *  原实现：handling401=true 后 setTimeout(1000ms) 释放，1s 内多请求 401 都被吞掉、
+ *  1s 后返回的 401 又会触发一次完整清理（多余的状态重置与闪烁）。
+ *  改为：并发触发共用同一个 Promise，Promise 完成后才允许下一次清理。 */
+let handling401Promise = null;
 function handle401() {
-  if (handling401) return;
-  handling401 = true;
-  // 记住当前页（排除登录页自身），登录成功后回到这里
-  const cur = location.hash;
-  if (cur && cur !== '#/login' && !cur.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, cur);
-  if (auth.token || auth.user || store.loaded) {
-    setToken(''); auth.user = null; auth.team = null;
-    store.loaded = false; store.teamId = null; store.team = null; store.teams = [];
-  }
-  if (location.hash !== '#/login') location.hash = '#/login';
-  // 渲染/路由切换需要一点时间，稍后释放去抖锁避免真实的下一次失效被吞掉
-  setTimeout(() => { handling401 = false; }, 1000);
+  if (handling401Promise) return handling401Promise;
+  handling401Promise = (async () => {
+    // 记住当前页（排除登录页自身），登录成功后回到这里
+    const cur = location.hash;
+    if (cur && cur !== '#/login' && !cur.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, cur);
+    if (auth.token || auth.user || store.loaded) {
+      setToken(''); auth.user = null; auth.team = null;
+      store.loaded = false; store.teamId = null; store.team = null; store.teams = [];
+    }
+    if (location.hash !== '#/login') location.hash = '#/login';
+    // 等渲染/路由切换完成后再释放单例，避免真实的下一次失效被吞掉
+    await new Promise(r => setTimeout(r, 100));
+    handling401Promise = null;
+  })();
+  return handling401Promise;
 }
 
 async function req(method, path, body, params) {
@@ -102,7 +108,9 @@ const api = {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    // 立即 revoke：download 属性已把数据读走，4s 等待期会让连续点击创建多个 objectURL 占用内存
+    // Firefox 旧版对立即 revoke 偶有兼容问题，用 requestAnimationFrame 延迟一帧足够
+    requestAnimationFrame(() => URL.revokeObjectURL(url));
   },
 };
 

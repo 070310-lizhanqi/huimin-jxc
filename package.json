@@ -1,11 +1,15 @@
 {
   "name": "huimin-clone",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "description": "进销存系统（复刻惠民云 jxc 线核心业务）",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.5"
+  },
   "scripts": {
     "build": "tsc -p server/tsconfig.json",
+    "lint": "tsc --noEmit -p server/tsconfig.json",
     "dev:server": "ts-node server/src/index.ts",
     "serve": "node dist/server/index.js",
     "test": "node tools/run-tests.cjs",

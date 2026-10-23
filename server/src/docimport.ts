@@ -505,10 +505,16 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
               continue;
             }
           }
-          // 金额交叉核对：|qty×price − amount| > 2 分则提示（不影响导入）
-          if (pr.amount != null && pr.price != null && Math.abs(pr.qty! * pr.price - pr.amount) > 2) {
-            itemWarning = (itemWarning ? itemWarning + '；' : '') +
-              `金额 ${pr.amount / 100} 与 数量×单价 ${(pr.qty! * pr.price) / 100} 不一致，已按数量×单价入账`;
+          // 金额交叉核对：|qty×price − amount| > 2 分则提示（不影响导入）。
+          // 用整数运算：qty 是 4 位小数浮点，直接 qty*price 在大额分时浮点误差会超 2 分阈值误报。
+          // 与 docs.ts 的 lineAmount 口径一致：qty 先转"万分"整数再乘。
+          if (pr.amount != null && pr.price != null) {
+            const qtyScaled = Math.round(Math.round((pr.qty! + Number.EPSILON) * 10000) );
+            const lineAmt = Math.round((qtyScaled * pr.price) / 10000);
+            if (Math.abs(lineAmt - pr.amount) > 2) {
+              itemWarning = (itemWarning ? itemWarning + '；' : '') +
+                `金额 ${pr.amount / 100} 与 数量×单价 ${lineAmt / 100} 不一致，已按数量×单价入账`;
+            }
           }
           items.push({
             row: pr.rowNo,
@@ -645,10 +651,12 @@ function nextBillNoForImport(db: DatabaseSync, teamId: number, type: string): st
   const full = localDate().replace(/-/g, '');
   const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
   const key = `${teamId}:${prefix}:${datePart}`;
-  db.prepare(
+  // 单语句 upsert + RETURNING：与 docs.ts nextBillNo 一致，
+  // 避免两个并发 import 在「upsert + SELECT」两语句之间拿到错乱 seq。
+  const row = db.prepare(
     `INSERT INTO bill_seq (k, seq) VALUES (?, 1)
-     ON CONFLICT(k) DO UPDATE SET seq = seq + 1`,
-  ).run(key);
-  const row = db.prepare(`SELECT seq FROM bill_seq WHERE k = ?`).get(key) as { seq: number };
+     ON CONFLICT(k) DO UPDATE SET seq = seq + 1
+     RETURNING seq`,
+  ).get(key) as { seq: number };
   return `${prefix}${datePart}${String(row.seq).padStart(4, '0')}`;
 }

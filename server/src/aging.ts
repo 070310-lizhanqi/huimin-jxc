@@ -66,6 +66,8 @@ interface OpenDoc {
  * 按 FIFO 把「已结算金额」分摊到未结单据上，返回每张单的未结金额。
  * @param docs 按日期升序的应收/应付单据（amount 为分，可正可负：负数表示退货/退款冲减）
  * @param settled 已结算总额（分）
+ * 超收处理：当 settled 超过全部正数单据合计时，剩余 left 不再丢弃，
+ * 而是作为负数挂到最新一张单据上——否则客户超收时应收被系统性低估，与 partner_balance 对不上账。
  */
 function allocate(docs: OpenDoc[], settled: number): Array<{ doc: OpenDoc; open: number }> {
   let left = settled;
@@ -79,6 +81,11 @@ function allocate(docs: OpenDoc[], settled: number): Array<{ doc: OpenDoc; open:
     }
     // 负数单据（退货）不参与分摊，直接作为负向未结
     out.push({ doc, open });
+  }
+  // 超收溢额：挂到最新（日期最大，即数组末尾）一张单据作为负数未结
+  if (left > 0 && out.length > 0) {
+    const last = out[out.length - 1];
+    out[out.length - 1] = { doc: last.doc, open: last.open - left };
   }
   return out;
 }
@@ -98,7 +105,10 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       mode === 'ar' ? (type === 'sret' ? -1 : 1) : type === 'pin' ? -1 : 1;
     const settleType = mode === 'ar' ? 'receipt' : 'payment';
 
-    // 1) 取全部已审核往来单据（正负按方向）
+    // 1) 取全部已审核往来单据（正负按方向）。
+    //    注意：不能加日期下限过滤——早于 720 天的单据金额仍须计入 over720 桶，
+    //    否则老客户的历史欠款会从应收总额里消失，与 partner_balance 对不上。
+    //    日期过滤已靠索引 idx_doc_team_status_type_date 加速，无需砍掉历史数据。
     const docs = db
       .prepare(
         `SELECT id, partnerId, date, type, totalAmount FROM doc
@@ -175,7 +185,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
         const key = bucketOf(daysBetween(doc.date, now));
         row[key] += open;
         row.total += open;
-        if (open > 0 && (row.oldestDate === null || doc.date < row.oldestDate)) {
+        // oldestDate 统计所有非零未结（含负数退货单）：纯退货客户的最早账龄不再为 null
+        if (open !== 0 && (row.oldestDate === null || doc.date < row.oldestDate)) {
           row.oldestDate = doc.date;
         }
       }
@@ -225,13 +236,16 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     }
     const now = today();
     // 每个 (productId, warehouseId, reservoirId, batchNo) 的首次入库日期
+    // 用 doc.date（业务日期）而非 stock_ledger.createdAt（记录创建时刻）：
+    // 补录历史入库单时 createdAt 是"今天"，会让批次账龄被严重低估。
     const firstIn = db
       .prepare(
-        `SELECT productId, warehouseId, reservoirId, COALESCE(batchNo, '') AS batchNo,
-                MIN(substr(createdAt, 1, 10)) AS firstDate
-         FROM stock_ledger
-         WHERE teamId = ? AND direction = 'in'
-         GROUP BY productId, warehouseId, reservoirId, COALESCE(batchNo, '')`,
+        `SELECT l.productId, l.warehouseId, l.reservoirId, COALESCE(l.batchNo, '') AS batchNo,
+                MIN(substr(COALESCE(d.date, l.createdAt), 1, 10)) AS firstDate
+         FROM stock_ledger l
+         LEFT JOIN doc d ON d.id = l.refDocId
+         WHERE l.teamId = ? AND l.direction = 'in'
+         GROUP BY l.productId, l.warehouseId, l.reservoirId, COALESCE(l.batchNo, '')`,
       )
       .all(teamId) as Array<{
       productId: number;
@@ -245,15 +259,17 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       firstMap.set(`${r.productId}|${r.warehouseId}|${r.reservoirId ?? ''}|${r.batchNo}`, r.firstDate);
     }
 
-    // 加权平均成本（只算采购入库，与报表口径一致）
+    // 加权平均成本（只算截至今天的采购入库流水，与报表口径一致；
+    // 不加日期上限会把"未来补录的历史入库"也计入，成本被往回带的采购价污染）
     const costs = db
       .prepare(
         `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
+           AND d.date <= ?
          GROUP BY l.productId`,
       )
-      .all(teamId) as Array<{ productId: number; avgCost: number }>;
+      .all(teamId, now) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
 
     const stocks = db
