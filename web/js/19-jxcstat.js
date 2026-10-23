@@ -11,6 +11,8 @@ const JxcStatPage = {
     const byType = ref([]);
     const rows = ref([]);
     const totals = ref({ inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 });
+    /* 请求序守卫：连点查询时旧响应不得覆盖新日期范围的数据 */
+    const guard = seqGuard();
 
     const TYPE_LABEL = {
       stockin: '采购入库', pin: '采购退货', stockout: '销售出库', sret: '销售退货',
@@ -23,8 +25,10 @@ const JxcStatPage = {
     async function load() {
       if (!range[0] || !range[1]) return toast('请选择日期范围', 'error');
       loading.value = true;
+      const my = guard.begin();
       try {
         const r = await api.get('/report/jxc-stat', { teamId: store.teamId, from: range[0], to: range[1] });
+        if (!guard.isCurrent(my)) return;
         byType.value = (r.byType || []).map((b) => ({
           ...b,
           label: TYPE_LABEL[b.type] || b.type,
@@ -32,41 +36,55 @@ const JxcStatPage = {
         }));
         rows.value = r.rows || [];
         totals.value = r.totals || { inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 };
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) { if (guard.isCurrent(my)) toast(e.message, 'error'); }
+      finally { if (guard.isCurrent(my)) loading.value = false; }
     }
 
     const cards = computed(() => [
-      { label: '入库数量', val: totals.value.inQty, unit: '' },
+      { label: '入库数量', val: fmtQty(totals.value.inQty), unit: '' },
       { label: '入库金额', val: fmtMoney(totals.value.inAmount), unit: '元' },
-      { label: '出库数量', val: totals.value.outQty, unit: '' },
+      { label: '出库数量', val: fmtQty(totals.value.outQty), unit: '' },
       { label: '出库金额', val: fmtMoney(totals.value.outAmount), unit: '元' },
     ]);
 
     function doExport() {
+      if (!rows.value.length) return toast('没有可导出的数据，请先查询', 'warning');
       exportCsv(`进销存统计_${range[0]}_${range[1]}.csv`,
         rows.value.map((r) => ({
           商品: r.prodName, 规格: r.spec || '', 单位: r.unit || '',
-          入库数量: r.inQty, 入库金额: fmtMoney(r.inAmount),
-          出库数量: r.outQty, 出库金额: fmtMoney(r.outAmount),
-          结存数量: r.inQty - r.outQty,
+          入库数量: r.inQty, 入库金额: r.inAmount == null ? '' : (r.inAmount / 100).toFixed(2),
+          出库数量: r.outQty, 出库金额: r.outAmount == null ? '' : (r.outAmount / 100).toFixed(2),
+          当前库存: r.stockQty,
         })), [
           { key: '商品', label: '商品' }, { key: '规格', label: '规格' }, { key: '单位', label: '单位' },
-          { key: '入库数量', label: '入库数量' }, { key: '入库金额', label: '入库金额' },
-          { key: '出库数量', label: '出库数量' }, { key: '出库金额', label: '出库金额' },
-          { key: '结存数量', label: '结存数量' },
+          { key: '入库数量', label: '入库数量' }, { key: '入库金额', label: '入库金额(元)' },
+          { key: '出库数量', label: '出库数量' }, { key: '出库金额', label: '出库金额(元)' },
+          { key: '当前库存', label: '当前库存' },
+        ]);
+    }
+
+    function doExportTypes() {
+      if (!byType.value.length) return toast('没有可导出的数据，请先查询', 'warning');
+      exportCsv(`进销存类型汇总_${range[0]}_${range[1]}.csv`,
+        byType.value.map((b) => ({
+          类型: b.label, 方向: b.dir, 单数: b.count, 数量: b.qty,
+          金额: b.amount == null ? '' : (b.amount / 100).toFixed(2),
+        })), [
+          { key: '类型', label: '单据类型' }, { key: '方向', label: '方向' },
+          { key: '单数', label: '单数' }, { key: '数量', label: '数量' }, { key: '金额', label: '金额(元)' },
         ]);
     }
 
     onMounted(load);
-    return { range, loading, byType, rows, totals, cards, load, doExport, fmtMoney };
+    return { range, loading, byType, rows, totals, cards, load, doExport, doExportTypes, fmtMoney, fmtQty, TYPE_LABEL };
   },
   template: `
   <div class="page-card">
     <div class="page-head">
       <div class="hd-title">进销存统计</div>
       <div class="hd-right">
-        <button class="btn" @click="doExport"><el-icon><Download/></el-icon> 导出</button>
+        <button class="btn" @click="doExport"><el-icon><Download/></el-icon> 导出商品汇总</button>
+        <button class="btn" @click="doExportTypes"><el-icon><Download/></el-icon> 导出类型汇总</button>
       </div>
     </div>
     <div class="filterbar">
@@ -88,10 +106,10 @@ const JxcStatPage = {
         <tbody>
           <tr v-for="b in byType" :key="b.type">
             <td>{{ b.label }}</td>
-            <td class="r"><span :class="['tag', b.dir === '入' ? 'ok' : b.dir === '出' ? 'warn' : '']">{{ b.dir }}</span></td>
-            <td class="r">{{ b.count }}</td><td class="r">{{ b.qty }}</td><td class="r">{{ fmtMoney(b.amount) }}</td>
+            <td class="r"><span :class="['tag', b.dir === '入' ? 'tag-in' : b.dir === '出' ? 'tag-out' : '']">{{ b.dir }}</span></td>
+            <td class="r">{{ b.count }}</td><td class="r">{{ fmtQty(b.qty) }}</td><td class="r">{{ fmtMoney(b.amount) }}</td>
           </tr>
-          <tr v-if="!byType.length"><td colspan="5" class="muted" style="text-align:center;padding:22px">该范围内没有已审核单据。</td></tr>
+          <tr v-if="!byType.length"><td colspan="5"><div class="empty">该范围内没有已审核单据</div></td></tr>
         </tbody>
       </table>
     </div>
@@ -99,21 +117,21 @@ const JxcStatPage = {
     <div class="card">
       <div class="card-title" style="margin-bottom:8px">按商品汇总（入 = 采购入库/其它入库/销售退货，出 = 销售出库/其它出库/采购退货）</div>
       <table class="tbl">
-        <thead><tr><th class="r" style="width:52px">#</th><th>商品</th><th>规格</th><th>单位</th><th class="r">入库数量</th><th class="r">入库金额</th><th class="r">出库数量</th><th class="r">出库金额</th><th class="r">结存数量</th></tr></thead>
+        <thead><tr><th class="r" style="width:52px">#</th><th>商品</th><th>规格</th><th>单位</th><th class="r">入库数量</th><th class="r">入库金额</th><th class="r">出库数量</th><th class="r">出库金额</th><th class="r" title="取 stock 表当前实存（不分期间），不为负">当前库存</th></tr></thead>
         <tbody>
           <tr v-for="(r, i) in rows" :key="r.productId">
             <td class="r muted">{{ i + 1 }}</td>
             <td>{{ r.prodName }}</td><td>{{ r.spec || '—' }}</td><td>{{ r.unit || '—' }}</td>
-            <td class="r">{{ r.inQty }}</td><td class="r">{{ fmtMoney(r.inAmount) }}</td>
-            <td class="r">{{ r.outQty }}</td><td class="r">{{ fmtMoney(r.outAmount) }}</td>
-            <td class="r"><b>{{ r.inQty - r.outQty }}</b></td>
+            <td class="r">{{ fmtQty(r.inQty) }}</td><td class="r">{{ fmtMoney(r.inAmount) }}</td>
+            <td class="r">{{ fmtQty(r.outQty) }}</td><td class="r">{{ fmtMoney(r.outAmount) }}</td>
+            <td class="r"><b>{{ fmtQty(r.stockQty) }}</b></td>
           </tr>
-          <tr v-if="!rows.length"><td colspan="9" class="muted" style="text-align:center;padding:22px">该范围内没有出入库记录。</td></tr>
+          <tr v-if="!rows.length"><td colspan="9"><div class="empty">该范围内没有出入库记录</div></td></tr>
           <tr v-else style="background:#f7f9fb;font-weight:600">
             <td colspan="4" style="text-align:right">合计</td>
-            <td class="r">{{ totals.inQty }}</td><td class="r">{{ fmtMoney(totals.inAmount) }}</td>
-            <td class="r">{{ totals.outQty }}</td><td class="r">{{ fmtMoney(totals.outAmount) }}</td>
-            <td class="r">{{ totals.inQty - totals.outQty }}</td>
+            <td class="r">{{ fmtQty(totals.inQty) }}</td><td class="r">{{ fmtMoney(totals.inAmount) }}</td>
+            <td class="r">{{ fmtQty(totals.outQty) }}</td><td class="r">{{ fmtMoney(totals.outAmount) }}</td>
+            <td></td>
           </tr>
         </tbody>
       </table>

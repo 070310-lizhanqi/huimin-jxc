@@ -82,8 +82,11 @@ function allocate(docs: OpenDoc[], settled: number): Array<{ doc: OpenDoc; open:
     // 负数单据（退货）不参与分摊，直接作为负向未结
     out.push({ doc, open });
   }
-  // 超收溢额：挂到最新（日期最大，即数组末尾）一张单据作为负数未结
-  if (left > 0 && out.length > 0) {
+  // 溢额挂到最新（日期最大，即数组末尾）一张单据：
+  // left > 0（超收）→ 未结减去溢额（负数未结，应收对得上账）；
+  // left < 0（净退款：退货当场退款额 > 收款额）→ 未结加回 |left|，
+  //   否则退款金额凭空消失、账龄合计与 partner_balance 差出退款额
+  if (left !== 0 && out.length > 0) {
     const last = out[out.length - 1];
     out[out.length - 1] = { doc: last.doc, open: last.open - left };
   }
@@ -104,6 +107,7 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     const signOf = (type: string) =>
       mode === 'ar' ? (type === 'sret' ? -1 : 1) : type === 'pin' ? -1 : 1;
     const settleType = mode === 'ar' ? 'receipt' : 'payment';
+    const reverseType = mode === 'ar' ? 'payment' : 'receipt';
 
     // 1) 取全部已审核往来单据（正负按方向）。
     //    注意：不能加日期下限过滤——早于 720 天的单据金额仍须计入 over720 桶，
@@ -125,13 +129,16 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     }>;
 
     // 2) 取各往来单位的已结算总额（partnerType 必须一致：customer/vendor 自增 id 可能撞号，
-    //    不加过滤会把供应商的付款算到同号客户的应收上）
+    //    不加过滤会把供应商的付款算到同号客户的应收上）。
+    //    净额口径：正向收款冲减应收，反向类型（AR 的 payment=现退客户 / AP 的 receipt=供应商退款）
+    //    是退货当场退款、审核时 bump 往来为正——不扣回去的话有退货退款的客户账龄合计与 partner_balance 对不上。
+    //    注意占位符顺序：CASE 的 ? 在 SELECT 列表里排第一
     const settles = db
       .prepare(
-        `SELECT partnerId, SUM(amount) AS amt FROM settlement
-         WHERE teamId = ? AND type = ? AND partnerType = ? GROUP BY partnerId`,
+        `SELECT partnerId, SUM(CASE WHEN type = ? THEN amount ELSE -amount END) AS amt FROM settlement
+         WHERE teamId = ? AND type IN (?, ?) AND partnerType = ? GROUP BY partnerId`,
       )
-      .all(teamId, settleType, partnerType) as Array<{ partnerId: number; amt: number }>;
+      .all(settleType, teamId, settleType, reverseType, partnerType) as Array<{ partnerId: number; amt: number }>;
     const settleMap = new Map<number, number>(settles.map((s) => [s.partnerId, s.amt]));
 
     // 3) 按往来单位分组 → FIFO 分摊 → 按账龄分桶
@@ -215,7 +222,9 @@ export function mountAging(router: Router, db: DatabaseSync): void {
   router.get('/report/aging/top', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const mode = String(req.query.mode ?? 'ar') === 'ap' ? 'ap' : 'ar';
-    const limit = Math.min(20, Math.max(1, Number(req.query.limit ?? 5)));
+    // limit 守护：Number('abc')=NaN 时 slice(0, NaN) 静默返回空排行
+    const rawLimit = Number(req.query.limit ?? 5);
+    const limit = Number.isFinite(rawLimit) ? Math.min(20, Math.max(1, Math.floor(rawLimit))) : 5;
     if (!teamId) {
       res.status(400).json({ error: 'teamId 不能为空' });
       return;
@@ -245,6 +254,7 @@ export function mountAging(router: Router, db: DatabaseSync): void {
          FROM stock_ledger l
          LEFT JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in'
+           AND (d.id IS NULL OR d.status <> 'void')
          GROUP BY l.productId, l.warehouseId, l.reservoirId, COALESCE(l.batchNo, '')`,
       )
       .all(teamId) as Array<{

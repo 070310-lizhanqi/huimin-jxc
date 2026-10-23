@@ -83,7 +83,7 @@ const LoginPage = {
       <p class="login-sub">{{ mode === 'login' ? '登录你的账套，开始今天的经营' : (firstRun ? '首次使用，请创建管理员账号与账套' : '新建管理员账号') }}</p>
       <el-form @submit.prevent="submit" label-position="top">
         <el-form-item label="用户名">
-          <el-input v-model="form.username" size="large" placeholder="请输入用户名" autocomplete="username" clearable/>
+          <el-input v-model="form.username" size="large" placeholder="请输入用户名" autocomplete="username" clearable @keyup.enter="submit"/>
         </el-form-item>
         <el-form-item v-if="mode === 'register'" label="账套名称">
           <el-input v-model="form.teamName" size="large" placeholder="如：鲜果批发部" maxlength="30" clearable/>
@@ -136,6 +136,8 @@ const App = {
     const booting = ref(true);
     const switchTo = ref(null);
     const openMenu = ref(-1);
+    /* 顶部提示条：本次会话内可关闭（下次登录重新出现） */
+    const tipbarOn = ref(!sessionStorage.getItem('oc.tipbar.off'));
 
     /* 顶栏激活项滑动指示条：测量 .nav-link.on 相对 .topnav 的位置并移动下划线 */
     const navInd = ref(null);
@@ -195,6 +197,16 @@ const App = {
     watch(curKey, moveNavInd);
     watch(ready, moveNavInd);
 
+    /* 顶栏高亮组：同一页面（如进销存统计/收付款）可能挂在多个菜单下，
+       全部点亮会出现「采购+库存」双高亮；只点亮第一个命中的分组 */
+    const activeNav = computed(() => {
+      for (let i = 0; i < MENU.length; i++) {
+        const g = MENU[i];
+        if (g.page && curKey.value.startsWith(g.page)) return i;
+        if (g.items && g.items.some((m) => m.page === curKey.value)) return i;
+      }
+      return -1;
+    });
     const pageComp = computed(() => PAGES[route.page] || DashboardPage);
     const pageTitle = computed(() => {
       for (const g of MENU) {
@@ -205,6 +217,10 @@ const App = {
       return '工作台';
     });
     const pageKey = computed(() => `${store.teamId}:${route.page}:${route.sub}:${JSON.stringify(route.q)}`);
+    // 浏览器标签页标题跟随页面：多开标签页可区分
+    watch(pageTitle, (t) => {
+      document.title = (t && t !== '工作台') ? `${t} · 惠民云进销存` : '惠民云进销存';
+    }, { immediate: true });
 
     function go(menuPage) {
       openMenu.value = -1;
@@ -214,6 +230,31 @@ const App = {
       if (g.page && !g.items) { nav('#/' + g.page); openMenu.value = -1; return; }
       openMenu.value = openMenu.value === i ? -1 : i;
     }
+
+    /* ===== Ctrl+K 命令面板：全部菜单项一键跳转 ===== */
+    const cmdOpen = ref(false);
+    const cmdKw = ref('');
+    const CMD_ITEMS = MENU.flatMap((g) => (g.items || []).map((m) => ({ label: m.label, group: g.label, page: m.page })));
+    const cmdList = computed(() => {
+      const kw = cmdKw.value.trim().toLowerCase();
+      if (!kw) return CMD_ITEMS;
+      return CMD_ITEMS.filter((m) => (m.label + m.group).toLowerCase().includes(kw));
+    });
+    function cmdGo(m) { cmdOpen.value = false; cmdKw.value = ''; go(m.page); }
+    function onCmdKey(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        cmdOpen.value = !cmdOpen.value;
+        cmdKw.value = '';
+      } else if (e.key === 'Escape' && cmdOpen.value) {
+        cmdOpen.value = false;
+      }
+    }
+    onMounted(() => window.addEventListener('keydown', onCmdKey));
+    onBeforeUnmount(() => window.removeEventListener('keydown', onCmdKey));
+
+    /* 低库存铃铛：点击跳库存查询 */
+    function goLowStock() { nav('#/stock'); }
     function onDocClick(e) {
       if (!e.target.closest('.nav-item')) openMenu.value = -1;
     }
@@ -235,7 +276,8 @@ const App = {
       toast('已退出登录');
     }
 
-    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, BRAND_SVG, navInd };
+    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, activeNav, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, BRAND_SVG, navInd, tipbarOn,
+      cmdOpen, cmdKw, cmdList, cmdGo, goLowStock };
   },
   template: `
   <login-page v-if="auth.ready && !auth.token"/>
@@ -247,7 +289,7 @@ const App = {
         <span class="brand-txt">惠民云进销存</span>
       </div>
       <div class="nav-item" v-for="(g, i) in MENU" :key="g.label">
-        <div class="nav-link" :class="{ on: curKey.startsWith(g.page || '__none') || (g.items && g.items.some(m => m.page === curKey)) }" @click.stop="onNavClick(i, g)">
+        <div class="nav-link" :class="{ on: i === activeNav }" @click.stop="onNavClick(i, g)">
           {{ g.label }}<span class="caret" v-if="g.items">▾</span>
         </div>
         <div class="nav-menu" v-if="g.items && openMenu === i">
@@ -255,6 +297,11 @@ const App = {
         </div>
       </div>
       <div class="nav-right">
+        <span class="nav-icon" title="快速跳转（Ctrl+K）" @click="cmdOpen = true; cmdKw = ''"><el-icon><Search/></el-icon></span>
+        <span class="nav-icon bell" :class="{ active: store.lowStockCount > 0 }" :title="store.lowStockCount > 0 ? store.lowStockCount + ' 项商品低于安全库存，点击查看' : '库存正常'" @click="goLowStock">
+          <el-icon><Bell/></el-icon>
+          <i class="bell-badge" v-if="store.lowStockCount > 0">{{ store.lowStockCount > 99 ? '99+' : store.lowStockCount }}</i>
+        </span>
         <span class="nav-icon" title="使用帮助" @click="nav('#/help')"><el-icon><QuestionFilled/></el-icon></span>
         <el-select v-if="store.teams.length > 1" v-model="switchTo" size="small" style="width:150px;margin-left:6px" @change="onSwitchTeam">
           <el-option v-for="t in store.teams" :key="t.id" :label="t.name" :value="t.id"/>
@@ -267,8 +314,9 @@ const App = {
         <span class="nav-logout" title="退出登录" @click="onLogout"><el-icon><SwitchButton/></el-icon></span>
       </div>
     </header>
-    <div class="tipbar">
-      {{ auth.team ? auth.team.name : '当前账套' }} · 数据保存在本地 SQLite，账套之间完全隔离
+    <div class="tipbar" v-if="tipbarOn">
+      <span>{{ auth.team ? auth.team.name : '当前账套' }} · 数据保存在本地 SQLite，账套之间完全隔离</span>
+      <span class="tip-x" title="本次会话不再显示" @click="tipbarOn = false; sessionStorage.setItem('oc.tipbar.off', '1')">×</span>
     </div>
     <div class="body">
       <div class="content">
@@ -279,6 +327,26 @@ const App = {
       </div>
     </div>
   </div>
-  <div v-else class="login-wrap"><div class="muted" style="color:#fff">正在进入…</div></div>`,
+  <div v-else class="login-wrap"><div class="muted" style="color:#fff">正在进入…</div></div>
+  <!-- Ctrl+K 快速跳转面板（放在分支链之后：v-else 必须紧跟 shell 的 v-else-if，
+       插在中间会让 login-wrap 错误绑定到面板的 v-if，登录态下页面底部多出 100vh 空白块） -->
+  <div class="modal-mask" v-if="cmdOpen && auth.token" @click.self="cmdOpen = false" style="align-items:flex-start;padding-top:12vh">
+    <div class="modal narrow" style="align-self:center;margin:0 auto">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border-light)">
+        <input v-model="cmdKw" placeholder="输入页面名称，回车跳转第一项（Esc 关闭）" autofocus
+          style="width:100%;height:36px;border:none;outline:none;font-size:14px" @keyup.enter="cmdList.length && cmdGo(cmdList[0])"/>
+      </div>
+      <div style="max-height:46vh;overflow-y:auto;padding:6px 0">
+        <div v-for="m in cmdList" :key="m.group + m.page" @click="cmdGo(m)"
+          style="padding:9px 18px;cursor:pointer;display:flex;justify-content:space-between;align-items:center"
+          onmouseover="this.style.background='#fff4ec'" onmouseout="this.style.background=''"
+          onfocus="this.style.background='#fff4ec'" onblur="this.style.background=''" tabindex="0">
+          <span style="font-size:13.5px">{{ m.label }}</span>
+          <span class="muted" style="font-size:12px">{{ m.group }}</span>
+        </div>
+        <div v-if="!cmdList.length" class="empty" style="padding:24px 0">没有匹配的页面</div>
+      </div>
+    </div>
+  </div>`,
 };
 

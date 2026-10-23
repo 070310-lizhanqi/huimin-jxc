@@ -10,7 +10,7 @@ const LedgerPage = {
     const list = ref([]);
     const total = ref(0);
     const page = ref(1);
-    const rows = ref(50);
+    const rows = ref(pageSizeOf('ledger', 50));
     const loading = ref(true);
     const viewerId = ref(null);
     // 关联单据单号：一次批量取，避免每条流水单独查（原实现直接显示 #id）
@@ -52,24 +52,25 @@ const LedgerPage = {
       page.value = 1; load();
     }
     function onPage(p) { page.value = p; load(); }
-    function onSize(n) { rows.value = n; page.value = 1; load(); }
+    function onSize(n) { rows.value = n; pageSizeSave('ledger', n); page.value = 1; load(); }
     function search() { page.value = 1; load(); }
 
     function doExport() {
       if (!list.value.length) return toast('没有可导出的流水', 'warning');
+      const prodName = (id) => byId(store.products, id)?.name ?? '#' + id;
+      const whName = (id) => byId(store.warehouses, id)?.name ?? '—';
       exportCsv(
-        `库存流水_${new Date().toISOString().slice(0, 10)}.csv`,
-        ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'],
-        list.value.map((l) => [
-          l.createdAt,
-          store.products.find((p) => p.id === l.productId)?.name ?? '#' + l.productId,
-          store.warehouses.find((w) => w.id === l.warehouseId)?.name ?? '—',
-          l.batchNo || '—',
-          l.direction === 'in' ? '入库' : '出库',
-          l.qty,
-          (l.unitCost / 100).toFixed(2),
-          docNos.value[l.refDocId] ?? ('#' + l.refDocId),
-        ]),
+        `库存流水_${todayStr()}.csv`,
+        list.value.map((l) => ({
+          createdAt: l.createdAt, prod: prodName(l.productId), wh: whName(l.warehouseId),
+          batchNo: l.batchNo || '—', dir: l.direction === 'in' ? '入库' : '出库', qty: l.qty,
+          cost: (l.unitCost / 100).toFixed(2), doc: docNos.value[l.refDocId] ?? ('#' + l.refDocId),
+        })),
+        [
+          { key: 'createdAt', label: '时间' }, { key: 'prod', label: '商品' }, { key: 'wh', label: '仓库' },
+          { key: 'batchNo', label: '批次' }, { key: 'dir', label: '方向' }, { key: 'qty', label: '数量' },
+          { key: 'cost', label: '成本单价(元)' }, { key: 'doc', label: '关联单据' },
+        ],
       );
     }
 

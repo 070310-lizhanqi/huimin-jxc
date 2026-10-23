@@ -23,6 +23,8 @@
   --head-bg: #f7f9fb;
   --success: #52a552;
   --danger: #e85656;
+  --warning: #e6a23c;
+  --line: var(--border-light);
   /* 视觉精化：圆角 + 三级投影 + 品牌投影 */
   --radius: 6px;
   --radius-lg: 8px;
@@ -35,6 +37,19 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 13px; }
 #app { height: 100%; }
+
+/* ===== 滚动条：窄化 + 圆角，替代 Windows 默认宽灰条 ===== */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #d0d5db; border-radius: 5px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: #b9c0c8; }
+::-webkit-scrollbar-track { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: #d0d5db transparent; }
+
+/* ===== 键盘可达性：可点元素的焦点环（div/span 点击件默认无焦点样式） ===== */
+.qk:focus-visible, .mi:focus-visible, .link:focus-visible, .lnk:focus-visible,
+.ct-op:focus-visible, .more-btn:focus-visible, .x:focus-visible, .tb:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 1px; border-radius: 3px;
+}
 
 /* ===== 顶部导航 ===== */
 .topnav { height: 54px; background: var(--nav); display: flex; align-items: center; padding: 0 16px; gap: 4px; position: relative; z-index: 20; flex-shrink: 0; }
@@ -52,8 +67,15 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .nav-menu .mi:hover { background: var(--brand-light); color: var(--brand); }
 .nav-menu .mi.cur { color: var(--brand); }
 .nav-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
-.nav-icon { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; color: var(--nav-text); cursor: pointer; border-radius: 4px; font-size: 17px; }
+.nav-icon { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; color: var(--nav-text); cursor: pointer; border-radius: 4px; font-size: 17px; position: relative; }
 .nav-icon:hover { background: var(--nav-hover); color: #fff; }
+/* 低库存铃铛角标 */
+.nav-icon.bell.active { color: #ffb98a; }
+.nav-icon .bell-badge {
+  position: absolute; top: 2px; right: 1px; min-width: 15px; height: 15px; padding: 0 3px;
+  background: var(--danger); color: #fff; border-radius: 8px; font-size: 10px; line-height: 15px;
+  font-style: normal; text-align: center; font-weight: 600; box-shadow: 0 0 0 2px var(--nav);
+}
 
 /* 顶栏激活项滑动指示条 */
 .nav-ind {
@@ -79,11 +101,14 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
   .page-enter-active, .page-leave-active { transition: none; }
   .page-enter-from, .page-leave-to { opacity: 1; transform: none; }
   .nav-ind { transition: none; }
+  .modal-mask, .modal { animation: none; }
 }
 
 /* 试用提示条 */
-.tipbar { height: 34px; background: #fff6f0; border-bottom: 1px solid #ffe4d0; display: flex; align-items: center; justify-content: center; font-size: 12.5px; color: var(--brand); gap: 4px; flex-shrink: 0; }
+.tipbar { min-height: 34px; background: #fff6f0; border-bottom: 1px solid #ffe4d0; display: flex; align-items: center; justify-content: center; font-size: 12.5px; color: var(--brand); gap: 4px; flex-shrink: 0; padding: 0 16px; }
 .tipbar .lnk { color: var(--brand); text-decoration: underline; cursor: pointer; }
+.tipbar .tip-x { cursor: pointer; font-size: 15px; opacity: .5; padding: 0 4px; }
+.tipbar .tip-x:hover { opacity: 1; }
 
 /* ===== 主体 ===== */
 .body { flex: 1; overflow-y: auto; background: var(--bg); }
@@ -123,7 +148,10 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .tbl-list td:last-child { overflow: visible; }
 .tbl-list .row-actions { flex-wrap: nowrap; gap: 4px; }
 .tbl-list .btn.sm { padding: 0 6px; }
-.tbl tbody tr:hover td { background: #fafcfe; }
+/* 表格行 hover 增强 + 斑马纹：此前 hover 与白底仅差约 2% 亮度，几乎不可辨 */
+.tbl tbody tr { transition: background .12s; }
+.tbl tbody tr:nth-child(even) td { background: #fafbfc; }
+.tbl tbody tr:hover td { background: #f0f5fa; }
 .tbl .r { text-align: right; }
 /* 可排序表头：小箭头，点一下按升序、再点取消 */
 .tbl th .th-sort { display: inline-block; margin-left: 4px; color: #b6bec9; cursor: pointer; font-size: 11px; user-select: none; }
@@ -148,6 +176,8 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
 .muted { color: var(--muted); }
 .money::before { content: "¥"; font-size: .78em; margin-right: 1px; color: var(--muted); }
+/* 金额/数量列用表格数字：同字号数字等宽，多行列表上下对齐不跳动 */
+.tbl td, .tbl th { font-variant-numeric: tabular-nums; }
 .billno { font-family: Consolas, Menlo, monospace; color: var(--brand); font-size: 12.5px; }
 .link { color: var(--brand); cursor: pointer; }
 .link:hover { text-decoration: underline; }
@@ -158,10 +188,15 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .tag-pending { background: #fdf6ec; color: #e6a23c; }
 .tag-audit { background: #f0f9eb; color: var(--success); }
 .tag-void { background: #fef0f0; color: var(--danger); }
+/* 方向标签（入库/出库、收款/付款）：中性蓝橙双色，不挪用「审核绿/作废红」的成败语义 */
+.tag-in  { background: #eef6ff; color: #3a7bd5; }
+.tag-out { background: #fff4ec; color: var(--brand-hover); }
+.tag.warn { background: #fdf6ec; color: #b88230; }
 
 /* 按钮 */
 .btn { height: 32px; border: 1px solid #dcdfe6; background: #fff; border-radius: 3px; padding: 0 15px; font-size: 13px; cursor: pointer; color: var(--text-sub); transition: all .15s; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
-.btn:hover { border-color: #c0c4cc; color: var(--brand); transform: translateY(-1px); }
+.btn:hover:not(:disabled) { border-color: #c0c4cc; color: var(--brand); transform: translateY(-1px); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(242,111,33,.22); }
 .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; box-shadow: 0 1px 3px rgba(242,111,33,.22); }
 .btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); color: #fff; box-shadow: var(--brand-shadow); }
 .btn:active { transform: translateY(0); }
@@ -218,11 +253,13 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .toolbar .el-select { width: 130px; }
 
 /* 弹窗 */
-.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: #fff; border-radius: 4px; width: min(1000px, 94vw); max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.22); }
+.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 100; animation: maskIn .18s var(--ease); }
+.modal { background: #fff; border-radius: var(--radius-lg); width: min(1000px, 94vw); max-height: 90vh; display: flex; flex-direction: column; box-shadow: var(--shadow-3); animation: popIn .22s var(--ease); }
+@keyframes maskIn { from { opacity: 0; } }
+@keyframes popIn { from { opacity: 0; transform: translateY(10px) scale(.985); } }
 .modal.narrow { width: min(480px, 94vw); }
     .modal.mid { width: min(760px, 94vw); }
-.modal.wide { width: min(1180px, 96vw); }
+.modal.wide { width: min(1180px, 96vw); } /* 预留：双栏对比类弹窗 */
 .modal-head { display: flex; align-items: center; padding: 13px 18px; border-bottom: 1px solid var(--border-light); }
 .modal-head .mt { font-size: 15px; font-weight: 600; flex: 1; }
 .modal-head .x { cursor: pointer; color: var(--muted); font-size: 17px; }
@@ -243,7 +280,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .tfoot-bar b { color: var(--text); font-weight: 600; }
 
 /* 图表 */
-.chart-card { background: var(--card); border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); padding: 0; }
+.chart-card { background: var(--card); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); padding: 0; }
 .chart-card .ct { font-size: 14px; font-weight: 600; padding: 12px 16px; display: flex; align-items: center; }
 .chart-card .ct .more { margin-left: auto; font-size: 12.5px; color: var(--brand); cursor: pointer; }
 .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
@@ -253,6 +290,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .pager { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font-size: 13px; color: var(--text-sub); border-top: 1px solid var(--border-light); }
 .pager .sp { flex: 1; }
 .pager .pg { min-width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 2px; background: #fff; cursor: pointer; color: var(--text-sub); }
+.pager .pg:not(:disabled):hover { border-color: var(--brand); color: var(--brand); }
 .pager .pg.on { background: var(--brand); color: #fff; border-color: var(--brand); }
 .pager .pg:disabled { opacity: .45; cursor: not-allowed; }
 .pager select { height: 28px; border: 1px solid var(--border); border-radius: 2px; padding: 0 6px; font-size: 13px; color: var(--text-sub); background: #fff; outline: none; }
@@ -266,9 +304,6 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 
 /* 快捷开单 */
 .quick-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; }
-.quick-btn { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #fff; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 13px; color: var(--text-sub); transition: all .15s; }
-.quick-btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-light); transform: translateY(-1px); box-shadow: var(--shadow-1); }
-.quick-btn .el-icon { font-size: 16px; }
 
 /* 帮助页 */
 .help-sec { margin-bottom: 22px; }
@@ -369,7 +404,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .de-grid .span-all { grid-column: 1 / -1; }
 .de-grid .fi { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .de-grid .fi > label {
-  flex: 0 0 72px; text-align: right;
+  flex: 0 0 76px; text-align: right;
   font-size: 13px; color: var(--text-sub);
   white-space: nowrap;
 }
@@ -394,7 +429,11 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 /* 明细表补充 */
 .item-edit .num { text-align: right; }
 .item-edit .money-amt { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
-.item-edit .stock-low { color: #f56c6c; font-weight: 600; }
+.item-edit .stock-low { color: var(--danger); font-weight: 600; }
+/* 全局风险高亮（预估页可售天数 / 账龄页超龄）：此前只定义在 .item-edit 作用域，其它页面失效 */
+.stock-low { color: var(--danger); font-weight: 600; }
+/* 明细数量超卖预警：红色描边提示（不阻断保存，审核时后端仍兜底拦截） */
+.item-edit .qty-over { border-color: var(--danger) !important; background: #fff7f7; }
 .item-edit .el-select { width: 100%; }
 .de-add {
   display: flex; align-items: center; gap: 10px;
@@ -602,16 +641,6 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
     }
     .quick-grid .qk-add { color: var(--text-sub); }
 
-    /* ===== 筛选条紧凑化（对齐惠民云单行密集筛选） ===== */
-    .filterbar { gap: 6px; padding: 9px 14px; }
-    .filterbar .w-date { width: 128px !important; }
-    .filterbar .w-key { width: 178px !important; }
-    .filterbar .el-select { width: 150px; }
-    .filterbar .el-select .el-input__inner { font-size: 12px; }
-    .filterbar .finp .el-input__inner { font-size: 12px; }
-    .filterbar .btn { height: 30px; padding: 0 12px; font-size: 12px; }
-    .filterbar .fb-count { margin-left: 2px; white-space: nowrap; font-size: 12px; }
-
     /* ===== 弹窗表单两列布局 ===== */
     .fcols {
       display: grid;
@@ -627,42 +656,34 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
     /* ===== 输入框边框统一加深到 #dcdfe6 ===== */
     .fitem input, .fitem select,
     .ds-row .fi > .fc > input { border-color: #dcdfe6; }
-    .de-grid .fi > input, .de-grid .fi > .fc > input { border-color: #dcdfe6; }    /* ===== 单据列表：类型页签 + 复选框列 ===== */
-    .typebar { display: flex; align-items: center; gap: 22px; padding: 0 16px; height: 38px; border-bottom: 1px solid var(--border-light); }
-    .typebar .tbt { font-size: 13px; color: var(--text-sub); cursor: pointer; padding: 3px 0; border-bottom: 2px solid transparent; }
+    .de-grid .fi > input, .de-grid .fi > .fc > input { border-color: #dcdfe6; }
+    /* ===== 单据列表：类型页签 + 复选框列 ===== */
+    .typebar { display: flex; align-items: center; gap: 18px; padding: 0 16px; height: 34px; border-bottom: 1px solid var(--border-light); }
+    .typebar .tbt { font-size: 12.5px; color: var(--text-sub); cursor: pointer; padding: 3px 0; border-bottom: 2px solid transparent; }
     .typebar .tbt:hover { color: var(--brand); }
     .typebar .tbt.on { color: var(--brand); border-bottom-color: var(--brand); font-weight: 500; }
     .tbl th.ck, .tbl td.ck { width: 34px; text-align: center; padding-left: 6px; padding-right: 4px; }
-    .tbl td.ck input, .tbl th.ck input { cursor: pointer; accent-color: var(--brand); width: 14px; height: 14px; }    /* 单据列表：固定表格布局，避免列被压缩 */
+    .tbl td.ck input, .tbl th.ck input { cursor: pointer; accent-color: var(--brand); width: 14px; height: 14px; }
+    /* 单据列表：固定表格布局，避免列被压缩 */
     .tbl-list { table-layout: fixed; }
     .tbl-list td, .tbl-list th { overflow: hidden; }
-    .tbl-list td.nowrap, .tbl-list th { white-space: nowrap; }    /* 筛选条：类型页签并入同一行，控件再压缩 */
-    .typebar { height: 34px; gap: 18px; }
-    .typebar .tbt { font-size: 12.5px; }
-    .filterbar { gap: 5px; padding: 8px 12px; flex-wrap: nowrap; overflow-x: auto; }
-    .filterbar .w-date { width: 116px !important; }
-    .filterbar .w-key { width: 148px !important; }
-    .filterbar .el-select { width: 118px; }
-    .filterbar .btn { padding: 0 9px; font-size: 12px; }
-    .filterbar .fb-count { font-size: 12px; }    /* 筛选条：日期框与状态下拉补偿宽度 */
-    .filterbar .el-date-editor.el-input, .filterbar .el-date-editor { width: 132px !important; }
-    .filterbar .el-select:first-of-type { width: 104px; }
-    .filterbar .el-input__wrapper { padding: 0 8px; }
-    .filterbar .el-input__inner { font-size: 12px; }    /* 筛选条：控件禁止被 flex 压缩（否则日期框被压到 99px） */
+    .tbl-list td.nowrap, .tbl-list th { white-space: nowrap; }
+    /* ===== 筛选条紧凑化（此前四轮覆盖叠罗汉，现合并为最终值一块） ===== */
+    .filterbar { gap: 4px; padding: 7px 10px; flex-wrap: nowrap; overflow-x: auto; }
+    /* 窄屏恢复换行，不再强制横向滚动 */
+    @media (max-width: 900px) { .filterbar { flex-wrap: wrap; overflow-x: visible; } }
     .filterbar > * { flex: 0 0 auto; }
     .filterbar > .fb-gap { flex: 1 1 auto; }
-    .filterbar .el-date-editor.el-input { width: 138px !important; }
-    .filterbar .el-select { width: 112px; }
-    .filterbar .finp.w-key { width: 150px !important; }
-    /* ===== 筛选条最终尺寸（1048px 下不横向溢出） ===== */
-    .filterbar { gap: 4px; padding: 7px 10px; }
-    .filterbar .el-date-editor.el-input { width: 124px !important; }
+    .filterbar .w-date { width: 124px !important; }
+    .filterbar .w-key { width: 128px !important; }
     .filterbar .el-select { width: 96px; }
-    .filterbar .finp.w-key { width: 128px !important; }
-    .filterbar .btn { padding: 0 8px; font-size: 12px; height: 30px; }
+    .filterbar .el-select:first-of-type { width: 104px; }
+    .filterbar .el-select .el-input__inner,
+    .filterbar .finp .el-input__inner { font-size: 12px; }
+    .filterbar .el-input__wrapper { padding: 0 8px; }
+    .filterbar .btn { height: 30px; padding: 0 8px; font-size: 12px; }
     .filterbar .btn.icon-only { padding: 0 7px; }
-    .btn.icon-only { padding: 0 7px; }
-    .filterbar .fb-count { font-size: 12px; white-space: nowrap; }
+    .filterbar .fb-count { margin-left: 2px; white-space: nowrap; font-size: 12px; }
 
     /* ===== daterange 宽度放行（不能被 filterbar 的通用宽度规则压窄） ===== */
     .filterbar .el-date-editor--daterange,
@@ -692,7 +713,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
   padding: 20px;
 }
 .login-card {
-  width: 380px; background: #fff; border-radius: 8px; padding: 32px 32px 26px;
+  width: min(380px, 100%); background: #fff; border-radius: 8px; padding: 32px 32px 26px;
   box-shadow: 0 12px 40px rgba(0,0,0,.22);
 }
 .login-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
@@ -716,6 +737,15 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .role-tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; line-height: 18px; }
 .role-tag.admin { background: #fff0e6; color: var(--brand); border: 1px solid #ffd7bd; }
 .role-tag.clerk { background: #eef3f8; color: #5b7286; border: 1px solid #dbe4ec; }
+
+/* ===== 打印：Ctrl+P 直接打正文，顶栏/筛选条/分页/操作列不上纸 ===== */
+@media print {
+  .topnav, .tipbar, .filterbar, .toolbar, .pager, .row-actions, .typebar, .hd-right { display: none !important; }
+  .shell, .body { height: auto !important; overflow: visible !important; }
+  .content { padding: 0 !important; }
+  .page-card, .card, .chart-card { box-shadow: none !important; border: 1px solid #ddd; }
+  body { background: #fff; }
+}
 </style>
 </head>
 <body>

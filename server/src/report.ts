@@ -5,6 +5,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { validBizDate } from './db';
 
 type Value = string | number | null;
 
@@ -43,11 +44,13 @@ interface CustomerReportRow {
 }
 
 /** 报表日期参数校验：脏日期（'2026/10/1'）会让字符串比较整体失效，报表静默漏计。
- *  合法值直接返回；非法值回落默认区间（本月）。 */
+ *  合法值直接返回；非法值回落默认区间（本月）。
+ *  升级：原来只验格式（'2026-02-30' 这类不存在的日历日能通过），现复用 validBizDate 做真实日历校验。 */
 function safeRange(req: Request): { from: string; to: string } {
   const { from, to } = rangeOf(req);
-  const ok = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-  return { from: ok(from) ? from : rangeOf({ query: {} } as Request).from, to: ok(to) ? to : rangeOf({ query: {} } as Request).to };
+  const fallback = rangeOf({ query: {} } as Request);
+  const ok = (s: string) => !validBizDate(s);
+  return { from: ok(from) ? from : fallback.from, to: ok(to) ? to : fallback.to };
 }
 
 function rangeOf(req: Request): { from: string; to: string } {

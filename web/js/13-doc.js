@@ -15,7 +15,7 @@ const DocPage = {
     const status = ref('');
     const kw = ref('');
     const page = ref(1);
-    const rows = ref(20);
+    const rows = ref(pageSizeOf('doc', 20));
     const list = ref([]);
     const total = ref(0);
     /** 各状态单据数（服务端按当前筛选统计，不受状态页签与分页影响），用于状态页签徽标 */
@@ -53,7 +53,7 @@ const DocPage = {
       for (let p = 1; p <= n; p++) if (p === 1 || p === n || Math.abs(p - c) <= 2) arr.push(p);
       return arr;
     });
-    function onRowsChange(e) { rows.value = Number(e.target.value) || 20; page.value = 1; load(); }
+    function onRowsChange(e) { rows.value = Number(e.target.value) || 20; pageSizeSave('doc', rows.value); page.value = 1; load(); }
 
     /* 列表页底部合计 */
     const sumQty = computed(() => list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0));
@@ -61,8 +61,13 @@ const DocPage = {
     const sumPaid = computed(() => list.value.reduce((s, d) => s + (Number(d.paidAmount) || 0) + (Number(d.deposit) || 0), 0));
     /** 表尾合计行的前置单元格数：单号+日期+商品摘要+备注 = 4，另加可选的往来单位/仓库列 */
     const sumCols = computed(() => 4 + (meta.value.partner ? 1 : 0) + (meta.value.warehouse ? 1 : 0) + (meta.value.toWarehouse ? 1 : 0));
+    /* 结算类单据显示「已收/已付」列（含订金）；报价/订单无收付语义不显示 */
+    const showPaid = computed(() => Boolean(meta.value.partner) && SETTLE_TYPES.has(activeType.value));
+    const listCols = computed(() => sumCols.value + 4 + (showPaid.value ? 1 : 0));
 
+    const loadGuard = seqGuard();
     async function load() {
+      const my = loadGuard.begin();
       try {
         const r = await api.get('/doc/list', {
           teamId: store.teamId, type: activeType.value, status: status.value,
@@ -70,6 +75,7 @@ const DocPage = {
           from: filterFrom.value || '', to: filterTo.value || '',
           partnerId: filterPartner.value || '',
         });
+        if (!loadGuard.isCurrent(my)) return;
         list.value = r.rows; total.value = r.total;
         statusCount.value = r.statusCount || { draft: 0, pending: 0, audit: 0, void: 0 };
         // 翻页/筛选后清空复选：否则「已选 N 单」含已不可见的行
@@ -77,7 +83,7 @@ const DocPage = {
         // 汇总视图停留在当前页时，明细需随筛选/翻页同步刷新
         if (viewTab.value === 'summary') loadFlatItems();
       } catch (e) {
-        toast('单据列表加载失败：' + e.message, 'error');
+        if (loadGuard.isCurrent(my)) toast('单据列表加载失败：' + e.message, 'error');
       }
     }
     function resetFilter() {
@@ -90,8 +96,15 @@ const DocPage = {
       if (t && DOC_META[t] && grp.types.includes(t) && t !== activeType.value) activeType.value = t;
     });
     onMounted(() => {
+      // 账龄页「看单据」带 ?partnerId= 过滤：select 的 option 值是数字 id
+      if (route.q.partnerId) filterPartner.value = Number(route.q.partnerId) || null;
       load();
-      if (route.q.new) openEditor(null);
+      if (route.q.new) {
+        openEditor(null);
+        // 消费掉 ?new=1：否则保存/返回后 F5 会再次弹出空白编辑器打断当前列表
+        const h = location.hash.replace(/([?&])new=1&?/, '$1').replace(/[?&]$/, '');
+        history.replaceState(null, '', location.pathname + location.search + h);
+      }
     });
 
     /** 打开整页开单编辑器：row 为空 = 新增 */
@@ -133,12 +146,15 @@ const DocPage = {
       catch (e) { toast(e.message, 'error'); }
       finally { busyId.value = null; }
     }
-    /** 批量提交当前页草稿 */
+    /** 批量提交当前页草稿（勾选了就只提交勾选的，否则当前页全部草稿） */
     async function submitAllDrafts() {
       if (busyId.value) return;
-      const ids = list.value.filter((d) => d.status === 'draft').map((d) => d.id);
-      if (!ids.length) return toast('当前页没有草稿', 'warning');
-      if (!(await confirmBox(`将当前页 ${ids.length} 张草稿全部提交审核？`))) return;
+      const pool = selected.value.length
+        ? list.value.filter((d) => selected.value.includes(d.id) && d.status === 'draft')
+        : list.value.filter((d) => d.status === 'draft');
+      const ids = pool.map((d) => d.id);
+      if (!ids.length) return toast(selected.value.length ? '勾选的单据中没有草稿' : '当前页没有草稿', 'warning');
+      if (!(await confirmBox(`将 ${ids.length} 张草稿提交审核？`))) return;
       // confirmBox 是 async 弹窗，等待确认期间可再次点击 → 需要防重入
       busyId.value = 'batch';
       try {
@@ -148,11 +164,44 @@ const DocPage = {
       } catch (e) { toast(e.message, 'error'); }
       finally { busyId.value = null; }
     }
+    /** 批量审核勾选的单据（草稿/待审）：逐张调用既有审核接口，失败的单据收集后汇总提示 */
+    async function auditSelected() {
+      if (busyId.value) return;
+      const pool = list.value.filter((d) => selected.value.includes(d.id) && (d.status === 'draft' || d.status === 'pending'));
+      if (!pool.length) return toast('请先勾选要审核的草稿/待审单据', 'warning');
+      if (!(await confirmBox(`审核 ${pool.length} 张单据？审核后立即过账写入库存与往来余额。`))) return;
+      busyId.value = 'batch';
+      const failed = [];
+      let done = 0;
+      try {
+        for (const d of pool) {
+          try {
+            await api.post('/doc/audit', { teamId: store.teamId, id: d.id, auditBy: store.team?.name || '管理员' });
+            done += 1;
+          } catch (e) {
+            failed.push(`${d.billNo}：${e.message}`);
+          }
+        }
+        if (failed.length) toast(`已审核 ${done} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${failed.length > 3 ? ' …' : ''}`, 'warning');
+        else toast(`已审核 ${done} 张`);
+        load();
+      } finally { busyId.value = null; }
+    }
     async function voidDoc(row) {
       if (busyId.value) return;
-      if (!(await confirmBox(`作废「${row.billNo}」将反向冲回库存与往来余额，确认作废？`))) return;
+      let reason = '';
+      try {
+        const r = await ElMessageBox.prompt(
+          `作废「${row.billNo}」将反向冲回库存与往来余额，确认作废？可填写作废原因留痕。`,
+          '作废单据', {
+            confirmButtonText: '确认作废', cancelButtonText: '取消', type: 'warning',
+            inputPlaceholder: '作废原因（可留空，如：录错价格重开）', inputValue: '',
+          },
+        );
+        reason = (r.value || '').trim();
+      } catch { return; }
       busyId.value = row.id;
-      try { await api.post('/doc/void', { teamId: store.teamId, id: row.id }); toast('已作废'); load(); }
+      try { await api.post('/doc/void', { teamId: store.teamId, id: row.id, reason }); toast('已作废'); load(); }
       catch (e) { toast(e.message, 'error'); }
       finally { busyId.value = null; }
     }
@@ -179,14 +228,19 @@ const DocPage = {
     /** 明细视图数据：展开当前页所有单据的商品行（一次批量取，不再逐单请求） */
     const flatItems = ref([]);
     const flatLoading = ref(false);
+    const flatGuard = seqGuard();
     async function loadFlatItems() {
       if (!list.value.length) { flatItems.value = []; return; }
       flatLoading.value = true;
+      const my = flatGuard.begin();
+      // 发请求前固化当前页：响应回来后若已翻页/切筛选，旧 items 不再拼进新页
+      const curList = list.value;
       try {
-        const ids = list.value.map((d) => d.id);
+        const ids = curList.map((d) => d.id);
         const map = await api.get('/doc/items', { teamId: store.teamId, ids: ids.join(',') });
+        if (!flatGuard.isCurrent(my)) return;
         const rows = [];
-        for (const d of list.value) {
+        for (const d of curList) {
           for (const it of (map?.[String(d.id)] || [])) {
             rows.push({
               docId: d.id, billNo: d.billNo, date: d.date, status: d.status,
@@ -199,10 +253,9 @@ const DocPage = {
         }
         flatItems.value = rows;
       } catch (e) {
-        toast('明细加载失败：' + e.message, 'error');
-        flatItems.value = [];
+        if (flatGuard.isCurrent(my)) { toast('明细加载失败：' + e.message, 'error'); flatItems.value = []; }
       } finally {
-        flatLoading.value = false;
+        if (flatGuard.isCurrent(my)) flatLoading.value = false;
       }
     }
     watch(viewTab, (v) => { if (v === 'summary') loadFlatItems(); });
@@ -230,6 +283,23 @@ const DocPage = {
       }
     }
     function doExport() {
+      // 明细视图导出的是展开后的商品行（按商品对数用），不是单据汇总
+      if (viewTab.value === 'summary') {
+        if (!flatItems.value.length) return toast('没有可导出的明细', 'warning');
+        exportCsv(`${DOC_META[activeType.value].label}明细.csv`, flatItems.value.map((r) => ({
+          billNo: r.billNo, date: (r.date || '').slice(0, 10), partner: r.partnerName || '',
+          prod: r.prodName, spec: r.spec === '—' ? '' : r.spec, unit: r.unit === '—' ? '' : r.unit,
+          qty: r.qty, price: (r.price / 100).toFixed(2), amount: (r.amount / 100).toFixed(2),
+          status: STATUS_TEXT[r.status] || r.status,
+        })), [
+          { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' }, { key: 'partner', label: '往来单位' },
+          { key: 'prod', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
+          { key: 'qty', label: '数量' }, { key: 'price', label: '单价(元)' }, { key: 'amount', label: '金额(元)' },
+          { key: 'status', label: '状态' },
+        ]);
+        return;
+      }
+      if (!list.value.length) return toast('没有可导出的数据', 'warning');
       const head = [
         { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' },
         { key: 'partner', label: '往来单位' }, { key: 'warehouse', label: '仓库' },
@@ -277,8 +347,11 @@ const DocPage = {
       meta, partners, busyId,
       load, openEditor, closeEditor,
       viewTab, selected, selAll, toggleAll, toggleOne, flatItems, flatLoading, loadFlatItems,
-      audit, submitDoc, rejectDoc, submitAllDrafts, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
-      filterFrom, filterTo, filterPartner, resetFilter, sumQty, sumAmount, sumPaid, sumCols,
+      flatSumQty: computed(() => flatItems.value.reduce((s, r) => s + (Number(r.qty) || 0), 0)),
+      flatSumAmount: computed(() => flatItems.value.reduce((s, r) => s + (Number(r.amount) || 0), 0)),
+      audit, submitDoc, rejectDoc, submitAllDrafts, auditSelected, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
+      fmtQty,
+      filterFrom, filterTo, filterPartner, resetFilter, sumQty, sumAmount, sumPaid, sumCols, showPaid, listCols,
       editorOpen, editorEditId, impOpen,
       fmtMoney, partnerLabel, whLabel, prodLabel, store, STATUS_TEXT, DOC_META, specOf, unitOf,
     };
@@ -317,9 +390,10 @@ const DocPage = {
       <button class="btn icon-only" title="重置" @click="resetFilter"><el-icon><RefreshLeft/></el-icon></button>
       <button class="btn icon-only" title="刷新" @click="load()"><el-icon><Refresh/></el-icon></button>
       <span class="fb-gap"></span>
-      <span class="muted fb-count">共 {{ total }} 条</span>
+      <span class="muted fb-count">共 {{ total }} 条<template v-if="selected.length"> · 已选 {{ selected.length }}</template></span>
       <button class="btn" @click="impOpen = true"><el-icon><Upload/></el-icon> Excel 导入</button>
       <button class="btn" @click="submitAllDrafts">批量提交</button>
+      <button class="btn" title="审核勾选的草稿/待审单据（勾选后可用）" :disabled="!selected.length" @click="auditSelected">批量审核</button>
       <button class="btn primary" @click="openEditor(null)">＋ 新增</button>
     </div>
     <div class="tbl-wrap">
@@ -335,7 +409,7 @@ const DocPage = {
           <th style="width:70px">状态</th>
         </tr></thead>
         <tbody>
-          <tr v-for="(r, i) in flatItems" :key="i">
+          <tr v-for="(r, i) in flatItems" :key="r.docId + '-' + i">
             <td><span class="billno link" @click="viewerId = r.docId">{{ r.billNo }}</span></td>
             <td nowrap style="width:96px">{{ (r.date || '').slice(0, 10) }}</td>
             <td><span class="ellip d-ib" :title="r.prodName">{{ r.prodName || '—' }}</span></td>
@@ -345,9 +419,15 @@ const DocPage = {
             <td class="r money">{{ fmtMoney(r.price) }}</td>
             <td class="r money">{{ fmtMoney(r.amount) }}</td>
             <td v-if="meta.partner"><span class="ellip d-ib" :title="r.partnerName">{{ r.partnerName || '—' }}</span></td>
-            <td><span class="tag" :class="'st-' + r.status">{{ STATUS_TEXT[r.status] || r.status }}</span></td>
+            <td><span class="tag" :class="'tag-' + r.status">{{ STATUS_TEXT[r.status] || r.status }}</span></td>
           </tr>
           <tr v-if="!flatItems.length"><td :colspan="meta.partner ? 10 : 9"><div class="empty">{{ flatLoading ? '明细加载中…' : '暂无明细' }}</div></td></tr>
+          <tr v-if="flatItems.length" class="sum-row">
+            <td colspan="5" style="text-align:right">本页明细合计</td>
+            <td class="r">{{ fmtQty(flatSumQty) }}</td>
+            <td class="r money">{{ fmtMoney(flatSumAmount) }}</td>
+            <td v-if="meta.partner"></td><td></td>
+          </tr>
         </tbody>
       </table>
 
@@ -361,10 +441,11 @@ const DocPage = {
           <th v-if="meta.toWarehouse" style="width:9%">调往</th>
           <th style="width:19%">商品摘要</th><th style="width:10%">备注</th>
           <th class="r" style="width:50px">数量</th><th class="r" style="width:9%">金额</th>
+          <th v-if="showPaid" class="r" style="width:9%" title="已收/已付金额（含抵扣订金）">{{ activeType === 'stockin' || activeType === 'pin' ? '已付' : '已收' }}</th>
           <th style="width:62px">状态</th><th style="width:238px">操作</th>
         </tr></thead>
         <tbody>
-          <tr v-if="!list.length"><td :colspan="meta.toWarehouse ? 12 : 11"><div class="empty">暂无单据</div></td></tr>
+          <tr v-if="!list.length"><td :colspan="listCols"><div class="empty">暂无单据</div></td></tr>
           <tr v-for="d in list" :key="d.id">
             <td class="ck"><input type="checkbox" :checked="selected.includes(d.id)" @change="toggleOne(d.id, $event)"/></td>
             <td><span class="billno link" @click="viewerId = d.id">{{ d.billNo }}</span><div v-if="d.refOrderId" class="muted" style="font-size:11px">源单 #{{ d.refOrderId }}</div></td>
@@ -378,6 +459,7 @@ const DocPage = {
             <td class="muted ellip" :title="d.remark || ''">{{ d.remark || '—' }}</td>
             <td class="r" nowrap>{{ d.totalQty }}</td>
             <td class="r money" nowrap>{{ fmtMoney(d.totalAmount) }}</td>
+            <td v-if="showPaid" class="r money muted" nowrap :title="((Number(d.paidAmount)||0) + (Number(d.deposit)||0)) < (d.totalAmount||0) ? '未结清' : '已结清'">{{ fmtMoney((Number(d.paidAmount)||0) + (Number(d.deposit)||0)) }}</td>
             <td><span :class="'tag tag-' + d.status">{{ STATUS_TEXT[d.status] }}</span></td>
             <td>
               <!--
@@ -440,7 +522,8 @@ const DocPage = {
             <td :colspan="sumCols">本页合计</td>
             <td class="r">{{ sumQty }}</td>
             <td class="r money">{{ fmtMoney(sumAmount) }}</td>
-            <td></td><td></td>
+            <td v-if="showPaid" class="r money" title="本页单据的已收/已付合计（含订金）">{{ fmtMoney(sumPaid) }}</td>
+            <td :colspan="showPaid ? 1 : 2"></td>
           </tr>
         </tfoot>
       </table>

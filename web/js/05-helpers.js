@@ -54,3 +54,9 @@ const clerkLabel = (id) => (id ? (byId(store.clerks, id)?.name ?? `#${id}`) : nu
 const whLabel = (id) => (id ? (byId(store.warehouses, id)?.name ?? `仓库#${id}`) : null);
 const catLabel = (id) => (id ? (byId(store.cats, id)?.name ?? '') : '');
 
+/* 账龄分桶共享色板（工作台与账龄页统一）：品牌橙由深到浅表达账龄递进，
+   超 720 天一档用警示红。08-dashboard 与 22-aging 共用，改色只改这一处 */
+const AGING_COLORS = ['#f26f21', '#ff8a3d', '#ffa864', '#ffc08a', '#ffd9bd', '#ffe7d6', '#e85656'];
+const AGING_LABELS = ['30天内', '60天内', '90天内', '180天内', '360天内', '720天内', '超过720天'];
+const AGING_KEYS = ['d30', 'd60', 'd90', 'd180', 'd360', 'd720', 'over720'];
+

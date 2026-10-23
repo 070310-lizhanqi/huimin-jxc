@@ -14,8 +14,13 @@ const HelpPage = {
   },
   template: `
   <div>
-    <div class="toolbar">
-      <button class="btn" v-for="t in tabs" :key="t.key" :class="{primary: tab===t.key}" @click="tab=t.key">{{ t.label }}</button>
+    <div class="page-card">
+      <div class="page-head">
+        <div class="hd-title">使用帮助</div>
+        <div class="tabs">
+          <span class="tb" v-for="t in tabs" :key="t.key" :class="{ on: tab === t.key }" @click="tab = t.key">{{ t.label }}</span>
+        </div>
+      </div>
     </div>
 
     <div class="card" v-if="tab==='quick'" style="padding:20px 24px;max-width:860px">

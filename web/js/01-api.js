@@ -12,7 +12,10 @@ function setToken(t) {
   if (t) localStorage.setItem(TOKEN_KEY, t);
   else localStorage.removeItem(TOKEN_KEY);
 }
-function logout() {
+async function logout() {
+  // 服务端吊销当前令牌：单清 localStorage 只是「客户端忘记」，
+  // 已导出的令牌在过期前仍可调用接口（共用电脑/令牌泄漏场景）
+  try { if (auth.token) await fetch('/api/auth/logout', { method: 'POST', headers: { authorization: 'Bearer ' + auth.token } }); } catch { /* 网络失败也要完成本地清理 */ }
   setToken('');
   auth.user = null; auth.team = null;
   store.loaded = false;

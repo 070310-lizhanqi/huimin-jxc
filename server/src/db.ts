@@ -300,6 +300,10 @@ export function migrate(db: DB): void {
   addColumn('doc_item', 'postQty', 'REAL');
   // Excel 导入：外部原始单号（用于重复导入幂等跳过）
   addColumn('doc', 'srcBillNo', 'TEXT');
+  // 作废留痕：账务系统作废应可追溯（谁在何时因何作废）
+  addColumn('doc', 'voidAt', 'TEXT');
+  addColumn('doc', 'voidReason', 'TEXT');
+  addColumn('doc', 'voidUserId', 'INTEGER');
   db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo)`);
   // 登录认证：密码哈希（scrypt）、创建时间与令牌版本（改密/删号后吊销旧令牌）
   addColumn('user', 'password', 'TEXT');

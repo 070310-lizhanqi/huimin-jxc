@@ -136,7 +136,9 @@ function mapHeaders(header: string[]): { fieldOf: Array<string | null>; headerMa
   return { fieldOf, headerMap };
 }
 
-/** 类型识别关键词 → 单据类型（长词优先避免「采购入库」被「入库」抢先） */
+/** 类型识别关键词 → 单据类型。匹配时按关键词长度降序：
+ *  「销售退货单」必须先命中「销售退货」(4字)而不是「退货单」(3字)，
+ *  否则会被识别成采购退货（pin），库存方向与往来配对整单识别反 */
 const TYPE_KEYWORDS: Array<[string, string]> = [
   ['采购入库', 'stockin'],
   ['入库单', 'stockin'],
@@ -150,6 +152,7 @@ const TYPE_KEYWORDS: Array<[string, string]> = [
   ['采购订单', 'porder'],
   ['销售订单', 'sorder'],
 ];
+TYPE_KEYWORDS.sort((a, b) => b[0].length - a[0].length);
 function detectTypeByText(text: string): string | null {
   const t = text.replace(/\s+/g, '');
   for (const [kw, type] of TYPE_KEYWORDS) {
@@ -160,13 +163,13 @@ function detectTypeByText(text: string): string | null {
   return null;
 }
 
-/** 数量解析：去千分位/单位残留，容错「1,234.5」「3件」 */
+/** 数量解析：去千分位/单位残留，容错「1,234.5」「3件」；归一到 4 位小数与 docs.ts roundQty 同口径 */
 function parseQty(raw: string): number | null {
   const s = String(raw ?? '').replace(/[,\s，]/g, '').replace(/[^0-9.\-]/g, '');
   if (s === '' || s === '-' || s === '.') return null;
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
-  return n;
+  return Math.round((n + Number.EPSILON) * 10000) / 10000;
 }
 
 /** 金额解析：去货币符号/千分位 → 分（整数） */
@@ -231,6 +234,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       const dryRun = String(req.query.dryRun ?? '') === '1';
       const autoCreate = String(req.query.autoCreate ?? '') === '1';
       const body = req.body as unknown;
+      if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return res.status(400).json({ error: '请上传文件内容（xlsx 或 CSV）' });
       }
@@ -396,6 +400,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
 
         // 往来单位匹配
         let partnerId: number | null = null;
+        let partnerNewlyCreated = false;
         if (partnerName) {
           const hit = getPartner(isCus ? 'cus' : 'ven', partnerName);
           if (hit) partnerId = hit.id;
@@ -413,6 +418,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
                   .run(teamId, partnerName).lastInsertRowid,
               );
             }
+            partnerNewlyCreated = true;
             warnings.push(`往来单位「${partnerName}」不存在，已自动建档`);
           } else if (autoCreate && dryRun) {
             warnings.push(`往来单位「${partnerName}」不存在，导入时将自动建档`);
@@ -432,9 +438,12 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           });
           continue;
         }
-        // 供应商/客户建档若发生在落库事务之前、后续落库失败，会残留孤儿档案——
-        // 收集本单自动建档的 id，落库失败 ROLLBACK 后一并清理。
-        pendingPartnerCreates.push({ table: isCus ? 'customer' : 'vendor', id: partnerId });
+        // 本单自动建档的档案在落库失败 ROLLBACK 后清理（只清本次新建的）：
+        // 误把「匹配到的既有档案」也记进来，回滚会把历史导入建的、
+        // 已被真实单据引用的往来单位连档删掉，历史单据 partnerId 悬挂
+        if (partnerNewlyCreated) {
+          pendingPartnerCreates.push({ table: isCus ? 'customer' : 'vendor', id: partnerId });
+        }
 
         // 仓库：列值匹配 > 第一个仓库
         let warehouseId: number | null = null;
@@ -568,7 +577,11 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           for (const b of bills) {
             const ext = b as BillOut & { clerkId?: number | null; remarks?: string };
             const totalQty = Math.round(b.items.reduce((s, i) => s + i.qty, 0) * 10000) / 10000;
-            const totalAmount = b.items.reduce((s, i) => s + Math.round(i.qty * i.price), 0);
+            // 行金额/表头总额与 docs.ts lineAmount 同口径（qty 万分整数 × 单价分 ÷ 10000）：
+            // 浮点 Math.round(qty*price) 在 4 位小数数量上可差数分，编辑重存后金额跳变
+            const lineAmt = (qty: number, priceCents: number): number =>
+              Math.round((Math.round((Number(qty) || 0) * 10000) * (Math.round(Number(priceCents) || 0))) / 10000);
+            const totalAmount = b.items.reduce((s, i) => s + lineAmt(i.qty, i.price), 0);
             const billNo = nextBillNoForImport(db, teamId, b.type);
             const remarkParts = ['Excel导入'];
             if (ext.remarks) remarkParts.push(ext.remarks);
@@ -588,7 +601,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             );
             const docId = Number(info.lastInsertRowid);
             for (const it of b.items) {
-              insItem.run(docId, it.productId, it.qty, it.price, Math.round(it.qty * it.price), null);
+              insItem.run(docId, it.productId, it.qty, it.price, lineAmt(it.qty, it.price), null);
             }
             created.push({ id: docId, billNo, type: b.type, srcBillNo: b.srcBillNo, itemCount: b.items.length });
           }
@@ -653,10 +666,18 @@ function nextBillNoForImport(db: DatabaseSync, teamId: number, type: string): st
   const key = `${teamId}:${prefix}:${datePart}`;
   // 单语句 upsert + RETURNING：与 docs.ts nextBillNo 一致，
   // 避免两个并发 import 在「upsert + SELECT」两语句之间拿到错乱 seq。
-  const row = db.prepare(
-    `INSERT INTO bill_seq (k, seq) VALUES (?, 1)
-     ON CONFLICT(k) DO UPDATE SET seq = seq + 1
-     RETURNING seq`,
-  ).get(key) as { seq: number };
+  // 语句按 key 缓存：一次导入几百单不再逐单重新编译 SQL
+  let stmt = seqStmtCache.get(key);
+  if (!stmt) {
+    stmt = db.prepare(
+      `INSERT INTO bill_seq (k, seq) VALUES (?, 1)
+       ON CONFLICT(k) DO UPDATE SET seq = seq + 1
+       RETURNING seq`,
+    );
+    seqStmtCache.set(key, stmt);
+  }
+  const row = stmt.get(key) as { seq: number };
   return `${prefix}${datePart}${String(row.seq).padStart(4, '0')}`;
 }
+/** bill_seq upsert 语句缓存（key = teamId:prefix:datePart，数量有限可常驻） */
+const seqStmtCache = new Map<string, ReturnType<DatabaseSync['prepare']>>();

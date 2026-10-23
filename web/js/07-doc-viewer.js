@@ -38,7 +38,7 @@ const DocViewer = {
       const conf = store.print || {};
       const headHtml = (conf.company || conf.address || conf.phone)
         ? `<div class="head">
-             ${conf.showLogo ? '<span class="logo">橙</span>' : ''}
+             ${conf.showLogo ? '<span class="logo">惠</span>' : ''}
              <div>
                ${conf.company ? `<div class="co">${escapeHtml(conf.company)}</div>` : ''}
                <div class="co-sub">${escapeHtml(conf.address || '')}${conf.phone ? (conf.address ? ' · ' : '') + escapeHtml(conf.phone) : ''}</div>
@@ -84,12 +84,16 @@ const DocViewer = {
         <table class="items"><thead><tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th><th>批次</th><th>调往仓库</th><th>备注</th></tr></thead>
         <tbody>${items}</tbody></table>
         <div class="total">合计数量：${escapeHtml(String(d.doc.totalQty))}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>
+        <div style="margin-top:4px;text-align:right;font-size:12px;color:#555">金额大写：${escapeHtml(rmbUpper(d.doc.totalAmount))}</div>
         ${d.doc.remark ? `<div style="margin-top:8px">备注：${escapeHtml(d.doc.remark)}</div>` : ''}
         ${conf.footer ? `<div style="margin-top:14px;text-align:center;color:#888;font-size:12px">${escapeHtml(conf.footer)}</div>` : ''}
         <div class="foot"><span>制单人：____________</span><span>审核人：____________</span><span>签收人：____________</span></div>
-        <script>window.onload = () => window.print();<\/script>
       </body></html>`);
       w.document.close();
+      // 自动打印由父窗口触发：打印页 CSP 是 script-src 'none'（内联脚本会被拦，
+      // 此前 window.onload=print 永不执行，用户每次都得手动 Ctrl+P）
+      w.focus();
+      w.print();
     }
     function escapeHtml(s) {
       return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -116,6 +120,10 @@ const DocViewer = {
           <div class="fitem"><label>仓库</label><span>{{ whLabel(data.doc.warehouseId) || '—' }}</span></div>
           <div class="fitem"><label>业务员</label><span>{{ clerkLabel(data.doc.clerkId) || '—' }}</span></div>
           <div class="fitem"><label>状态</label><span :class="'tag tag-' + data.doc.status">{{ STATUS_TEXT[data.doc.status] || data.doc.status }}</span></div>
+          <template v-if="data.doc.status === 'void' && (data.doc.voidAt || data.doc.voidReason)">
+            <div class="fitem" v-if="data.doc.voidAt"><label>作废时间</label><span class="muted">{{ String(data.doc.voidAt).slice(0, 19).replace('T', ' ') }}</span></div>
+            <div class="fitem" v-if="data.doc.voidReason"><label>作废原因</label><span class="muted">{{ data.doc.voidReason }}</span></div>
+          </template>
           <div class="fitem" v-if="data.doc.refOrderId"><label>源订单</label><span class="muted">单据 #{{ data.doc.refOrderId }}</span></div>
           <div class="fitem" v-if="data.doc.receiverName"><label>收件人</label><span>{{ data.doc.receiverName }}</span></div>
           <div class="fitem" v-if="data.doc.receiverMobile"><label>收件手机</label><span>{{ data.doc.receiverMobile }}</span></div>
@@ -146,12 +154,12 @@ const DocViewer = {
         <div class="tfoot-bar">
           <span>合计数量 <b>{{ data.doc.totalQty }}</b></span>
           <span>商品金额 <b class="money">{{ fmtMoney((data.doc.totalAmount || 0) + (data.doc.discount || 0)) }}</b></span>
-          <span v-if="(data.doc.discount||0) > 0">折扣 <b class="money">-{{ fmtMoney(data.doc.discount || 0) }}</b></span>
+          <span v-if="(data.doc.discount||0) > 0">折扣 <b class="money">{{ fmtMoney(data.doc.discount || 0) }}</b></span>
           <span>应收金额 <b class="money" style="color:var(--brand)">{{ fmtMoney(data.doc.totalAmount) }}</b></span>
           <span v-if="oweOf > 0">本次欠款 <b class="money" style="color:#f56c6c">{{ fmtMoney(oweOf) }}</b></span>
         </div>
       </div>
-      <div class="modal-body" v-else style="text-align:center;padding:50px"><span class="muted">加载中…</span></div>
+      <div class="modal-body" v-else><sk-table :rows="6" :cols="4"/></div>
       <div class="modal-foot">
         <button class="btn" v-if="data" @click="printDoc"><el-icon><Printer/></el-icon> 打印</button>
         <span style="flex:1"></span>

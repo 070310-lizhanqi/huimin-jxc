@@ -81,9 +81,24 @@ export function verifyToken(token: string): AuthUser | null {
       AuthUser & { exp?: number };
     if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
     if (!payload.userId || !payload.teamId) return null;
+    // 退出登录黑名单：单实例部署用进程内表即可，条目随令牌过期自动失效
+    if (revoked.has(`${payload.userId}:${payload.exp}`)) return null;
     return { userId: payload.userId, teamId: payload.teamId, role: payload.role, name: payload.name, ver: payload.ver };
   } catch {
     return null;
+  }
+}
+
+/** 已吊销令牌表：key = userId:exp（同一用户签发的令牌 exp 各不相同，足以唯一标识） */
+const revoked = new Set<number | string>();
+/** 黑名单清理：每次吊销时顺手清掉已过期的条目，防止长期运行内存增长 */
+function revokeToken(payload: { userId: number; exp?: number }): void {
+  if (!payload.exp) return;
+  revoked.add(`${payload.userId}:${payload.exp}`);
+  const now = Math.floor(Date.now() / 1000);
+  for (const k of revoked) {
+    const exp = Number(String(k).split(':')[1]);
+    if (Number.isFinite(exp) && exp < now) revoked.delete(k);
   }
 }
 
@@ -377,6 +392,21 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     clearFails(failKey);
     return res.json({ ok: true, token: issueToken(user), user, team });
   }));
+
+  /** 退出登录：吊销当前令牌（此前只是客户端删 token，令牌在过期前仍可继续调用接口） */
+  router.post('/auth/logout', requireAuth, (req, res) => {
+    const h = req.headers.authorization;
+    const token = h && h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    const dot = token.lastIndexOf('.');
+    if (dot > 0) {
+      try {
+        const payload = JSON.parse(Buffer.from(token.slice(0, dot).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) as
+          { userId?: number; exp?: number };
+        if (payload.userId && payload.exp) revokeToken(payload as { userId: number; exp: number });
+      } catch { /* 令牌格式异常时无需吊销 */ }
+    }
+    return res.json({ ok: true });
+  });
 
   /** 当前登录信息（前端启动时校验令牌是否还有效） */
   router.get('/auth/me', requireAuth, (req, res) => {

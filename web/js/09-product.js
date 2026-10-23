@@ -73,10 +73,12 @@ const ProductPage = {
     }
 
     /* ---- 批量导入 ---- */
-    const imp = reactive({ open: false, text: '', result: null });
+    const imp = reactive({ open: false, text: '', result: null, busy: false });
     const IMP_COLS = ['名称', '单位', '分类', '条码', '规格', '进价', '售价', '零售价', '批发价', '安全库存', '备注'];
     const IMP_MAP = { 名称: 'name', 单位: 'unit', 分类: 'catName', 条码: 'barcode', 规格: 'spec', 进价: 'purchasePrice', 售价: 'salePrice', 零售价: 'retailPrice', 批发价: 'wholePrice', 安全库存: 'lowQty', 备注: 'remark' };
-    const impRows = computed(() => {
+    /* 预览行数上限：粘贴 1 万行直接渲染 1 万个 tr 会冻结 UI；全量数据仍在导入时提交 */
+    const IMP_PREVIEW_MAX = 200;
+    const impRowsAll = computed(() => {
       const out = [];
       const lines = imp.text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       for (const [i, line] of lines.entries()) {
@@ -91,15 +93,26 @@ const ProductPage = {
       }
       return out;
     });
+    const impRows = computed(() => impRowsAll.value.slice(0, IMP_PREVIEW_MAX));
+    /* 下载导入模板：带表头 + 2 行示例，用 Excel 打开即填（不要改动第一行表头） */
+    function downloadImpTemplate() {
+      exportCsv('商品导入模板.csv', [
+        { 名称: '可口可乐', 单位: '件', 分类: '饮料', 条码: '6901234567890', 规格: '500ml', 进价: '1.50', 售价: '3.00', 零售价: '3.50', 批发价: '2.80', 安全库存: '24', 备注: '示例行，可删除' },
+        { 名称: '农夫山泉', 单位: '件', 分类: '饮料', 条码: '6909876543210', 规格: '550ml', 进价: '0.90', 售价: '2.00', 零售价: '2.50', 批发价: '1.80', 安全库存: '48', 备注: '' },
+      ], IMP_COLS.map((label) => ({ key: IMP_MAP[label], label })));
+    }
     async function doImport() {
-      const rows = impRows.value.map(({ _line, _err, ...r }) => r);
+      if (imp.busy) return;
+      const rows = impRowsAll.value.map(({ _line, _err, ...r }) => r);
       if (!rows.length) return toast('请先粘贴数据', 'error');
+      imp.busy = true;
       try {
         const r = await api.post('/product/import', { teamId: store.teamId, rows });
         imp.result = r;
         if (r.success > 0) { toast(`成功导入 ${r.success} 个商品`); await loadBase(); load(); }
         if (!r.errors.length) imp.open = false;
       } catch (e) { toast(e.message, 'error'); }
+      finally { imp.busy = false; }
     }
         /** 商品单位候选：优先取单位档案，退化为内置常用单位 */
     const unitOpts = computed(() => {
@@ -108,7 +121,7 @@ const ProductPage = {
       return Array.from(new Set([...fromStore, ...builtin]));
     });
 
-    return { kw, list, loading, editor, load, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, doImport, unitOpts };
+    return { kw, list, loading, editor, load, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, impRowsAll, doImport, unitOpts, IMP_PREVIEW_MAX, downloadImpTemplate };
   },
   template: `
   <div>
@@ -162,7 +175,7 @@ const ProductPage = {
       <div class="modal mid">
         <div class="modal-head"><span class="mt">{{ editor.id ? '编辑商品' : '新建商品' }}</span><span class="x" @click="editor.open = false">×</span></div>
         <div class="modal-body fcols">
-          <div class="fitem"><label>名称</label><input v-model="editor.form.name" placeholder="商品名称"/></div>
+          <div class="fitem"><label><span class="req">*</span>名称</label><input v-model="editor.form.name" placeholder="商品名称"/></div>
           <div class="fitem"><label>规格</label><input v-model="editor.form.spec" placeholder="如 500ml"/></div>
           <div class="fitem"><label>分类</label>
             <div class="fctrl"><el-select v-model="editor.form.catId" filterable clearable placeholder="选择分类">
@@ -192,7 +205,9 @@ const ProductPage = {
     <!-- 批量导入弹窗 -->
     <div class="modal-mask" v-if="imp.open" @click.self="imp.open = false">
       <div class="modal">
-        <div class="modal-head"><span class="mt">商品批量导入</span><span class="x" @click="imp.open = false">×</span></div>
+        <div class="modal-head"><span class="mt">商品批量导入</span>
+          <a class="lnk" style="margin-left:12px;font-size:12.5px" @click="downloadImpTemplate">下载模板</a>
+          <span class="x" @click="imp.open = false">×</span></div>
         <div class="modal-body" v-if="!imp.result">
           <div style="background:#f8f9fb;border-radius:8px;padding:10px 14px;font-size:12.5px;color:var(--muted);line-height:1.8;margin-bottom:10px">
             每行一个商品，列顺序：<b>{{ IMP_COLS.join('、') }}</b>（制表符 Tab 或英文逗号分隔，从 Excel 直接复制粘贴即可）。<br/>
@@ -208,6 +223,9 @@ const ProductPage = {
               </tr>
             </tbody>
           </table>
+          <div class="muted" style="font-size:12px;margin-top:6px" v-if="impRowsAll.length > IMP_PREVIEW_MAX">
+            仅预览前 {{ IMP_PREVIEW_MAX }} 行（共 {{ impRowsAll.length }} 行），全部行都会导入
+          </div>
           </div>
         </div>
         <div class="modal-body" v-else>
@@ -224,7 +242,7 @@ const ProductPage = {
       </div>
       <div class="modal-foot">
         <button class="btn" @click="imp.open = false">关闭</button>
-        <button v-if="!imp.result" class="btn primary" :disabled="!impRows.length" @click="doImport">导入 {{ impRows.length }} 行</button>
+        <button v-if="!imp.result" class="btn primary" :disabled="!impRows.length || imp.busy" @click="doImport">{{ imp.busy ? '导入中…' : '导入 ' + impRowsAll.length + ' 行' }}</button>
         <button v-else class="btn primary" @click="imp.result = null">继续导入</button>
       </div>
     </div>

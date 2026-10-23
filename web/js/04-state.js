@@ -7,7 +7,23 @@ const store = reactive({
   customers: [], vendors: [], clerks: [], accounts: [], units: [],
   print: { company: '', address: '', phone: '', footer: '', showLogo: true },
   loaded: false,
+  /* 低库存角标（顶栏铃铛）：pickTeam 后刷新，数据来自 /stats/dashboard */
+  lowStockCount: 0,
+  lowStockItems: [],
 });
+
+/** 刷新低库存角标：失败静默（角标只是提示，不值得打扰用户） */
+async function refreshLowStock() {
+  if (!store.teamId) return;
+  try {
+    const s = await api.get('/stats/dashboard', { teamId: store.teamId });
+    store.lowStockCount = Number(s.lowStockCount ?? 0);
+    store.lowStockItems = (s.lowStockItems || []).map((r) => ({
+      ...r,
+      prodName: byId(store.products, r.productId)?.name || `#${r.productId}`,
+    }));
+  } catch { /* ignore */ }
+}
 
 async function loadTeams() {
   store.teams = await api.get('/team/list');
@@ -37,6 +53,7 @@ async function pickTeam(id) {
   localStorage.setItem('oc_teamId', String(id));
   await loadBase();
   store.loaded = true;
+  refreshLowStock();
 }
 async function ensureTeam() {
   // 团队隔离后：登录用户只有一个团队，直接用它

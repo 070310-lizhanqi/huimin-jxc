@@ -10,10 +10,12 @@ const AgingPage = {
     const asOf = ref('');
     const chartEl = ref(null);
     let chart = null;
+    /* 请求序守卫：快速切页签时旧响应不得覆盖新数据 */
+    const guard = seqGuard();
 
-    const BUCKET_LABELS = ['30天内', '60天内', '90天内', '180天内', '360天内', '720天内', '超过720天'];
-    const BUCKET_COLORS = ['#5b8ff9', '#8fd16a', '#f6bd16', '#f56c6c', '#6dc8ec', '#5ad8a6', '#ff9845'];
-    const BUCKET_KEYS = ['d30', 'd60', 'd90', 'd180', 'd360', 'd720', 'over720'];
+    const BUCKET_LABELS = AGING_LABELS;
+    const BUCKET_COLORS = AGING_COLORS;
+    const BUCKET_KEYS = AGING_KEYS;
 
     watch(() => route.q.mode, (m) => {
       const next = m === 'ap' ? 'ap' : m === 'stock' ? 'stock' : 'ar';
@@ -22,26 +24,59 @@ const AgingPage = {
 
     async function load() {
       loading.value = true;
+      const my = guard.begin();
       try {
+        let r;
         if (mode.value === 'stock') {
-          const r = await api.get('/report/stock-aging', { teamId: store.teamId });
-          rows.value = r.items || [];
-          totals.value = r.totals || {};
-          asOf.value = r.asOf;
+          r = await api.get('/report/stock-aging', { teamId: store.teamId });
         } else {
-          const r = await api.get('/report/aging', { teamId: store.teamId, mode: mode.value });
-          rows.value = r.rows || [];
-          totals.value = r.totals || {};
-          asOf.value = r.asOf;
+          r = await api.get('/report/aging', { teamId: store.teamId, mode: mode.value });
         }
+        if (!guard.isCurrent(my)) return;
+        rows.value = r.rows || r.items || [];
+        totals.value = r.totals || {};
+        asOf.value = r.asOf;
         await nextTick();
         renderChart();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) {
+        if (guard.isCurrent(my)) toast(e.message, 'error');
+      } finally {
+        if (guard.isCurrent(my)) loading.value = false;
+      }
     }
+
+    /* 本地筛选：关键词 + 点击扇区下钻到该账龄区间 */
+    const kw = ref('');
+    const drillBucket = ref('');
+    function clearDrill() { drillBucket.value = ''; }
+    const shown = computed(() => {
+      let out = rows.value;
+      if (kw.value.trim()) {
+        const k = kw.value.trim().toLowerCase();
+        out = out.filter((r) => String(r.partnerName || r.prodName || '').toLowerCase().includes(k));
+      }
+      if (drillBucket.value && mode.value !== 'stock') {
+        out = out.filter((r) => Number(r[drillBucket.value] || 0) > 0);
+      } else if (drillBucket.value && mode.value === 'stock') {
+        out = out.filter((r) => r.bucket === drillBucket.value);
+      }
+      return out;
+    });
+    /* 合计列排序：默认按接口顺序（金额降序），点击表头切降→升 */
+    const sortDir = ref('');
+    const sorted = computed(() => {
+      const out = [...shown.value];
+      if (sortDir.value === 'desc') out.sort((a, b) => (b.total ?? b.amount ?? 0) - (a.total ?? a.amount ?? 0));
+      else if (sortDir.value === 'asc') out.sort((a, b) => (a.total ?? a.amount ?? 0) - (b.total ?? b.amount ?? 0));
+      return out;
+    });
+    function toggleSort() { sortDir.value = sortDir.value === 'desc' ? 'asc' : sortDir.value === 'asc' ? '' : 'desc'; }
 
     function renderChart() {
       if (!chartEl.value) return;
+      // 切模式不销毁容器，但保险起见复用 getInstanceByDom 查重
+      const existing = echarts.getInstanceByDom(chartEl.value);
+      if (existing && existing !== chart) existing.dispose();
       if (!chart) chart = echarts.init(chartEl.value);
       const t = totals.value || {};
       const data = BUCKET_KEYS.map((k, i) => ({
@@ -53,7 +88,10 @@ const AgingPage = {
         series: [{
           type: 'pie', radius: ['48%', '68%'], center: ['32%', '50%'],
           label: { show: false }, labelLine: { show: false },
-          data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#eceff2' } }],
+          // 点击扇区下钻：表格只显示该区间的行
+          onClick: (p) => { drillBucket.value = p.name === drillBucket.value ? '' : p.name; },
+          // 占位扇区静默：悬停不出「¥1」假数据
+          data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#eceff2' }, silent: true, tooltip: { show: false } }],
         }],
       }, true);
     }
@@ -63,7 +101,7 @@ const AgingPage = {
       if (mode.value === 'stock') {
         return [
           { label: '库存货值', val: fmtMoney(t.total) },
-          { label: '库存数量', val: String(t.qty || 0) },
+          { label: '库存数量', val: fmtQty(t.qty) },
           { label: '30 天内', val: fmtMoney(t.d30) },
           { label: '超过 360 天', val: fmtMoney((t.d360 || 0) + (t.d720 || 0) + (t.over720 || 0)) },
         ];
@@ -76,13 +114,19 @@ const AgingPage = {
       ];
     });
 
+    /* 账龄行跳对应单据列表：AR 看销售出库、AP 看采购入库（带往来单位预筛选） */
+    function goDocs(r) {
+      nav(`#/doc/${mode.value === 'ar' ? 'sale' : 'purchase'}?type=${mode.value === 'ar' ? 'stockout' : 'stockin'}&partnerId=${r.partnerId}`);
+    }
+
     function doExport() {
+      if (!rows.value.length) return toast('没有可导出的数据', 'warning');
       if (mode.value === 'stock') {
         exportCsv(`库存账龄_${asOf.value}.csv`,
           rows.value.map((r) => ({
             商品: r.prodName, 仓库: r.warehouseName || '', 批次: r.batchNo || '',
             数量: r.qty, 首次入库: r.firstDate || '', 库龄天数: r.days,
-            账龄区间: BUCKET_LABELS[BUCKET_KEYS.indexOf(r.bucket)] || '', 金额: fmtMoney(r.amount),
+            账龄区间: BUCKET_LABELS[BUCKET_KEYS.indexOf(r.bucket)] || '', 金额: r.amount == null ? '' : (r.amount / 100).toFixed(2),
           })), [
             { key: '商品', label: '商品' }, { key: '仓库', label: '仓库' }, { key: '批次', label: '批次' },
             { key: '数量', label: '数量' }, { key: '首次入库', label: '首次入库' }, { key: '库龄天数', label: '库龄天数' },
@@ -90,11 +134,12 @@ const AgingPage = {
           ]);
         return;
       }
+      // CSV 金额列输出纯数字（分→元 2 位），不带千分位/破折号，Excel 可直接求和
       exportCsv(`${mode.value === 'ar' ? '客户' : '供应商'}欠款账龄_${asOf.value}.csv`,
         rows.value.map((r) => {
           const o = { 往来单位: r.partnerName, 最早单据: r.oldestDate || '' };
-          BUCKET_KEYS.forEach((k, i) => { o[BUCKET_LABELS[i]] = fmtMoney(r[k]); });
-          o['合计'] = fmtMoney(r.total);
+          BUCKET_KEYS.forEach((k, i) => { o[BUCKET_LABELS[i]] = r[k] == null ? '' : (r[k] / 100).toFixed(2); });
+          o['合计'] = r.total == null ? '' : (r.total / 100).toFixed(2);
           return o;
         }), [
           { key: '往来单位', label: '往来单位' }, { key: '最早单据', label: '最早单据' },
@@ -103,11 +148,19 @@ const AgingPage = {
         ]);
     }
 
-    onMounted(load);
-    onBeforeUnmount(() => { if (chart) { chart.dispose(); chart = null; } });
+    function onResize() { if (chart) chart.resize(); }
+    onMounted(() => {
+      load();
+      window.addEventListener('resize', onResize);
+    });
+    onBeforeUnmount(() => {
+      window.removeEventListener('resize', onResize);
+      if (chart) { chart.dispose(); chart = null; }
+    });
     return {
-      mode, loading, rows, totals, asOf, cards, chartEl, load, doExport, fmtMoney,
+      mode, loading, rows, shown, sorted, totals, asOf, cards, chartEl, load, doExport, fmtMoney, fmtQty,
       BUCKET_LABELS, BUCKET_KEYS, bucketLabel: (k) => BUCKET_LABELS[BUCKET_KEYS.indexOf(k)] || k,
+      kw, drillBucket, clearDrill, sortDir, toggleSort, goDocs,
     };
   },
   template: `
@@ -133,28 +186,39 @@ const AgingPage = {
     </div>
 
     <div class="card" style="margin:12px 0">
-      <div class="card-title" style="margin-bottom:8px">账龄分布（元）</div>
+      <div class="card-title" style="margin-bottom:8px">
+        账龄分布（元）
+        <a v-if="drillBucket" class="lnk" style="margin-left:10px;font-size:12.5px" @click="clearDrill">已筛选：{{ drillBucket }} ×清除</a>
+      </div>
       <div ref="chartEl" style="height:230px"></div>
     </div>
 
     <div class="card">
+      <div class="filterbar">
+        <input class="finp w-key" v-model="kw" :placeholder="mode === 'stock' ? '商品名称' : '往来单位名称'"/>
+        <button class="btn" v-if="mode !== 'stock'" @click="toggleSort" title="按合计金额排序">
+          合计排序 {{ sortDir === 'desc' ? '↓' : sortDir === 'asc' ? '↑' : '⇅' }}</button>
+        <span class="fb-gap"></span>
+        <span class="muted fb-count">{{ sorted.length }} / {{ rows.length }} 条</span>
+      </div>
       <table class="tbl" v-if="mode !== 'stock'">
         <thead><tr>
           <th class="r" style="width:52px">#</th><th>往来单位</th><th>最早单据</th>
-          <th v-for="l in BUCKET_LABELS" :key="l" class="r">{{ l }}</th><th class="r">合计</th>
+          <th v-for="l in BUCKET_LABELS" :key="l" class="r">{{ l }}</th><th class="r">合计</th><th style="width:78px"></th>
         </tr></thead>
         <tbody>
-          <tr v-for="(r, i) in rows" :key="r.partnerId">
+          <tr v-if="!sorted.length"><td :colspan="10"><div class="empty">{{ rows.length ? '没有匹配的往来单位' : '暂无未结' + (mode === 'ar' ? '应收' : '应付') }}</div></td></tr>
+          <tr v-for="(r, i) in sorted" :key="r.partnerId">
             <td class="r muted">{{ i + 1 }}</td>
             <td>{{ r.partnerName }}</td><td class="muted">{{ r.oldestDate || '—' }}</td>
             <td v-for="k in BUCKET_KEYS" :key="k" class="r" :class="r[k] > 0 ? '' : 'muted'">{{ r[k] ? fmtMoney(r[k]) : '—' }}</td>
             <td class="r"><b>{{ fmtMoney(r.total) }}</b></td>
+            <td class="c"><a class="lnk" @click="goDocs(r)" title="查看该往来单位的单据">看单据</a></td>
           </tr>
-          <tr v-if="!rows.length"><td :colspan="10" class="muted" style="text-align:center;padding:22px">暂无未结{{ mode === 'ar' ? '应收' : '应付' }}。</td></tr>
-          <tr v-else style="background:#f7f9fb;font-weight:600">
+          <tr v-if="sorted.length" style="background:#f7f9fb;font-weight:600">
             <td colspan="3" style="text-align:right">合计</td>
             <td v-for="k in BUCKET_KEYS" :key="k" class="r">{{ totals[k] ? fmtMoney(totals[k]) : '—' }}</td>
-            <td class="r">{{ fmtMoney(totals.total) }}</td>
+            <td class="r">{{ fmtMoney(totals.total) }}</td><td></td>
           </tr>
         </tbody>
       </table>
@@ -165,18 +229,18 @@ const AgingPage = {
           <th class="r">数量</th><th>首次入库</th><th class="r">库龄天数</th><th>账龄区间</th><th class="r">金额</th>
         </tr></thead>
         <tbody>
-          <tr v-for="(r, i) in rows" :key="i">
+          <tr v-if="!sorted.length"><td colspan="9"><div class="empty">{{ rows.length ? '没有匹配的商品' : '没有库存记录' }}</div></td></tr>
+          <tr v-for="(r, i) in sorted" :key="r.productId + '-' + r.warehouseId + '-' + (r.batchNo || '')">
             <td class="r muted">{{ i + 1 }}</td>
             <td>{{ r.prodName }}</td><td class="muted">{{ r.warehouseName || '—' }}</td>
             <td class="muted">{{ r.batchNo || '—' }}</td>
-            <td class="r">{{ r.qty }}</td><td class="muted">{{ r.firstDate || '—' }}</td>
+            <td class="r">{{ fmtQty(r.qty) }}</td><td class="muted">{{ r.firstDate || '—' }}</td>
             <td class="r" :class="r.days > 360 ? 'stock-low' : ''">{{ r.days }}</td>
             <td>{{ bucketLabel(r.bucket) }}</td><td class="r">{{ fmtMoney(r.amount) }}</td>
           </tr>
-          <tr v-if="!rows.length"><td colspan="9" class="muted" style="text-align:center;padding:22px">没有库存记录。</td></tr>
-          <tr v-else style="background:#f7f9fb;font-weight:600">
+          <tr v-if="sorted.length" style="background:#f7f9fb;font-weight:600">
             <td colspan="4" style="text-align:right">合计</td>
-            <td class="r">{{ totals.qty }}</td><td colspan="3"></td>
+            <td class="r">{{ fmtQty(totals.qty) }}</td><td colspan="3"></td>
             <td class="r">{{ fmtMoney(totals.total) }}</td>
           </tr>
         </tbody>

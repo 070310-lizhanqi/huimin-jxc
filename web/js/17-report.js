@@ -63,6 +63,9 @@ const ReportPage = {
 
     function renderChart() {
       if (!chartEl.value) return;
+      // 切到排行页签时图表容器被 v-if 销毁，旧实例仍挂在已脱离文档的 DOM 上；
+      // 切回后 chartEl 是新节点，必须重建实例，否则 setOption 渲染进死节点、趋势图永久空白
+      if (chart && chart.getDom() !== chartEl.value) { chart.dispose(); chart = null; }
       if (!chart) chart = echarts.init(chartEl.value);
       const map = new Map((sales.value.days || []).map((d) => [d.day, d]));
       const cats = [];
