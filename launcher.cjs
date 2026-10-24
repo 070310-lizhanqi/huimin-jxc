@@ -160,9 +160,6 @@ if (!process.env.ORANGE_DATA_DIR && !fs.existsSync(PORTABLE_FLAG)) {
   }
 }
 const LAUNCHER_PID = path.join(DATA, 'launcher.pid');
-// 记录启动器自身 pid：卸载/管理脚本可据此停止看护进程
-try { fs.writeFileSync(LAUNCHER_PID, String(process.pid)); } catch { /* ignore */ }
-process.on('exit', () => { try { if (Number(fs.readFileSync(LAUNCHER_PID,'utf8').trim())===process.pid) fs.rmSync(LAUNCHER_PID,{force:true}); } catch {} });
 const PORT_FILE = path.join(DATA, 'port.txt');
 const LOG_FILE = path.join(DATA, 'server.log');
 const PID_FILE = path.join(DATA, 'server.pid');
@@ -205,6 +202,45 @@ function readPort() {
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
+
+/**
+ * 启动器单实例锁：双击桌面图标连开多个浏览器窗口的根因是没有这道拦截——
+ * 每次双击都拉起一个新启动器进程，每个进程的 opening 去抖都是从 0 重新开始，
+ * 探测到服务就绪后各自 openBrowser 一次（N 次双击 = N 个浏览器窗口）。
+ * 用「原子创建（wx）+ 存活复核」：第二个启动器只在已有实例已死时才接管。
+ * 与服务端 server.lock 同款策略：进程级去重必须在窗口期外就生效。
+ */
+function acquireLauncherLock() {
+  const lockFile = LAUNCHER_PID;
+  try {
+    const old = Number(fs.readFileSync(lockFile, 'utf8').trim());
+    if (old > 0 && old !== process.pid && pidAlive(old)) return false; // 已有启动器活着
+  } catch { /* 无锁文件，首次启动 */ }
+  // 原子创建：两个启动器同时双击时只有一个能建立锁文件，另一个进 EEXIST 复核
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = fs.openSync(lockFile, 'wx');
+      try { fs.writeSync(fd, String(process.pid)); } finally { fs.closeSync(fd); }
+      break; // 抢锁成功
+    } catch (e) {
+      if (e && e.code !== 'EEXIST') throw e;
+      let other = 0;
+      try { other = Number(fs.readFileSync(lockFile, 'utf8').trim()); } catch { /* ignore */ }
+      if (!(other > 0) || other === process.pid) {
+        try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+        continue;
+      }
+      if (pidAlive(other)) return false; // 抢先者存活：本启动器退出
+      try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+    }
+  }
+  return true;
+}
+/** 退出时清锁（kill 等异常退出留残留，由存活复核兜底） */
+function releaseLauncherLock() {
+  try { if (Number(fs.readFileSync(LAUNCHER_PID, 'utf8').trim()) === process.pid) fs.rmSync(LAUNCHER_PID, { force: true }); } catch { /* ignore */ }
+}
+process.on('exit', releaseLauncherLock);
 function probe(port) {
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/api/auth/status', timeout: 1500 }, (res) => {
@@ -252,6 +288,12 @@ async function ensureServer() {
 }
 
 async function main() {
+  // 启动器单实例：双击桌面图标连开多个浏览器窗口的根因是没有这道拦截——
+  // 每次双击都拉起一个新启动器进程，探测到服务就绪后各自 openBrowser 一次
+  if (!acquireLauncherLock()) {
+    logLine('已有启动器实例在运行（双击重复触发），本次直接退出，不再重复开浏览器。');
+    process.exit(0);
+  }
   logLine(`启动器：数据目录 ${DATA}`);
   await ensureServer();
 
