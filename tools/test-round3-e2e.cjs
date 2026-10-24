@@ -97,7 +97,8 @@ function ok(cond, name, detail) {
   {
     const today = new Date(); const p = (n) => String(n).padStart(2, '0');
     const day = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
-    const sales = (await j('GET', `/report/sales?teamId=${teamId}&from=${day}&to=${day}`)).body;
+    // partnerId 过滤：只统计本测试客户的单据，避免 --with-rounds 模式下其它测试当天建的销售单污染同日汇总
+    const sales = (await j('GET', `/report/sales?teamId=${teamId}&from=${day}&to=${day}&partnerId=${cus.id}`)).body;
     ok(sales.totals.saleAmount === 40000 && sales.totals.retAmount === 7500, '日销售报表口径正确（扣折扣 400 元）', JSON.stringify(sales.totals));
     const prodRep = (await j('GET', `/report/product?teamId=${teamId}&from=${day}&to=${day}`)).body;
     const row = prodRep.rows.find((x) => x.productId === prod.id);

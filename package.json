@@ -1,6 +1,6 @@
 {
   "name": "huimin-clone",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "进销存系统（复刻惠民云 jxc 线核心业务）",
   "type": "commonjs",

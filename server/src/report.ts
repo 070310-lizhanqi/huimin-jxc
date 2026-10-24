@@ -120,12 +120,19 @@ export function allocateDocDiscounts(lines: DiscountableLine[]): Map<string, num
 
 export function mountReports(router: Router, db: DatabaseSync): void {
   // 按日销售汇总（销售出库 + 销售退货）
+  // partnerId 可选过滤：按单个客户看日销售（测试与「看某客户当日成交」场景共用）
   router.get('/report/sales', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const range = strictRange(req);
     if (range.error) return res.status(400).json({ error: range.error });
     const { from, to } = range;
+    const conds = ['d.teamId = ?', "d.status = 'audit'", "d.type IN ('stockout', 'sret')", 'd.date >= ?', 'd.date <= ?'];
+    const args: Value[] = [teamId, from, to];
+    if (req.query.partnerId) {
+      conds.push('d.partnerId = ?');
+      args.push(Number(req.query.partnerId));
+    }
     const days = db
       .prepare(
         `SELECT substr(d.date, 1, 10) AS day,
@@ -135,11 +142,10 @@ export function mountReports(router: Router, db: DatabaseSync): void {
                 SUM(CASE WHEN d.type = 'sret' THEN d.totalQty ELSE 0 END) AS retQty,
                 COUNT(CASE WHEN d.type = 'stockout' THEN 1 END) AS orderCount
          FROM doc d
-         WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ('stockout', 'sret')
-           AND d.date >= ? AND d.date <= ?
+         WHERE ${conds.join(' AND ')}
          GROUP BY day ORDER BY day`,
       )
-      .all(teamId, from, to) as unknown as SalesDay[];
+      .all(...args) as unknown as SalesDay[];
     const totals = days.reduce(
       (s, r) => ({
         saleAmount: s.saleAmount + r.saleAmount,
