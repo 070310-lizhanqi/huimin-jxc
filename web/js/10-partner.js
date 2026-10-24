@@ -58,23 +58,26 @@ const PartnerPage = {
       finally { busyDel.value = 0; }
     }
     const LEVEL = { salePrice: '标准售价', wholePrice: '批发价', retailPrice: '零售价' };
-    function reload() { return loadBase(); }
+    /* 「查询」按钮已删：列表是 kw 前端即时过滤，点查询只会全量重拉 9 张档案表 */
     // 往来单位导出（此前只有商品/库存页有导出，客户供应商名单没法带走）
     function doExport() {
       if (!list.value.length) return toast('没有可导出的数据', 'warning');
       const isCus = tab.value === 'cus';
-      const head = ['名称', '手机', '地址', ...(isCus ? ['价格等级'] : []), '备注'];
       exportCsv(
-        `${isCus ? '客户' : '供应商'}_${new Date().toISOString().slice(0, 10)}.csv`,
-        head,
-        list.value.map((p) => [
-          p.name || '', p.mobile || '', p.address || '',
-          ...(isCus ? [LEVEL[p.priceLevel] || '标准售价'] : []),
-          p.remark || '',
-        ]),
+        `${isCus ? '客户' : '供应商'}_${todayStr()}.csv`,
+        list.value.map((p) => ({
+          name: p.name || '', mobile: p.mobile || '', address: p.address || '',
+          level: isCus ? (LEVEL[p.priceLevel] || '标准售价') : '',
+          remark: p.remark || '',
+        })),
+        [
+          { key: 'name', label: '名称' }, { key: 'mobile', label: '手机' }, { key: 'address', label: '地址' },
+          ...(isCus ? [{ key: 'level', label: '价格等级' }] : []),
+          { key: 'remark', label: '备注' },
+        ],
       );
     }
-    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, reload, doExport };
+    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, doExport };
   },
   template: `
   <div>
@@ -89,8 +92,7 @@ const PartnerPage = {
           <button class="btn sm" :class="{primary: tab==='cus'}" @click="tab='cus'; kw=''">客户</button>
           <button class="btn sm" :class="{primary: tab==='ven'}" @click="tab='ven'; kw=''">供应商</button>
         </span>
-        <input class="finp w-key" v-model="kw" placeholder="名称 / 手机">
-        <button class="btn" @click="reload">查询</button>
+        <input class="finp w-key" v-model="kw" placeholder="即时筛选：名称 / 手机">
         <button class="btn" @click="doExport">导出</button>
         <span class="fb-gap"></span>
         <span class="muted">共 {{ list.length }} 条</span>
@@ -103,7 +105,7 @@ const PartnerPage = {
             <td style="font-weight:500">{{ p.name }}</td>
             <td class="muted">{{ p.mobile || '—' }}</td>
             <td class="muted">{{ p.address || '—' }}</td>
-            <td v-if="tab === 'cus'"><span class="tag" :class="p.priceLevel === 'wholePrice' ? 'ok' : ''">{{ LEVEL[p.priceLevel || 'salePrice'] || '标准售价' }}</span></td>
+            <td v-if="tab === 'cus'"><span class="tag" :class="p.priceLevel === 'wholePrice' ? 'ok' : p.priceLevel === 'retailPrice' ? 'warn' : ''">{{ LEVEL[p.priceLevel || 'salePrice'] || '标准售价' }}</span></td>
             <td class="muted">{{ p.remark || '—' }}</td>
             <td>
               <button class="btn sm" @click="openEdit(p)">编辑</button>
@@ -118,14 +120,14 @@ const PartnerPage = {
       <div class="modal narrow">
         <div class="modal-head"><span class="mt">{{ editor.id ? '编辑' : '新建' }}{{ tab === 'cus' ? '客户' : '供应商' }}</span><span class="x" @click="editor.open = false">×</span></div>
         <div class="modal-body">
-          <div class="fitem"><label>名称</label><input v-model="editor.form.name"/></div>
+          <div class="fitem"><label><span class="req">*</span>名称</label><input v-model="editor.form.name"/></div>
           <div class="fitem"><label>手机</label><input v-model="editor.form.mobile"/></div>
           <div class="fitem" v-if="tab === 'cus'"><label>价格等级</label>
-            <select v-model="editor.form.priceLevel">
-              <option value="salePrice">标准售价</option>
-              <option value="wholePrice">批发价</option>
-              <option value="retailPrice">零售价</option>
-            </select>
+            <div class="fctrl"><el-select v-model="editor.form.priceLevel" style="width:100%">
+              <el-option value="salePrice" label="标准售价（默认）"/>
+              <el-option value="wholePrice" label="批发价"/>
+              <el-option value="retailPrice" label="零售价"/>
+            </el-select></div>
           </div>
           <div class="fitem"><label>地址</label><input v-model="editor.form.address"/></div>
           <div class="fitem span2"><label>备注</label><input v-model="editor.form.remark"/></div>

@@ -81,9 +81,24 @@ export function verifyToken(token: string): AuthUser | null {
       AuthUser & { exp?: number };
     if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
     if (!payload.userId || !payload.teamId) return null;
+    // 退出登录黑名单：单实例部署用进程内表即可，条目随令牌过期自动失效
+    if (revoked.has(`${payload.userId}:${payload.exp}`)) return null;
     return { userId: payload.userId, teamId: payload.teamId, role: payload.role, name: payload.name, ver: payload.ver };
   } catch {
     return null;
+  }
+}
+
+/** 已吊销令牌表：key = userId:exp（同一用户签发的令牌 exp 各不相同，足以唯一标识） */
+const revoked = new Set<number | string>();
+/** 黑名单清理：每次吊销时顺手清掉已过期的条目，防止长期运行内存增长 */
+function revokeToken(payload: { userId: number; exp?: number }): void {
+  if (!payload.exp) return;
+  revoked.add(`${payload.userId}:${payload.exp}`);
+  const now = Math.floor(Date.now() / 1000);
+  for (const k of revoked) {
+    const exp = Number(String(k).split(':')[1]);
+    if (Number.isFinite(exp) && exp < now) revoked.delete(k);
   }
 }
 
@@ -130,30 +145,52 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
 /* ---------------- 简单 IP 限速（防登录/注册爆破） ---------------- */
 
-/** 每个 IP 的失败记录：Map<ip, timestamps[]>，内存态，重启即清零 */
+/** 每个 key 的失败记录：Map<key, timestamps[]>，内存态，重启即清零。
+ *  key 为 `ip:username`：按 IP 计数会让 NAT 出口下一人爆破封锁整个公司；
+ *  按 username 单独计数则攻击者可换 IP 绕过。组合 key 兼顾两侧。 */
 const rateBucket = new Map<string, number[]>();
 /** 窗口时长 60s，窗口内失败 ≥ MAX_TRIES 次即拒绝，成功登录/注册不计数 */
 const RATE_WINDOW_MS = 60_000;
 const MAX_TRIES = 15;
+/** 注册接口单独限速：即便没失败也应限制总频率（防止无限重试抢首管理员） */
+const REGISTER_WINDOW_MS = 60_000;
+const REGISTER_MAX = 10;
+const registerBucket = new Map<string, number[]>();
 
-function tooManyFails(ip: string): boolean {
+function tooManyFails(key: string): boolean {
   const now = Date.now();
-  const list = (rateBucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
-  rateBucket.set(ip, list);
+  const list = (rateBucket.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  rateBucket.set(key, list);
   return list.length >= MAX_TRIES;
 }
 
-function recordFail(ip: string): void {
+function recordFail(key: string): void {
   const now = Date.now();
-  const list = (rateBucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  const list = (rateBucket.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
   list.push(now);
-  rateBucket.set(ip, list);
+  rateBucket.set(key, list);
   // 简单内存回收：桶数量过大时清掉全空项
   if (rateBucket.size > 1000) {
     for (const [k, v] of rateBucket) {
       if (v.every((t) => now - t >= RATE_WINDOW_MS)) rateBucket.delete(k);
     }
   }
+}
+
+/** 登录/注册成功时清空对应 key 的失败计数，避免误伤合法用户 */
+function clearFails(key: string): void {
+  rateBucket.delete(key);
+}
+
+/** 注册总频率限速（不区分成功失败） */
+function tooManyRegisters(ip: string): boolean {
+  const now = Date.now();
+  const list = (registerBucket.get(ip) ?? []).filter((t) => now - t < REGISTER_WINDOW_MS);
+  registerBucket.set(ip, list);
+  if (list.length >= REGISTER_MAX) return true;
+  list.push(now);
+  registerBucket.set(ip, list);
+  return false;
 }
 
 function clientIp(req: Request): string {
@@ -254,16 +291,23 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
 
   /** 注册：首个账号自动建团队；已有团队时按全局注册开关走邀请码建「独立新账套」 */
   router.post('/auth/register', safe(async (req, res) => {
-    if (tooManyFails(clientIp(req))) {
-      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+    // 注册接口按 IP 做总频率限速（不区分成败）：teamCount=0 时若不限速，
+    // 攻击者可无限重试直到抢到首个管理员
+    if (tooManyRegisters(clientIp(req))) {
+      return res.status(429).json({ error: '注册请求过于频繁，请 1 分钟后再试' });
     }
     const username = String(req.body.username ?? '').trim();
     const password = String(req.body.password ?? '');
     const teamName = String(req.body.teamName ?? '').trim();
+    // 失败计数 key 按 ip:username：NAT 出口下一人爆破不再封锁整个公司
+    const failKey = `${clientIp(req)}:${username}`;
     const fail = (status: number, error: string) => {
-      recordFail(clientIp(req));
+      recordFail(failKey);
       return res.status(status).json({ error });
     };
+    if (tooManyFails(failKey)) {
+      return fail(429, '尝试过于频繁，请 1 分钟后再试');
+    }
     const nameErr = checkUsername(username);
     if (nameErr) return fail(400, nameErr);
     const pwdErr = checkPasswordStrength(password);
@@ -320,28 +364,49 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       return fail(400, '该用户名已被使用');
     }
     const user: AuthUser = { userId: Number(info.lastInsertRowid), teamId, role: 'admin', name: username, ver: 0 };
+    // 注册成功清空失败计数：避免正常用户首次注册时因前面试错被误锁
+    clearFails(failKey);
     return res.json({ ok: true, token: issueToken(user), user, teamId, teamName: teamName || '我的账套' });
   }));
 
   /** 登录 */
   router.post('/auth/login', safe(async (req, res) => {
-    if (tooManyFails(clientIp(req))) {
-      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
-    }
     const username = String(req.body.username ?? '').trim();
     const password = String(req.body.password ?? '');
     if (!username || !password) return res.status(400).json({ error: '请输入用户名和密码' });
+    // 失败计数 key 按 ip:username（理由同注册）：爆破单个账号不再误伤 NAT 后的其它账号
+    const failKey = `${clientIp(req)}:${username}`;
+    if (tooManyFails(failKey)) {
+      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+    }
     const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
     if (!row || !(await verifyPassword(password, row.password))) {
-      recordFail(clientIp(req));
+      recordFail(failKey);
       return res.status(401).json({ error: '用户名或密码错误' });
     }
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
       | { id: number; name: string }
       | undefined;
     const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name, ver: row.tokenVer };
+    // 登录成功清空失败计数：解锁此前的试错，下次登录不受影响
+    clearFails(failKey);
     return res.json({ ok: true, token: issueToken(user), user, team });
   }));
+
+  /** 退出登录：吊销当前令牌（此前只是客户端删 token，令牌在过期前仍可继续调用接口） */
+  router.post('/auth/logout', requireAuth, (req, res) => {
+    const h = req.headers.authorization;
+    const token = h && h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    const dot = token.lastIndexOf('.');
+    if (dot > 0) {
+      try {
+        const payload = JSON.parse(Buffer.from(token.slice(0, dot).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) as
+          { userId?: number; exp?: number };
+        if (payload.userId && payload.exp) revokeToken(payload as { userId: number; exp: number });
+      } catch { /* 令牌格式异常时无需吊销 */ }
+    }
+    return res.json({ ok: true });
+  });
 
   /** 当前登录信息（前端启动时校验令牌是否还有效） */
   router.get('/auth/me', requireAuth, (req, res) => {

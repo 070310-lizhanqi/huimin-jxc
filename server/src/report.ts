@@ -5,6 +5,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { validBizDate } from './db';
 
 type Value = string | number | null;
 
@@ -43,13 +44,8 @@ interface CustomerReportRow {
 }
 
 /** 报表日期参数校验：脏日期（'2026/10/1'）会让字符串比较整体失效，报表静默漏计。
- *  合法值直接返回；非法值回落默认区间（本月）。 */
-function safeRange(req: Request): { from: string; to: string } {
-  const { from, to } = rangeOf(req);
-  const ok = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-  return { from: ok(from) ? from : rangeOf({ query: {} } as Request).from, to: ok(to) ? to : rangeOf({ query: {} } as Request).to };
-}
-
+ *  合法值直接返回；非法值回落默认区间（本月）。
+ *  升级：原来只验格式（'2026-02-30' 这类不存在的日历日能通过），现复用 validBizDate 做真实日历校验。 */
 function rangeOf(req: Request): { from: string; to: string } {
   const now = new Date();
   const y = now.getFullYear();
@@ -60,12 +56,76 @@ function rangeOf(req: Request): { from: string; to: string } {
   };
 }
 
+/** 报表日期参数校验：与 jxc-report 的 rangeOf 同口径——脏日期直接 400 拒绝，
+ *  不做静默回落（回落会把错账伪装成「本月没数据」，用户无从察觉参数没生效）。 */
+function strictRange(req: Request): { from: string; to: string; error: string | null } {
+  const { from, to } = rangeOf(req);
+  for (const [label, v] of [['from', from], ['to', to]] as const) {
+    const err = validBizDate(v);
+    if (err) return { from, to, error: `${label} 参数非法：${err}` };
+  }
+  if (from > to) return { from, to, error: 'from 不能晚于 to' };
+  return { from, to, error: null };
+}
+
+/** (docId, productId) 级的明细聚合行，用于整单折扣分摊 */
+export interface DiscountableLine {
+  docId: number;
+  productId: number;
+  type: string;
+  discount: number | null;
+  qty: number;
+  amount: number;
+}
+
+/**
+ * 按行金额占比把整单折扣分摊到各 (docId, productId) 行，尾差归该单金额最大的行，
+ * 保证单内 Σ分摊 = 整单折扣。返回 `docId:productId` → 扣折扣后的净额。
+ * 折扣 ≤ 0 或毛额 ≤ 0 的单按原毛额返回。
+ * 供 /report/product 与工作台 /stats/sales-summary 共用——两处毛利必须同一口径，
+ * 否则带折扣的销售在报表页和工作台会算出两个不同的毛利。
+ */
+export function allocateDocDiscounts(lines: DiscountableLine[]): Map<string, number> {
+  const byDoc = new Map<number, DiscountableLine[]>();
+  for (const l of lines) {
+    const arr = byDoc.get(l.docId) ?? [];
+    arr.push(l);
+    byDoc.set(l.docId, arr);
+  }
+  const net = new Map<string, number>();
+  for (const arr of byDoc.values()) {
+    const discount = Math.max(0, Math.round(Number(arr[0].discount ?? 0)));
+    const gross = arr.reduce((s, l) => s + l.amount, 0);
+    if (discount <= 0 || gross <= 0) {
+      for (const l of arr) net.set(`${l.docId}:${l.productId}`, l.amount);
+      continue;
+    }
+    let allocated = 0;
+    let maxLine = arr[0];
+    for (const l of arr) {
+      const share = Math.round((discount * l.amount) / gross);
+      net.set(`${l.docId}:${l.productId}`, l.amount - share);
+      allocated += share;
+      if (l.amount > maxLine.amount) maxLine = l;
+    }
+    // 尾差补给金额最大的行，保证单内 Σ分摊 = 整单折扣
+    const tail = discount - allocated;
+    if (tail !== 0) {
+      const k = `${maxLine.docId}:${maxLine.productId}`;
+      net.set(k, (net.get(k) ?? maxLine.amount) - tail);
+    }
+  }
+  return net;
+}
+
 export function mountReports(router: Router, db: DatabaseSync): void {
   // 按日销售汇总（销售出库 + 销售退货）
   router.get('/report/sales', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = safeRange(req);
+    const range = strictRange(req);
+    if (range.error) return res.status(400).json({ error: range.error });
+    const { from, to } = range;
     const days = db
       .prepare(
         `SELECT substr(d.date, 1, 10) AS day,
@@ -99,14 +159,15 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   router.get('/report/product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = safeRange(req);
-    // 按 (单据, 商品) 聚合，并带上整单折扣与单据明细总额用于分摊
+    const range = strictRange(req);
+    if (range.error) return res.status(400).json({ error: range.error });
+    const { from, to } = range;
+    // 按 (单据, 商品) 聚合，带上整单折扣用于分摊（毛额由各分摊行合计得出，无需子查询）
     const lines = db
       .prepare(
         `SELECT i.docId, i.productId, d.type, d.discount,
                 p.name AS prodName, p.unit, p.spec, p.purchasePrice,
-                SUM(i.qty) AS qty, SUM(i.amount) AS amount,
-                (SELECT SUM(x.amount) FROM doc_item x WHERE x.docId = i.docId) AS docGross
+                SUM(i.qty) AS qty, SUM(i.amount) AS amount
          FROM doc_item i
          JOIN doc d ON d.id = i.docId
          JOIN product p ON p.id = i.productId
@@ -125,39 +186,10 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       purchasePrice: number;
       qty: number;
       amount: number;
-      docGross: number;
     }>;
-    // 单据级折扣分摊：每张单独立算，尾差归最大行
-    const byDoc = new Map<number, typeof lines>();
-    for (const l of lines) {
-      const arr = byDoc.get(l.docId) ?? [];
-      arr.push(l);
-      byDoc.set(l.docId, arr);
-    }
+    // 单据级折扣分摊：共享 allocateDocDiscounts（与工作台毛利同口径），尾差归最大行
     /** 行实际销售额（扣掉分摊折扣） */
-    const netLineAmount = new Map<string, number>();
-    for (const arr of byDoc.values()) {
-      const discount = Math.max(0, Math.round(Number(arr[0].discount ?? 0)));
-      const gross = arr.reduce((s, l) => s + l.amount, 0);
-      if (discount <= 0 || gross <= 0) {
-        for (const l of arr) netLineAmount.set(`${l.docId}:${l.productId}`, l.amount);
-        continue;
-      }
-      let allocated = 0;
-      let maxLine = arr[0];
-      for (const l of arr) {
-        const share = Math.round((discount * l.amount) / gross);
-        netLineAmount.set(`${l.docId}:${l.productId}`, l.amount - share);
-        allocated += share;
-        if (l.amount > maxLine.amount) maxLine = l;
-      }
-      // 尾差补给金额最大的行，保证单内 Σ分摊 = 整单折扣
-      const tail = discount - allocated;
-      if (tail !== 0) {
-        const k = `${maxLine.docId}:${maxLine.productId}`;
-        netLineAmount.set(k, (netLineAmount.get(k) ?? maxLine.amount) - tail);
-      }
-    }
+    const netLineAmount = allocateDocDiscounts(lines);
     // 按商品汇总
     const prodMeta = new Map<
       number,
@@ -190,16 +222,18 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const rows = [...aggMap.entries()]
       .map(([pid, a]) => ({ productId: pid, ...prodMeta.get(pid)!, ...a }))
       .sort((x, y) => y.saleAmount - x.saleAmount || y.retAmount - x.retAmount);
-    // 加权平均入库成本：仅统计已审核采购入库单的入库流水
-    // （作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
+    // 加权平均入库成本：仅统计已审核采购入库单的入库流水，且限定入库日期 ≤ 报表 to
+    // （不加日期上限会把"报表期之后才入库"的采购价算进当期成本，毛利失真；
+    //  作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
     const costs = db
       .prepare(
         `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
+           AND d.date <= ?
          GROUP BY l.productId`,
       )
-      .all(teamId) as Array<{ productId: number; avgCost: number }>;
+      .all(teamId, to) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
     const out: ProductReportRow[] = rows.map((r) => {
       const avgCost = costMap.get(r.productId) ?? r.purchasePrice;
@@ -231,7 +265,9 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   router.get('/report/customer', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const { from, to } = safeRange(req);
+    const range = strictRange(req);
+    if (range.error) return res.status(400).json({ error: range.error });
+    const { from, to } = range;
     const rows = db
       .prepare(
         `SELECT d.partnerId AS cusId, c.name AS cusName,

@@ -6,20 +6,25 @@ const PricePage = {
     const kw = ref('');
     const partnerId = ref(null);
     const rows = ref([]);
+    const total = ref(0);
     const loading = ref(false);
     const editor = reactive({ open: false, row: null, price: 0 });
+    const guard = seqGuard();
 
     async function load() {
       loading.value = true;
+      const my = guard.begin();
       try {
         const r = await api.get('/price/list', {
           teamId: store.teamId,
           partnerId: partnerId.value || '',
           kw: kw.value.trim(),
         });
+        if (!guard.isCurrent(my)) return;
         rows.value = r.rows || [];
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+        total.value = r.total ?? (r.rows || []).length;
+      } catch (e) { if (guard.isCurrent(my)) toast(e.message, 'error'); }
+      finally { if (guard.isCurrent(my)) loading.value = false; }
     }
 
     function openEdit(row) {
@@ -29,8 +34,11 @@ const PricePage = {
     }
 
     async function save() {
-      const cents = toCents(editor.price);
-      if (!(cents >= 0)) return toast('价格不能为负', 'error');
+      // 先验原始输入：toCents 会把负数/NaN 静默转 0，导致「价格不能为负」守卫永不触发、
+      // 用户输 -5 实际存成 0 元
+      const n = Number(editor.price);
+      if (!Number.isFinite(n) || n < 0) return toast('请输入不小于 0 的价格', 'error');
+      const cents = toCents(n);
       try {
         await api.post('/price/set', {
           teamId: store.teamId,
@@ -61,6 +69,21 @@ const PricePage = {
       return d > 0 ? `高于标准价 ${fmtMoney(d)}` : `低于标准价 ${fmtMoney(-d)}`;
     }
 
+    /* 导出当前筛选的价格记忆（业务员外出报价常用资料） */
+    function doExport() {
+      if (!sorted.value.length) return toast('没有可导出的数据', 'warning');
+      exportCsv(`客户价格_${todayStr()}.csv`,
+        sorted.value.map((r) => ({
+          客户: r.cusName || '', 商品: r.prodName, 规格: r.spec || '', 单位: r.unit || '',
+          记忆价: (r.price / 100).toFixed(2), 标准售价: r.salePrice ? (r.salePrice / 100).toFixed(2) : '',
+          对比: diffOf(r), 最近成交: r.lastDate || '', 成交次数: r.times ?? 0,
+        })), [
+          { key: '客户', label: '客户' }, { key: '商品', label: '商品' }, { key: '规格', label: '规格' },
+          { key: '单位', label: '单位' }, { key: '记忆价', label: '记忆价(元)' }, { key: '标准售价', label: '标准售价(元)' },
+          { key: '对比', label: '对比' }, { key: '最近成交', label: '最近成交' }, { key: '成交次数', label: '成交次数' },
+        ]);
+    }
+
     onMounted(load);
     // 排序：默认按最近成交日期，也可按成交次数/与标准售价的偏差看
     const sortBy = ref('default');
@@ -78,7 +101,7 @@ const PricePage = {
       }
       return arr;
     });
-    return { kw, partnerId, rows, sorted, sortBy, loading, editor, load, openEdit, save, del, diffOf, store, fmtMoney };
+    return { kw, partnerId, rows, total, sorted, sortBy, loading, editor, load, openEdit, save, del, diffOf, store, fmtMoney, doExport };
   },
   template: `
   <div>
@@ -86,6 +109,7 @@ const PricePage = {
       <div class="page-head">
         <span class="page-title">客户价格记忆</span>
         <div class="hd-right">
+          <button class="btn" @click="doExport"><el-icon><Download/></el-icon> 导出</button>
           <button class="btn" @click="load"><el-icon><Refresh/></el-icon> 刷新</button>
         </div>
       </div>
@@ -102,7 +126,7 @@ const PricePage = {
           <el-option label="低于标准价最多" value="diffAsc"/>
           <el-option label="高于标准价最多" value="diffDesc"/>
         </el-select>
-        <span class="muted" style="font-size:12.5px;margin-left:6px">共 {{ rows.length }} 条</span>
+        <span class="muted" style="font-size:12.5px;margin-left:6px">共 {{ rows.length }} 条<template v-if="total > rows.length">（共 {{ total }} 条，仅显示最近 500 条，请按客户筛选）</template></span>
       </div>
 
       <sk-table v-if="loading && !rows.length" :rows="8" :cols="11"/>
@@ -214,6 +238,9 @@ const SettingsPage = {
     }
 
     async function reset(scope) {
+      // 一键重置所有设置是不可逆操作，必须二次确认（对齐恢复备份的交互等级）
+      const label = scope === 'all' ? '所有设置（编号前缀 + 编号方式 + 打印抬头）' : scope === 'prefix' ? '所有单据编号前缀' : scope === 'noMode' ? '编号方式' : '打印抬头';
+      if (!(await confirmBox(`确定要恢复${label}为默认值吗？此操作不可撤销。`, '恢复默认设置'))) return;
       try {
         const r = await api.post('/setting/reset', { teamId: store.teamId, scope });
         Object.keys(prefix).forEach((k) => delete prefix[k]);
@@ -357,6 +384,24 @@ const SettingsPage = {
     const backupDir = ref('');
     const backupLoading = ref(false);
     const backupBusy = ref(false);
+    /** 恢复重连轮询的句柄（setup 顶层持有，卸载时统一清理） */
+    const restorePollTimers = [];
+    let restorePollStopped = false;
+    /** 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态 */
+    const pollRestore = (retries) => {
+      if (restorePollStopped) return;
+      api.get('/auth/status')
+        .then(() => { if (!restorePollStopped) location.reload(); })
+        .catch(() => {
+          if (restorePollStopped || retries <= 0) return;
+          restorePollTimers.push(setTimeout(() => pollRestore(retries - 1), 2000));
+        });
+    };
+    onBeforeUnmount(() => {
+      restorePollStopped = true;
+      for (const t of restorePollTimers) clearTimeout(t);
+      restorePollTimers.length = 0;
+    });
 
     const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
     const fmtBackupName = (f) => {
@@ -410,12 +455,12 @@ const SettingsPage = {
       try {
         await api.post('/backup/restore', { file: row.file, password });
         toast('恢复已排队，服务正在重启……页面稍后自动重连');
-        // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态
-        setTimeout(function poll(retries) {
-          api.get('/auth/status')
-            .then(() => { location.reload(); })
-            .catch(() => { if (retries > 0) setTimeout(() => poll(retries - 1), 2000); });
-        }, 3000, 30);
+        // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态。
+        // stopped 必须是 setup 顶层变量、由组件级 onBeforeUnmount 置位：
+        // 原先把 onBeforeUnmount 注册在异步点击处理器里，Vue 无活动实例时会静默忽略，
+        // 路由切走后轮询照样跑完 63 秒
+        const timer = setTimeout(() => pollRestore(30), 3000);
+        restorePollTimers.push(timer);
       } catch (e) {
         toast(e.message, 'error');
         backupBusy.value = false;

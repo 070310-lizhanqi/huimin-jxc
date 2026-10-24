@@ -31,8 +31,14 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     }
     const list = db
       .prepare(
-        `SELECT s.productId, p.name AS prodName, p.spec, p.unit, s.warehouseId, w.name AS warehouseName,
-                s.reservoirId, s.batchNo, SUM(s.qty) AS qty
+        `SELECT s.productId, p.name AS prodName, p.spec, p.unit, p.lowQty, s.warehouseId, w.name AS warehouseName,
+                s.reservoirId, s.batchNo, SUM(s.qty) AS qty,
+                COALESCE((
+                  SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
+                  WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
+                    AND d.type = 'stockin' AND d.status = 'audit'
+                  ORDER BY l.id DESC LIMIT 1
+                ), 0) AS estUnitCost
          FROM stock s
          JOIN product p ON p.id = s.productId
          LEFT JOIN warehouse w ON w.id = s.warehouseId

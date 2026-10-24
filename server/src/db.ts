@@ -300,6 +300,10 @@ export function migrate(db: DB): void {
   addColumn('doc_item', 'postQty', 'REAL');
   // Excel 导入：外部原始单号（用于重复导入幂等跳过）
   addColumn('doc', 'srcBillNo', 'TEXT');
+  // 作废留痕：账务系统作废应可追溯（谁在何时因何作废）
+  addColumn('doc', 'voidAt', 'TEXT');
+  addColumn('doc', 'voidReason', 'TEXT');
+  addColumn('doc', 'voidUserId', 'INTEGER');
   db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo)`);
   // 登录认证：密码哈希（scrypt）、创建时间与令牌版本（改密/删号后吊销旧令牌）
   addColumn('user', 'password', 'TEXT');
@@ -321,6 +325,18 @@ export function migrate(db: DB): void {
     CREATE INDEX IF NOT EXISTS idx_doc_item_product ON doc_item(productId);
     CREATE INDEX IF NOT EXISTS idx_settlement_team_date ON settlement(teamId, date);
     CREATE INDEX IF NOT EXISTS idx_ledger_team_wh_prod ON stock_ledger(teamId, warehouseId, productId);
+  `);
+  // 热门复合查询：
+  // - /doc/list 状态统计按 (teamId, status, type, date) 过滤
+  // - 账龄 FIFO 按 partnerId + 日期 拉单
+  // - 库存货值估算按 (teamId, productId, direction) 找最近流水
+  // - /doc/list 明细聚合按 docId 回表
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_doc_team_status_type_date ON doc(teamId, status, type, date);
+    CREATE INDEX IF NOT EXISTS idx_doc_team_partner_date ON doc(teamId, partnerId, status, date);
+    CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir_id ON stock_ledger(teamId, productId, direction, id);
+    CREATE INDEX IF NOT EXISTS idx_doc_item_doc_prod ON doc_item(docId, productId);
+    CREATE INDEX IF NOT EXISTS idx_doc_ref_order ON doc(refOrderId, teamId, status);
   `);
   // 用户名唯一性兜底：注册/新增用户处有 SELECT 预检，但并发双击仍可能撞出重名
   // （重名会让登录 SELECT name=? 命中错误行）。老库已有重名时本索引创建失败，忽略即可。

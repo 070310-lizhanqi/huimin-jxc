@@ -96,13 +96,40 @@ function dbFilePath(): string {
   return path.join(dataDir(), 'huimin-clone.db');
 }
 
-/** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照 */
-function checkpoint(db: DatabaseSync): void {
+/** SQLite 文件头魔数：所有合法 SQLite 3 库文件的前 16 字节 */
+const SQLITE_MAGIC = 'SQLite format 3\0';
+
+/** 恢复前校验备份文件是合法 SQLite 库：文件头不对直接拒绝。
+ *  否则用户选错文件（或文件损坏）会整体换掉当前库，服务直接起不来。 */
+function assertSQLiteFile(file: string): void {
+  const fd = fs.openSync(file, 'r');
   try {
-    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-  } catch {
-    /* checkpoint 失败不阻断备份：WAL 未清零时主库文件仍自洽（可能少最新一笔） */
+    const head = Buffer.alloc(16);
+    fs.readSync(fd, head, 0, 16, 0);
+    if (head.toString('latin1') !== SQLITE_MAGIC) {
+      throw new Error('所选文件不是有效的 SQLite 数据库文件');
+    }
+  } finally {
+    fs.closeSync(fd);
   }
+}
+
+/** 连带删除备份的 WAL/SHM 副产物（备份文件被外部工具打开过会留下），避免孤儿文件累积 */
+function removeBackupFile(dir: string, file: string): void {
+  for (const f of [file, file + '-wal', file + '-shm']) {
+    try {
+      fs.rmSync(path.join(dir, f), { force: true });
+    } catch {
+      /* 单个删除失败不影响其它 */
+    }
+  }
+}
+
+/** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照。
+ *  失败必须抛错：checkpoint 失败说明主库文件可能不是完整快照，
+ *  继续复制会得到一个缺最新事务的备份——用户日后恢复才发现丢数据。 */
+function checkpoint(db: DatabaseSync): void {
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
 }
 
 /**
@@ -229,9 +256,23 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     if (!requireAdmin(req, res)) return;
     const file = String(req.query.file ?? '');
     if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
-    const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
-    return res.download(full, file);
+    // 防符号链接逃逸：仅文件名白名单不够，攻击者若能把 backupDir 里的文件替换成
+    // 指向敏感文件的软链接，res.download 会读到任意文件。resolve 后必须仍落在 backupDir 内。
+    const dir = backupDir();
+    const full = path.join(dir, file);
+    const resolved = path.resolve(full);
+    if (!resolved.startsWith(path.resolve(dir) + path.sep)) {
+      return res.status(400).json({ error: '备份文件路径非法' });
+    }
+    // 拒绝软链接/硬链接：lstat 与 stat 比较，符号链接直接拒绝
+    try {
+      const lst = fs.lstatSync(resolved);
+      if (lst.isSymbolicLink()) return res.status(400).json({ error: '备份文件类型非法' });
+    } catch {
+      return res.status(404).json({ error: '备份文件不存在' });
+    }
+    if (!fs.existsSync(resolved)) return res.status(404).json({ error: '备份文件不存在' });
+    return res.download(resolved, file);
   });
 
   /** 恢复备份：需二次验证当前管理员密码（高危不可逆操作），排队后自动重启生效 */
@@ -241,6 +282,11 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
     const full = path.join(backupDir(), file);
     if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
+    try {
+      assertSQLiteFile(full);
+    } catch (e) {
+      return res.status(400).json({ error: `恢复已取消：${(e as Error).message}` });
+    }
     // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
     const password = String(req.body.password ?? '');
     if (!password) return res.status(400).json({ error: '请输入当前登录账号的密码以确认恢复' });
@@ -265,7 +311,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
     const full = path.join(backupDir(), file);
     if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
-    fs.rmSync(full, { force: true });
+    removeBackupFile(backupDir(), file);
     return res.json({ ok: true });
   });
 }

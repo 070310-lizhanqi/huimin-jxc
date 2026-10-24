@@ -17,31 +17,59 @@ const DocEditor = {
     const saving = ref(false);
     /* 当前仓库的库存快照：productId -> 可用数量（用于明细表「库存数量」列） */
     const stockMap = ref({});
-    // 客户价格记忆：选中客户后批量取回，选商品时优先使用
+    // 客户价格记忆：选中客户后批量取回，选商品时优先使用。
+    // 请求序守卫：快速先选客户 A 再改选 B 时，A 的慢响应后到会把价表覆盖回去，
+    // 之后选商品会用 A 的记忆价给 B 的单预填单价
     const priceMem = ref({});
+    let priceMemSeq = 0;
     async function loadPriceMem(pid) {
-      if (!pid) { priceMem.value = {}; return; }
+      const my = ++priceMemSeq;
+      if (!pid) { if (my === priceMemSeq) priceMem.value = {}; return; }
       try {
         const r = await api.get('/price/memory', { teamId: store.teamId, partnerId: pid });
+        if (my !== priceMemSeq) return;
         const m = {};
         for (const it of r.list || []) m[it.productId] = it.price;
         priceMem.value = m;
-      } catch { priceMem.value = {}; }
+      } catch { if (my === priceMemSeq) priceMem.value = {}; }
     }
 
     const emeta = computed(() => DOC_META[props.type] || {});
     const epartners = computed(() => emeta.value.partner === 'ven' ? store.vendors : store.customers);
 
-    /* 编辑态合计 */
-    const grossAmt = computed(() => editor.form
-      ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0) : 0);
-    const totalQty = computed(() => editor.form ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0) : 0);
-    const totalAmt = computed(() => Math.max(0, grossAmt.value - (Number(editor.form?.discount) || 0)));
-    const oweAmt = computed(() => Math.max(0, totalAmt.value - (Number(editor.form?.paidAmount) || 0) - (Number(editor.form?.deposit) || 0)));
+    /** 校验原始输入的金额字段：负数/非数必须在这里报错，不能交给 toCents——
+     *  toCents 对负数静默返回 0，而界面合计按原始负值计算，
+     *  用户屏幕上确认的应收与落库金额会不一致（差一个折扣/收款的绝对值） */
+    const assertNonNegative = (v, label) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`${label}不能为负数`);
+      return n;
+    };
 
+    /* 编辑态合计：全程整数分路径消除浮点误差。
+     *  0.1 + 0.2 = 0.30000000000000004 这类浮点噪声在数量大时会直接体现在应收金额上。
+     *  口径与后端 lineAmount 一致：qty 转"万分"整数 → × 单价分 → ÷ 10000 取整。 */
+    const lineCents = (it) => {
+      const qtyScaled = Math.round((Number(it.qty) || 0) * 10000);
+      const priceCents = Math.round((Number(it.price) || 0) * 100);
+      return Math.round((qtyScaled * priceCents) / 10000);
+    };
+    const grossCents = computed(() => editor.form
+      ? editor.form.items.reduce((s, it) => s + lineCents(it), 0) : 0);
+    const grossAmt = computed(() => grossCents.value / 100);
+      const totalQty = computed(() => editor.form ? fmtQty(editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0), 4) : 0);
+    const totalCents = computed(() => Math.max(0, grossCents.value - Math.round((Number(editor.form?.discount) || 0) * 100)));
+    const totalAmt = computed(() => totalCents.value / 100);
+    const oweCents = computed(() => Math.max(0,
+      totalCents.value - Math.round((Number(editor.form?.paidAmount) || 0) * 100) - Math.round((Number(editor.form?.deposit) || 0) * 100)));
+    const oweAmt = computed(() => oweCents.value / 100);
+
+    let stockSeq = 0;
     async function loadStock(warehouseId) {
-      if (!warehouseId) { stockMap.value = {}; return; }
+      const my = ++stockSeq;
+      if (!warehouseId) { if (my === stockSeq) stockMap.value = {}; return; }
       const rows2 = await api.get('/stock/list', { teamId: store.teamId, warehouseId, ifShowZero: '' });
+      if (my !== stockSeq) return;
       const m = {};
       for (const r of rows2) m[r.productId] = (m[r.productId] || 0) + r.qty;
       stockMap.value = m;
@@ -65,17 +93,36 @@ const DocEditor = {
       }
     });
 
+    /* 行唯一 id：v-for :key 不能用数组下标——删除中间行会让 Vue 就地复用
+       行内下拉的展开态/聚焦态到错误的行上 */
+    let uidSeq = 0;
     function blankItem() {
-      return { productId: null, qty: 1, price: 0, batchNo: '', toWarehouseId: null, remark: '' };
+      return { _uid: ++uidSeq, productId: null, qty: 1, price: 0, batchNo: '', toWarehouseId: null, remark: '' };
+    }
+    /** 上次开单用的仓库/业务员/账户：多仓团队每次开单都要重选同一仓库，记住它 */
+    const LAST_KEY = 'oc_last_doc_';
+    function rememberLast(f) {
+      try {
+        localStorage.setItem(LAST_KEY + props.type, JSON.stringify({
+          warehouseId: f.warehouseId || null, clerkId: f.clerkId || null, accountId: f.accountId || null,
+        }));
+      } catch { /* 隐私模式等场景忽略 */ }
+    }
+    function lastDefaults() {
+      try { return JSON.parse(localStorage.getItem(LAST_KEY + props.type) || '{}'); } catch { return {}; }
     }
     function blankForm() {
+      const last = lastDefaults();
+      // 记住的档案可能已被删除：不存在则回落默认，避免出现空选择
+      const has = (list, id) => (id != null && list.some((x) => x.id === id) ? id : null);
       return {
         date: todayStr(),
-        partnerId: null, clerkId: null,
-        warehouseId: store.warehouses[0]?.id ?? null,
+        partnerId: null,
+        clerkId: has(store.clerks, last.clerkId),
+        warehouseId: has(store.warehouses, last.warehouseId) ?? store.warehouses[0]?.id ?? null,
         remark: '',
         receiverName: '', receiverMobile: '', receiverAddress: '',
-        discount: 0, paidAmount: 0, accountId: null, deposit: 0,
+        discount: 0, paidAmount: 0, accountId: has(store.accounts, last.accountId), deposit: 0,
         items: [blankItem()],
       };
     }
@@ -115,23 +162,35 @@ const DocEditor = {
             discount: (doc.discount || 0) / 100, paidAmount: (doc.paidAmount || 0) / 100,
             accountId: doc.accountId || null, deposit: (doc.deposit || 0) / 100,
             items: items.map(it => ({
-              productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
+              _uid: ++uidSeq, productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
               batchNo: it.batchNo || '', toWarehouseId: it.toWarehouseId, remark: it.remark || '',
             })),
           };
           if (!editor.form.items.length) editor.form.items.push(blankItem());
-          if (emeta.value.warehouse) loadStock(editor.form.warehouseId);
-          loadPriceMem(editor.form.partnerId);
+          // 库存快照与价格记忆由 watch(warehouseId/partnerId) 在表单赋值时统一加载，
+          // 此处不再显式调用（此前双发两个请求）
+          // 快照必须在表单赋值之后拍：异步加载前拍到的恒为 "null"，
+          // 会让「打开草稿不做任何修改」也弹「有未保存的修改」的假警报
+          snap();
         }).catch(e => toast(e.message, 'error'));
       } else {
         editor.id = null; editor.billNo = '';
         editor.status = 'draft'; editor.ro = false;
         editor.form = blankForm();
-        if (emeta.value.warehouse) loadStock(editor.form.warehouseId);
+        snap();
       }
-      snap();
     }
     onMounted(init);
+
+    /* Ctrl+S / Cmd+S 保存草稿：批量录单时手不用离开键盘 */
+    function onKeydown(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (!editor.ro && !saving.value) save();
+      }
+    }
+    onMounted(() => window.addEventListener('keydown', onKeydown));
+    onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
     /**
      * 未保存提醒：开单时手一抖点「返回列表」/浏览器后退，
@@ -162,8 +221,9 @@ const DocEditor = {
     function scanBarcode(code) {
       const s = String(code || '').trim();
       if (!s || !editor.form) return;
-      const p = store.products.find((x) => (x.barcode || '').trim() === s);
-      if (!p) return toast(`未找到条码 ${s} 对应的商品`, 'warning');
+      const p = store.products.find((x) => (x.barcode || '').trim() === s)
+        || store.products.find((x) => x.name === s);
+      if (!p) return toast(`未找到条码或同名商品「${s}」`, 'warning');
       const hit = editor.form.items.find((it) => it.productId === p.id);
       if (hit) { hit.qty = (Number(hit.qty) || 0) + 1; return toast(`${p.name} 数量 +1`); }
       // 复用末尾空行
@@ -181,15 +241,42 @@ const DocEditor = {
       scanBarcode(scanCode.value);
       scanCode.value = '';
     }
-    function lineAmt(it) { return ((Number(it.qty) || 0) * (Number(it.price) || 0)).toFixed(2); }
+    function lineAmt(it) { return (lineCents(it) / 100).toFixed(2); }
     function stockOf(pid) { return stockMap.value[pid] ?? 0; }
+
+    /* 下拉选项过滤：名称/手机/条码/规格任一命中，且单次最多渲染 50 条——
+       此前每行渲染全量 el-option（20 行 × 1000 商品 = 2 万个选项组件），商品多的账套明显卡顿。
+       拼音首字母匹配需要内嵌码表，暂不支持（placeholder 已如实改为名称/编码） */
+    const rowKw = reactive({});
+    function filterRow(it, field, q) { rowKw[field + it._uid] = String(q || ''); }
+    function rowOpts(it, field, list, fields) {
+      const kw = String(rowKw[field + it._uid] || '').trim().toLowerCase();
+      let out = list;
+      if (kw) {
+        out = list.filter((p) => fields.some((f) => String(p[f] || '').toLowerCase().includes(kw)));
+      }
+      return out.slice(0, 50);
+    }
+    function prodOpts(it) {
+      return rowOpts(it, 'p', store.products, ['name', 'barcode', 'spec']);
+    }
+    /* 往来单位下拉是单实例，用固定 key */
+    function partnerFilter(q) { rowKw.pt0 = String(q || ''); }
+    function partnerOptsFixed() {
+      const kw = String(rowKw.pt0 || '').trim().toLowerCase();
+      let out = epartners.value;
+      if (kw) out = out.filter((p) => String(p.name || '').toLowerCase().includes(kw)
+        || String(p.mobile || '').toLowerCase().includes(kw));
+      return out.slice(0, 50);
+    }
     function setFullPaid() {
       if (!editor.form) return;
-      editor.form.paidAmount = Number(totalAmt.value.toFixed(2));
+      // 直接用整数分换算回元，避免 totalAmt.value.toFixed(2) 二次浮点
+      editor.form.paidAmount = totalCents.value / 100;
     }
     function fullDiscount() {
       if (!editor.form) return;
-      editor.form.discount = Number(grossAmt.value.toFixed(2));
+      editor.form.discount = grossCents.value / 100;
     }
 
     async function persist() {
@@ -205,8 +292,12 @@ const DocEditor = {
         // 调拨单必须指定调往仓库：后端不校验必填，空值过账会变成「源仓出又入源仓」的无效调拨
         if (m.toWarehouse && !it.toWarehouseId) throw new Error(`第 ${i + 1} 行未选择调往仓库`);
       }
-      if (Number(f.discount) > grossAmt.value) throw new Error('整单折扣不能超过单据金额');
-      if (Number(f.paidAmount) + Number(f.deposit) > totalAmt.value) {
+      // 负数在这里拦下（理由见 assertNonNegative 注释）：toCents 会把负数静默归零
+      assertNonNegative(f.discount, '整单折扣');
+      assertNonNegative(f.paidAmount, m.payLabel ? '本次付款' : '本次收款');
+      assertNonNegative(f.deposit, '抵扣订金');
+      if (Math.round(Number(f.discount) * 100) > grossCents.value) throw new Error('整单折扣不能超过单据金额');
+      if (Math.round(Number(f.paidAmount) * 100) + Math.round(Number(f.deposit) * 100) > totalCents.value) {
         throw new Error('本次收款 + 抵扣订金不能超过应收金额');
       }
       const body = {
@@ -241,6 +332,7 @@ const DocEditor = {
       saving.value = true;
       try {
         await persist();
+        rememberLast(editor.form);
         toast('已保存');
         emit('close');
       } catch (e) { toast(e.message, 'error'); }
@@ -252,6 +344,7 @@ const DocEditor = {
       saving.value = true;
       try {
         const id = await persist();
+        rememberLast(editor.form);
         await api.post('/doc/audit', { teamId: store.teamId, id });
         toast('已保存并审核');
         emit('close');
@@ -260,9 +353,10 @@ const DocEditor = {
     }
 
     return {
-      type: props.type, editor, saving, emeta, epartners, grossAmt, totalQty, totalAmt, oweAmt,
+      type: props.type, editor, saving, emeta, epartners, grossAmt, totalQty, totalAmt, oweAmt, SETTLE_TYPES,
       stockMap, priceMem, loadPriceMem, addItem, removeItem, onPick, lineAmt, stockOf,
       scanCode, doScan, scanBarcode, setFullPaid, fullDiscount, save, saveAndAudit, backToList, isDirty,
+      rowKw, filterRow, prodOpts, partnerFilter, partnerOptsFixed,
       fmtMoney, store, STATUS_TEXT, DOC_META, specOf, unitOf,
     };
   },
@@ -303,8 +397,9 @@ const DocEditor = {
         <div class="fi" v-if="emeta.partner">
           <label><span class="req">*</span>{{ emeta.partner === 'ven' ? '供应商' : '客户' }}</label>
           <div class="fc">
-            <el-select v-model="editor.form.partnerId" filterable clearable placeholder="搜索名称/拼音/手机" style="width:100%" :disabled="editor.ro">
-              <el-option v-for="p in epartners" :key="p.id" :label="p.name" :value="p.id">
+            <el-select v-model="editor.form.partnerId" filterable clearable placeholder="搜索名称 / 手机号" style="width:100%" :disabled="editor.ro"
+              :filter-method="partnerFilter" @visible-change="(v) => { if (v) rowKw.pt0 = ''; }">
+              <el-option v-for="p in partnerOptsFixed()" :key="p.id" :label="p.name" :value="p.id">
                 <span>{{ p.name }}</span><span class="opt-sub">{{ p.mobile || '' }}</span>
               </el-option>
             </el-select>
@@ -353,16 +448,22 @@ const DocEditor = {
           <th style="width:46px"></th>
         </tr></thead>
         <tbody>
-          <tr v-for="(it, idx) in editor.form.items" :key="idx">
+          <tr v-for="(it, idx) in editor.form.items" :key="it._uid ?? idx">
             <td>
-              <el-select v-model="it.productId" filterable placeholder="选择商品 / 输入编码" size="small" :disabled="editor.ro" @change="onPick(it)">
-                <el-option v-for="p in store.products" :key="p.id" :label="p.name + (p.spec ? '（' + p.spec + '）' : '')" :value="p.id"/>
+              <el-select v-model="it.productId" filterable placeholder="选择商品 / 输入编码" size="small" :disabled="editor.ro" @change="onPick(it)"
+                :filter-method="(q) => filterRow(it, 'p', q)" @visible-change="(v) => { if (v) rowKw['p' + it._uid] = ''; }">
+                <el-option v-for="p in prodOpts(it)" :key="p.id" :label="p.name + (p.spec ? '（' + p.spec + '）' : '')" :value="p.id"/>
               </el-select>
             </td>
             <td class="muted">{{ specOf(it.productId) }}</td>
             <td class="muted">{{ unitOf(it.productId) }}</td>
             <td class="r" :class="{ 'stock-low': stockOf(it.productId) <= 0 && it.productId }">{{ stockOf(it.productId) }}</td>
-            <td class="r"><input type="number" step="any" class="num" v-model.number="it.qty" :disabled="editor.ro"/></td>
+            <td class="r">
+              <!-- 超卖预警：仅提示不阻断（负库存单据类型除外），审核时后端仍会兜底拦截 -->
+              <input type="number" step="any" class="num" v-model.number="it.qty" :disabled="editor.ro"
+                :class="{ 'qty-over': !emeta.negative && it.productId && Number(it.qty) > stockOf(it.productId) }"
+                :title="!emeta.negative && it.productId && Number(it.qty) > stockOf(it.productId) ? '数量超过当前仓库可用库存 ' + stockOf(it.productId) : ''"/>
+            </td>
             <td class="r">
               <input type="number" step="0.01" min="0" class="num" v-model.number="it.price" :disabled="editor.ro" @input="it._priceDirty = true"/>
               <div v-if="priceMem[it.productId] != null" class="mem-price"
@@ -385,7 +486,7 @@ const DocEditor = {
       </table>
       <div class="de-add">
         <button class="btn sm" @click="addItem">＋ 添加一行</button>
-        <span class="scan-box">
+        <span class="scan-box" v-if="!editor.ro">
           <el-icon><Aim/></el-icon>
           <input v-model="scanCode" placeholder="扫码开单：扫描或输入条码后回车" @keyup.enter="doScan"/>
         </span>
@@ -396,17 +497,22 @@ const DocEditor = {
         <span>合计数量 <b>{{ totalQty }}</b></span>
       </div>
 
-      <!-- 底部结算区（仅涉及往来结算的单据显示） -->
+      <!-- 底部结算区：折扣对所有往来单据有效；收付款/账户/订金仅后端真正落结算的四类单据显示
+           （报价/订单/申请类无收付语义，后端审核会跳过） -->
       <div class="de-settle" v-if="emeta.partner">
-        <div class="ds-head">结算信息</div>
+        <div class="ds-head">{{ SETTLE_TYPES.has(type) ? '结算信息' : '价格小结' }}</div>
         <div class="ds-row">
           <div class="fi"><label>减整单折扣</label>
             <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.discount" :disabled="editor.ro"/>
               <span class="lnk" title="把折扣设为全部商品金额（整单全免）" @click="fullDiscount">全额减</span></div>
           </div>
+          <template v-if="SETTLE_TYPES.has(type)">
           <div class="fi"><label>{{ emeta.payLabel || '减本次收款' }}</label>
             <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.paidAmount" :disabled="editor.ro"/>
-              <span class="lnk" title="本次收款 = 应收金额" @click="setFullPaid">设为全收</span></div>
+              <span class="lnk" :title="emeta.payLabel ? '本次付款 = 应付金额' : '本次收款 = 应收金额'" @click="setFullPaid">{{ emeta.payLabel ? '设为全付' : '设为全收' }}</span></div>
+            <div class="fi-tip muted" v-if="(emeta.payLabel ? type === 'pin' : type === 'sret')" style="font-size:11.5px;width:100%">
+              退货单此栏是「退现金」：欠款客户退货请留空（货款自动冲减欠款），仅预收客户退款时填写
+            </div>
           </div>
           <div class="fi"><label>{{ emeta.payLabel ? '付款账户' : '收款账户' }}</label>
             <div class="fc">
@@ -418,13 +524,16 @@ const DocEditor = {
           <div class="fi"><label>抵扣订金</label>
             <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.deposit" :disabled="editor.ro"/></div>
           </div>
+          </template>
         </div>
         <div class="ds-total">
           <div class="ds-item">商品金额 <b class="money">{{ grossAmt.toFixed(2) }}</b></div>
-          <div class="ds-item">折扣 <b class="money">-{{ (Number(editor.form.discount)||0).toFixed(2) }}</b></div>
-          <div class="ds-item big">{{ emeta.recvLabel || '应收金额' }} <b class="money">{{ totalAmt.toFixed(2) }}</b></div>
-          <div v-if="oweAmt > 0.005" class="ds-item">本次欠款 <b class="money owe">{{ oweAmt.toFixed(2) }}</b></div>
-          <div v-else class="ds-item settled">✓ 已结清 <b class="money">0.00</b></div>
+          <div class="ds-item">折扣 <b class="money">{{ ((Number(editor.form.discount)||0) > 0 ? '-' : '') + (Number(editor.form.discount)||0).toFixed(2) }}</b></div>
+          <div class="ds-item big">{{ SETTLE_TYPES.has(type) ? (emeta.recvLabel || '应收金额') : '合计金额' }} <b class="money">{{ totalAmt.toFixed(2) }}</b></div>
+          <template v-if="SETTLE_TYPES.has(type)">
+            <div v-if="oweAmt > 0.005" class="ds-item">本次欠款 <b class="money owe">{{ oweAmt.toFixed(2) }}</b></div>
+            <div v-else class="ds-item settled">✓ 已结清 <b class="money">0.00</b></div>
+          </template>
         </div>
       </div>
       <!-- 非结算类单据：只显示金额小结 -->

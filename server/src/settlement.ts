@@ -49,9 +49,10 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     // rows 参数历史上一直被调用方传（test-settle 等）但从未生效：这里真正实现并设 500 上限
     const rawRows = Number(req.query.rows ?? 200);
     const rows = Math.min(500, Math.max(1, Number.isFinite(rawRows) && rawRows > 0 ? Math.floor(rawRows) : 200));
+    // LIMIT 占位符（不拼字符串）：与 docs/crud 风格一致，防止后续维护者照搬 ${} 模式引入注入
     const list = db
-      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ${rows}`)
-      .all(...args);
+      .prepare(`SELECT * FROM settlement WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`)
+      .all(...args, rows);
     return res.json(list);
   });
 
@@ -72,6 +73,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       return res.status(400).json({ error: '付款（payment）的往来单位必须是供应商' });
     if (!partnerId) return res.status(400).json({ error: '往来单位不能为空' });
     if (!(amount > 0)) return res.status(400).json({ error: '金额必须大于 0' });
+    // 金额上限与单据侧 MAX_PRICE_CENTS 同量级：防误录 15 位数直接改写往来/账户
+    if (amount > 1e11) return res.status(400).json({ error: '金额超出上限（10 亿元），请核对后重试' });
     // 日期校验：脏日期会污染账龄分桶与对账单期初，且事后无法用普通查询筛出
     const dateErr = validBizDate(req.body.date);
     if (dateErr) return res.status(400).json({ error: '收付款日期' + dateErr });
@@ -85,9 +88,14 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     if (!partner) return res.status(400).json({ error: '往来单位不存在' });
 
     let createdId = 0;
-    // 双击防重：3 秒窗口内同 (团队,类型,往来,金额,账户,日期) 的重复请求返回首次结果。
+    // 双击防重：3 秒窗口内同 (团队,类型,往来,金额,账户,日期,备注,refDocId,userId) 的重复请求返回首次结果。
     // 创建型请求不能像单据那样幂等回查草稿——结算入账立即生效，重复请求会造成重复冲账。
-    const dedupKey = JSON.stringify([teamId, type, partnerType, partnerId, amount, accountId, String(req.body.date ?? '')]);
+    // 备注/关联单据/操作人必须进 key：现场同一客户连收两笔同额现金（或两人同秒各录一笔）
+    // 是真实业务，只按金额去重会把第二笔真金白银静默吞掉
+    const dedupKey = JSON.stringify([
+      teamId, type, partnerType, partnerId, amount, accountId, String(req.body.date ?? ''),
+      String(req.body.remark ?? ''), req.body.refDocId ? Number(req.body.refDocId) : 0, req.auth?.userId ?? 0,
+    ]);
     const hit = recentSettles.get(dedupKey);
     if (hit && Date.now() - hit.at < SETTLE_DEDUP_MS) {
       const still = db.prepare(`SELECT id FROM settlement WHERE id = ? AND teamId = ?`).get(hit.id, teamId);
@@ -163,6 +171,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
 
     const amount = req.body.amount != null ? Math.round(Number(req.body.amount)) : old.amount;
     if (!(amount > 0)) return res.status(400).json({ error: '金额必须大于 0' });
+    // 金额上限与创建路径同口径：编辑侧漏拦会让误录 15 位数改写往来/账户
+    if (amount > 1e11) return res.status(400).json({ error: '金额超出上限（10 亿元），请核对后重试' });
     const accountId = req.body.accountId !== undefined
       ? (req.body.accountId ? Number(req.body.accountId) : null)
       : old.accountId;

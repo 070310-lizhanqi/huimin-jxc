@@ -17,30 +17,54 @@ const StockPage = {
     /** 钻取时的临时过滤词：独立于用户搜索框，切回汇总后不残留 */
     const drillKw = ref('');
 
+    // 请求序守卫：仓库/关键词/显示零库存连点时，慢的旧响应不得覆盖新结果
+    const loadGuard = seqGuard();
+
     async function load() {
+      const my = loadGuard.begin();
       loading.value = true;
       try {
         // 钻取词优先于用户搜索词，仅在明细钻取场景生效
         const effKw = view.value === 'detail' && drillKw.value ? drillKw.value : kw.value;
-        list.value = await api.get('/stock/list', {
+        const rows = await api.get('/stock/list', {
           teamId: store.teamId, kw: effKw,
           warehouseId: warehouseId.value,
           ifShowZero: ifShowZero.value ? '' : '0',
         });
+        if (!loadGuard.isCurrent(my)) return;
+        list.value = rows;
       } catch (e) {
-        toast('库存查询失败：' + e.message, 'error');
+        if (loadGuard.isCurrent(my)) toast('库存查询失败：' + e.message, 'error');
       } finally {
-        loading.value = false;
+        if (loadGuard.isCurrent(my)) loading.value = false;
       }
     }
     onMounted(load);
     const totalQty = computed(() => list.value.reduce((s, r) => s + r.qty, 0));
+    /** 安全库存优先用 /stock/list 带回的商品级 lowQty（一次请求齐全），回落到商品档案 */
     const lowQtyMap = computed(() => {
       const m = {};
-      for (const p of store.products) if (p.lowQty > 0) m[p.id] = p.lowQty;
+      for (const r of list.value) if (r.lowQty > 0) m[r.productId] = r.lowQty;
+      for (const p of store.products) if (p.lowQty > 0 && m[p.id] == null) m[p.id] = p.lowQty;
       return m;
     });
-    function isLow(r) { return lowQtyMap.value[r.productId] != null && r.qty <= lowQtyMap.value[r.productId]; }
+    /** 商品合计数量（跨仓）：明细视图判断低库存必须用商品总量，
+     *  拿单仓行数量对比商品级阈值会把多仓商品每行都误标 */
+    const prodTotalMap = computed(() => {
+      const m = {};
+      for (const r of list.value) m[r.productId] = (m[r.productId] || 0) + r.qty;
+      return m;
+    });
+    /** 估价成本（最近一次采购入库单价），同商品各行相同 */
+    const estCostMap = computed(() => {
+      const m = {};
+      for (const r of list.value) if (r.estUnitCost != null) m[r.productId] = r.estUnitCost;
+      return m;
+    });
+    function isLow(r) {
+      const low = lowQtyMap.value[r.productId];
+      return low != null && (prodTotalMap.value[r.productId] ?? 0) <= low;
+    }
     function resvName(id) { return id ? (byId(store.reservoirs, id)?.name ?? `#${id}`) : '—'; }
 
     /**
@@ -55,6 +79,7 @@ const StockPage = {
           s = {
             productId: r.productId, prodName: r.prodName, spec: r.spec, unit: r.unit,
             code: r.code, qty: 0, whs: new Set(), locs: 0, batchNo: '', rows: 0,
+            lowQty: r.lowQty, estUnitCost: r.estUnitCost ?? 0,
           };
           map.set(r.productId, s);
         }
@@ -65,25 +90,29 @@ const StockPage = {
         if (r.batchNo && !s.batchNo) s.batchNo = r.batchNo;
       }
       return [...map.values()]
-        .map((s) => ({ ...s, whs: [...s.whs].join('、') }))
+        .map((s) => ({ ...s, whs: [...s.whs].join('、'), value: Math.round(s.qty * s.estUnitCost) }))
         .filter((s) => ifShowZero.value || s.qty !== 0);
     });
 
     /** 汇总行是否低库存：安全库存是商品级阈值，故按汇总数量判断才对 */
     function isLowSum(s) { return lowQtyMap.value[s.productId] != null && s.qty <= lowQtyMap.value[s.productId]; }
     const lowCount = computed(() => summary.value.filter(isLowSum).length);
+    /** 低库存筛选：点「N 项低库存」只看缺口商品，再点一次或点清除恢复 */
+    const onlyLow = ref(false);
+    const sortedSummary = computed(() => {
+      let rows = [...summary.value];
+      if (onlyLow.value) rows = rows.filter(isLowSum);
+      if (sortKey.value === 'qtyAsc') rows.sort((a, b) => a.qty - b.qty);
+      else if (sortKey.value === 'qtyDesc') rows.sort((a, b) => b.qty - a.qty);
+      return rows;
+    });
+    const totalValue = computed(() => summary.value.reduce((s, r) => s + r.value, 0));
 
     /** 汇总排序：默认按商品建档顺序；点表头切 数量升序 → 降序 → 默认 */
     const sortKey = ref('default');
     function toggleSort() {
       sortKey.value = sortKey.value === 'default' ? 'qtyAsc' : sortKey.value === 'qtyAsc' ? 'qtyDesc' : 'default';
     }
-    const sortedSummary = computed(() => {
-      const rows = [...summary.value];
-      if (sortKey.value === 'qtyAsc') rows.sort((a, b) => a.qty - b.qty);
-      else if (sortKey.value === 'qtyDesc') rows.sort((a, b) => b.qty - a.qty);
-      return rows;
-    });
 
     /** 汇总行点「N 条明细」→ 切到明细视图并按商品名过滤，需重新请求后端 */
     async function drillTo(s) {
@@ -103,10 +132,11 @@ const StockPage = {
         exportCsv('库存汇总.csv', summary.value.map((s) => ({
           prodName: s.prodName, spec: s.spec || '', unit: s.unit,
           whs: s.whs, rows: s.rows, qty: s.qty, lowQty: lowQtyMap.value[s.productId] ?? '',
+          value: (s.value / 100).toFixed(2),
         })), [
           { key: 'prodName', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
           { key: 'whs', label: '所在仓库' }, { key: 'rows', label: '库存行数' },
-          { key: 'qty', label: '合计数量' }, { key: 'lowQty', label: '安全库存' },
+          { key: 'qty', label: '合计数量' }, { key: 'lowQty', label: '安全库存' }, { key: 'value', label: '库存货值(元)' },
         ]);
         return;
       }
@@ -123,6 +153,7 @@ const StockPage = {
     return {
       kw, warehouseId, ifShowZero, list, loading, load, totalQty, isLow, resvName, doExport, lowQtyMap, store,
       view, summary, sortedSummary, sortKey, toggleSort, isLowSum, lowCount, drillTo, backToSummary, drillKw,
+      onlyLow, totalValue, fmtMoney,
     };
   },
   template: `
@@ -147,8 +178,10 @@ const StockPage = {
           <input type="checkbox" v-model="ifShowZero" @change="load"/>显示零库存</label>
         <span class="fb-gap"></span>
         <span class="muted">库存总量 <b style="color:var(--text)">{{ totalQty }}</b> ·
-          {{ view === 'prod' ? summary.length + ' 个商品' : list.length + ' 条记录' }}<template v-if="lowCount"> ·
-          <b style="color:#e6a23c">{{ lowCount }} 项低库存</b></template></span>
+          货值约 <b style="color:var(--text)">{{ fmtMoney(totalValue) }}</b> 元 ·
+          {{ view === 'prod' ? (onlyLow ? sortedSummary.length + '/' : '') + summary.length + ' 个商品' : list.length + ' 条记录' }}<template v-if="lowCount"> ·
+          <a href="javascript:;" class="lnk" :style="onlyLow ? 'color:#b88230;font-weight:600' : ''" @click="onlyLow = !onlyLow"
+             :title="onlyLow ? '点击取消低库存筛选' : '只看低于安全库存的商品'">{{ onlyLow ? '✓ ' : '' }}{{ lowCount }} 项低库存</a></template></span>
       </div>
       <div class="tbl-wrap">
         <sk-table v-if="loading && !list.length" :rows="8" :cols="8"/>
@@ -156,10 +189,12 @@ const StockPage = {
           <thead><tr>
             <th>商品</th><th>规格</th><th>单位</th><th>所在仓库</th><th class="r">库存行数</th>
             <th class="r">合计数量<span class="th-sort" :class="{ on: sortKey !== 'default' }" @click="toggleSort()"
-              :title="sortKey === 'qtyAsc' ? '当前：数量从少到多（缺货排最前），再点切降序' : sortKey === 'qtyDesc' ? '当前：数量从多到少，再点恢复默认' : '点击按数量升序（缺货排最前）'">{{ sortKey === 'qtyDesc' ? '↓' : sortKey === 'qtyAsc' ? '↑' : '⇅' }}</span></th><th class="r">安全库存</th><th></th>
+              :title="sortKey === 'qtyAsc' ? '当前：数量从少到多（缺货排最前），再点切降序' : sortKey === 'qtyDesc' ? '当前：数量从多到少，再点恢复默认' : '点击按数量升序（缺货排最前）'">{{ sortKey === 'qtyDesc' ? '↓' : sortKey === 'qtyAsc' ? '↑' : '⇅' }}</span></th><th class="r">安全库存</th><th class="r">库存货值</th><th></th>
           </tr></thead>
           <tbody>
-            <tr v-if="!summary.length"><td colspan="8"><div class="empty">暂无库存数据</div></td></tr>
+            <tr v-if="!sortedSummary.length"><td colspan="9">
+              <div class="empty">{{ onlyLow && lowCount ? '' : '暂无库存数据' }}<template v-if="onlyLow && summary.length"><a href="javascript:;" class="lnk" @click="onlyLow = false">无低库存商品，清除筛选</a></template></div>
+            </td></tr>
             <tr v-for="s in sortedSummary" :key="s.productId">
               <td style="font-weight:500">{{ s.prodName }}</td>
               <td>{{ s.spec || '—' }}</td>
@@ -172,6 +207,7 @@ const StockPage = {
               </td>
               <td class="r" :style="{ color: s.qty < 0 ? '#f56c6c' : '', fontWeight: 600 }">{{ s.qty }}</td>
               <td class="r muted">{{ lowQtyMap[s.productId] ?? '—' }}</td>
+              <td class="r muted" :class="{ money: !!s.value }">{{ s.value ? fmtMoney(s.value) : '—' }}</td>
               <td style="width:78px">
                 <span v-if="isLowSum(s)" class="tag" style="background:#fdf6ec;color:#b88230">低库存</span>
               </td>

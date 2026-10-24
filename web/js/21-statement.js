@@ -19,31 +19,40 @@ const StatementPage = {
     });
 
     const partners = computed(() => (mode.value === 'ar' ? store.customers : store.vendors));
+    const guard = seqGuard();
 
     async function load() {
       if (!partnerId.value) return toast('请选择往来单位', 'error');
       if (!range[0] || !range[1]) return toast('请选择日期范围', 'error');
       loading.value = true;
+      const my = guard.begin();
       try {
-        data.value = await api.get('/report/statement', {
+        const r = await api.get('/report/statement', {
           teamId: store.teamId, mode: mode.value, partnerId: partnerId.value,
           from: range[0], to: range[1],
         });
-      } catch (e) { toast(e.message, 'error'); data.value = null; }
-      finally { loading.value = false; }
+        if (!guard.isCurrent(my)) return;
+        data.value = r;
+      } catch (e) {
+        if (guard.isCurrent(my)) { toast(e.message, 'error'); data.value = null; }
+      } finally { if (guard.isCurrent(my)) loading.value = false; }
     }
     function switchMode() { partnerId.value = null; data.value = null; }
 
     function doExport() {
       if (!data.value) return toast('请先查询', 'error');
+      const isAr = mode.value === 'ar';
       exportCsv(`对账单_${data.value.partner.name}_${range[0]}_${range[1]}.csv`,
         data.value.lines.map((l) => ({
           日期: l.date, 单据号: l.billNo, 类型: l.label,
-          应收: l.debit ? fmtMoney(l.debit) : '', 收款: l.credit ? fmtMoney(l.credit) : '',
-          余额: fmtMoney(l.balance), 备注: l.remark || '',
+          [isAr ? '应收' : '应付']: l.debit ? (l.debit / 100).toFixed(2) : '',
+          [isAr ? '收款' : '付款']: l.credit ? (l.credit / 100).toFixed(2) : '',
+          余额: (l.balance / 100).toFixed(2), 备注: l.remark || '',
         })), [
           { key: '日期', label: '日期' }, { key: '单据号', label: '单据号' }, { key: '类型', label: '类型' },
-          { key: '应收', label: '应收' }, { key: '收款', label: '收款' }, { key: '余额', label: '余额' }, { key: '备注', label: '备注' },
+          { key: isAr ? '应收' : '应付', label: isAr ? '应收' : '应付' },
+          { key: isAr ? '收款' : '付款', label: isAr ? '收款' : '付款' },
+          { key: '余额', label: '余额' }, { key: '备注', label: '备注' },
         ]);
     }
 
@@ -54,11 +63,14 @@ const StatementPage = {
       // 打印抬头里的公司名（功能设置 → 打印抬头），对账单给对方看，抬头必须有
       const company = (store.print?.company || '').trim();
       const rowsHtml = d.lines.map((l) => `<tr>
-        <td>${l.date}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
+        <td>${escapeHtml(l.date)}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
         <td class="r">${l.credit ? fmtMoney(l.credit) : ''}</td>
         <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`).join('');
-      const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title><style>
+      // 日期 from/to 来自服务端 safeRange，理论上合法 YYYY-MM-DD；此处仍显式转义兜底（防后端被注入异常值）
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title>
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; font-src 'none'">
+      <style>
         body{font-family:"Microsoft YaHei",sans-serif;font-size:12px;color:#333;padding:18px}
         h2{text-align:center;font-size:17px;margin:0 0 4px}
         .co{text-align:center;font-size:13px;font-weight:600;margin-bottom:2px}
@@ -71,7 +83,7 @@ const StatementPage = {
       </style></head><body>
       ${company ? `<div class="co">${escapeHtml(company)}</div>` : ''}
       <h2>${isAr ? '客户对账单' : '供应商对账单'}</h2>
-      <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${d.from} 至 ${d.to}</div>
+      <div class="sub">${escapeHtml(d.partner.name)} ｜ 期间 ${escapeHtml(d.from)} 至 ${escapeHtml(d.to)}</div>
       <table><thead><tr><th>日期</th><th>单据号</th><th>类型</th><th class="r">${isAr ? '应收' : '应付'}</th>
       <th class="r">${isAr ? '收款' : '付款'}</th><th class="r">余额</th><th>备注</th></tr></thead>
       <tbody>
@@ -80,7 +92,7 @@ const StatementPage = {
       </tbody></table>
       <div class="sum">期间发生 ${fmtMoney(d.periodDebit)} ／ 已${isAr ? '收' : '付'} ${fmtMoney(d.periodCredit)}　
         期末余额 <b>${fmtMoney(d.closing)}</b> 元</div>
-      <div class="foot"><span>对账日期：${today}</span><span>双方签字确认：__________________</span></div>
+      <div class="foot"><span>对账日期：${escapeHtml(today)}</span><span>双方签字确认：__________________</span></div>
       </body></html>`;
       const w = window.open('', '_blank');
       if (!w) return toast('打印窗口被浏览器拦截，请允许本站弹出窗口后重试', 'error');
@@ -89,7 +101,6 @@ const StatementPage = {
       w.print();
     }
 
-    onMounted(() => { if (store.customers.length) partnerId.value = null; });
     return { range, mode, partnerId, partners, loading, data, load, switchMode, doExport, doPrint, fmtMoney };
   },
   template: `
@@ -119,10 +130,14 @@ const StatementPage = {
         <span class="muted" style="font-size:12.5px;font-weight:400;margin-left:8px" v-if="data.partner.mobile">{{ data.partner.mobile }}</span>
       </div>
       <div class="stat-grid" style="margin:10px 0 4px">
-        <div class="card stat"><div class="stat-label">期初余额</div><div class="stat-val">{{ fmtMoney(data.opening) }}</div></div>
+        <div class="card stat"><div class="stat-label">期初余额</div>
+          <div class="stat-val" :style="data.opening < 0 ? 'color:#3a7bd5' : ''">{{ fmtMoney(data.opening) }}
+            <i v-if="data.opening < 0" class="kpi-unit">{{ mode === 'ar' ? '预收' : '预付' }}</i></div></div>
         <div class="card stat"><div class="stat-label">期间{{ mode === 'ar' ? '应收' : '应付' }}</div><div class="stat-val">{{ fmtMoney(data.periodDebit) }}</div></div>
         <div class="card stat"><div class="stat-label">期间已{{ mode === 'ar' ? '收' : '付' }}</div><div class="stat-val">{{ fmtMoney(data.periodCredit) }}</div></div>
-        <div class="card stat"><div class="stat-label">期末余额</div><div class="stat-val" style="color:#f26f21">{{ fmtMoney(data.closing) }}</div></div>
+        <div class="card stat"><div class="stat-label">期末余额</div>
+          <div class="stat-val" :style="data.closing < 0 ? 'color:#3a7bd5' : 'color:var(--brand)'">{{ fmtMoney(data.closing) }}
+            <i v-if="data.closing < 0" class="kpi-unit">{{ mode === 'ar' ? '预收' : '预付' }}</i></div></div>
       </div>
 
       <table class="tbl" style="margin-top:8px">
@@ -139,7 +154,7 @@ const StatementPage = {
             <td class="r">{{ fmtMoney(l.balance) }}</td>
             <td class="muted">{{ l.remark || '' }}</td>
           </tr>
-          <tr v-if="!data.lines.length"><td colspan="7" class="muted" style="text-align:center;padding:22px">该期间没有发生额。</td></tr>
+          <tr v-if="!data.lines.length"><td colspan="7"><div class="empty">该期间没有发生额</div></td></tr>
           <tr style="background:#f7f9fb;font-weight:600">
             <td colspan="5" style="text-align:right">期末余额</td>
             <td class="r">{{ fmtMoney(data.closing) }}</td><td></td>

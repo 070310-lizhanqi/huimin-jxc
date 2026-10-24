@@ -6,7 +6,12 @@ const BasePage = {
     const BASE_TABS = ['warehouse', 'reservoir', 'cat', 'unit', 'clerk', 'account'];
     const baseTabParam = route.q.tab;
     const tab = ref(BASE_TABS.includes(baseTabParam) ? baseTabParam : 'warehouse');
-    watch(() => route.q.tab, (t) => { if (BASE_TABS.includes(t)) { tab.value = t; loadBase(); } });
+    // 页内切换回写路由：F5 / 分享链接不丢当前页签（?tab=account 深链本来就支持）
+    function switchTab(k) {
+      tab.value = k;
+      const h = location.hash.replace(/^#\/base(\?.*)?$/, `#/base?tab=${k}`);
+      history.replaceState(null, '', location.pathname + location.search + h);
+    }
     const tabs = [
       { key: 'warehouse', label: '仓库' },
       { key: 'reservoir', label: '库位' },
@@ -52,6 +57,8 @@ const BasePage = {
     async function save() {
       const k = editor.kind;
       if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
+      // 库位必须挂仓库：空 warehouseId 会在列表显示 #null 且开单页无法按仓库过滤定位
+      if (k === 'reservoir' && !editor.form.warehouseId) return toast('请选择所属仓库', 'error');
       const body = { teamId: store.teamId, ...editor.form };
       if (k === 'account') body.balance = toCents(body.balance);
       // 防双击：保存请求未返回前按钮禁用（product/partner 页已有同款 busy 模式）
@@ -92,7 +99,7 @@ const BasePage = {
     const whName = (id) => byId(store.warehouses, id)?.name || `#${id}`;
     const catName = (id) => byId(store.cats, id)?.name || '';
     const typeText = { cash: '现金', bank: '银行', wechat: '微信', alipay: '支付宝' };
-    return { tab, tabs, list, editor, openNew, openEdit, save, del, whName, catName, typeText, fmtMoney, store, busy, busyDel, catOptions };
+    return { tab, tabs, list, editor, openNew, openEdit, save, del, whName, catName, typeText, fmtMoney, store, busy, busyDel, catOptions, switchTab };
   },
   template: `
   <div>
@@ -100,7 +107,7 @@ const BasePage = {
       <div class="page-head">
         <span class="hd-title">基础档案</span>
         <div class="tabs">
-          <span class="tb" v-for="t in tabs" :key="t.key" :class="{ on: tab === t.key }" @click="tab = t.key">{{ t.label }}</span>
+          <span class="tb" v-for="t in tabs" :key="t.key" :class="{ on: tab === t.key }" @click="switchTab(t.key)">{{ t.label }}</span>
         </div>
         <div class="hd-right"><button class="btn primary" @click="openNew">＋ 新增</button></div>
       </div>
@@ -160,8 +167,8 @@ const BasePage = {
       <div class="modal narrow">
         <div class="modal-head"><span class="mt">{{ editor.id ? '编辑档案' : '新增档案' }}</span><span class="x" @click="editor.open = false">×</span></div>
         <div class="modal-body">
-          <div class="fitem"><label>名称</label><input v-model="editor.form.name"/></div>
-          <div class="fitem" v-if="editor.kind==='reservoir'"><label>所属仓库</label>
+          <div class="fitem"><label><span class="req">*</span>名称</label><input v-model="editor.form.name"/></div>
+          <div class="fitem" v-if="editor.kind==='reservoir'"><label><span class="req">*</span>所属仓库</label>
             <div class="fctrl"><el-select v-model="editor.form.warehouseId" placeholder="选择仓库">
               <el-option v-for="w in store.warehouses" :key="w.id" :label="w.name" :value="w.id"/>
             </el-select></div>

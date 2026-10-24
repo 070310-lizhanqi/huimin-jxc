@@ -14,8 +14,13 @@ const HelpPage = {
   },
   template: `
   <div>
-    <div class="toolbar">
-      <button class="btn" v-for="t in tabs" :key="t.key" :class="{primary: tab===t.key}" @click="tab=t.key">{{ t.label }}</button>
+    <div class="page-card">
+      <div class="page-head">
+        <div class="hd-title">使用帮助</div>
+        <div class="tabs">
+          <span class="tb" v-for="t in tabs" :key="t.key" :class="{ on: tab === t.key }" @click="tab = t.key">{{ t.label }}</span>
+        </div>
+      </div>
     </div>
 
     <div class="card" v-if="tab==='quick'" style="padding:20px 24px;max-width:860px">
@@ -30,7 +35,7 @@ const HelpPage = {
         <li><b>收款付款</b> —— 「资金 → 收付款 → + 收款/+ 付款」：核销应收应付，可选资金账户记录余额。</li>
       </ol>
       <div style="background:#f8f9fb;border-radius:8px;padding:12px 16px;font-size:13px;color:var(--muted)">
-        💡 单据分「草稿 / 已审核 / 已作废」三态：草稿可随意改删；<b>审核后才会影响库存和往来余额</b>；作废会反向冲回。      </div>
+        💡 单据分「草稿 / 待审核 / 已审核 / 已作废」四态：草稿可随意改删，可提交审核进入待审；<b>审核后才会影响库存和往来余额</b>；作废会反向冲回（留痕可追溯）。      </div>
     </div>
 
     <div class="card" v-else-if="tab==='flow'" style="padding:20px 24px;max-width:860px">

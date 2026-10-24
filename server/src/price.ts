@@ -58,7 +58,11 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
          ORDER BY m.lastDate DESC, m.id DESC LIMIT 500`,
       )
       .all(...args);
-    return res.json({ rows });
+    // total 让前端能识别「被 LIMIT 500 静默截断」的情况并提示筛选
+    const total = (
+      db.prepare(`SELECT COUNT(*) AS c FROM price_memory m WHERE ${where.join(' AND ')}`).get(...args) as { c: number }
+    ).c;
+    return res.json({ rows, total, truncated: total > rows.length });
   });
 
   /** 手工改价记忆（也允许删除单条） */
@@ -69,16 +73,20 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
     const price = Number(req.body.price);
     if (!teamId || !partnerId || !productId) return res.status(400).json({ error: '缺少必填参数' });
     if (!(price >= 0)) return res.status(400).json({ error: '价格不能为负' });
+    // 金额上限与结算侧同量级：误录 15 位数会成为该客户的默认开单价
+    if (!Number.isFinite(price) || price > 1e11) return res.status(400).json({ error: '价格超出上限（10 亿元），请核对后重试' });
     // 归属校验：客户与商品必须属于本团队（记忆行带 teamId，但引用的档案可以是跨团队 id）
     const cus = db.prepare(`SELECT id FROM customer WHERE id = ? AND teamId = ?`).get(partnerId, teamId);
     if (!cus) return res.status(400).json({ error: '客户不存在' });
     const prod = db.prepare(`SELECT id FROM product WHERE id = ? AND teamId = ?`).get(productId, teamId);
     if (!prod) return res.status(400).json({ error: '商品不存在' });
+    // 手工改价不冒充「最近成交」：已有 lastDate（真实成交日）时保留，仅首次记忆记今天
     db.prepare(
       `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
        VALUES (?, ?, ?, ?, date('now','localtime'), 1)
        ON CONFLICT (teamId, partnerId, productId)
-       DO UPDATE SET price = excluded.price, lastDate = excluded.lastDate`,
+       DO UPDATE SET price = excluded.price,
+         lastDate = CASE WHEN price_memory.lastDate IS NULL OR price_memory.lastDate = '' THEN excluded.lastDate ELSE price_memory.lastDate END`,
     ).run(teamId, partnerId, productId, Math.round(price));
     return res.json({ ok: true });
   });
@@ -107,7 +115,8 @@ export function rememberPrices(
     `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
      VALUES (?, ?, ?, ?, ?, 1)
      ON CONFLICT (teamId, partnerId, productId)
-     DO UPDATE SET price = excluded.price, lastDate = excluded.lastDate, times = times + 1`,
+     DO UPDATE SET price = excluded.price, lastDate = excluded.lastDate, times = times + 1
+     WHERE excluded.lastDate >= price_memory.lastDate`,
   );
   for (const it of items) {
     up.run(doc.teamId, doc.partnerId, it.productId, Math.round(it.price), doc.date);

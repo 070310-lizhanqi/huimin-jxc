@@ -7,10 +7,13 @@ function todayStr() {
   const p = (n) => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
-/** 元 → 分：加 epsilon 纠正 1.005*100=100.49999999999999 这类浮点误差；非法输入按 0 */
+/** 元 → 分：加 epsilon 纠正 1.005*100=100.49999999999999 这类浮点误差。
+ *  非法输入（NaN/Infinity）按 0；负数保留原值——余额（透支）业务上可为负，
+ *  价格/收付款等禁止负数的场景由调用方先校验原始值再转换，
+ *  静默归零会让「屏幕显示 -5、落库 0」的金额不一致蒙混过关 */
 function toCents(v) {
   const n = Number(v);
-  if (!isFinite(n) || n <= 0) return 0;
+  if (!isFinite(n)) return 0;
   return Math.round(n * 100 + Number.EPSILON * Math.sign(n) * 100);
 }
 /** HTML 转义：拼打印页/弹窗 HTML 时必须包一层，防用户输入的名称/备注注入脚本 */
@@ -22,8 +25,24 @@ const specOf = (id) => (byId(store.products, id)?.spec || '—');
 /** 商品单位 */
 const unitOf = (id) => (byId(store.products, id)?.unit || '—');
 
-/* 名称解析 */
-const byId = (arr, id) => arr.find(x => x.id === id) || null;
+/* 名称解析：byId 是 O(n) 线性 find，在模板每行都被调用（prodLabel/whLabel/partnerLabel 等），
+ * 列表 1000 行 × 每行 6 次 find = 6000 次线性扫，直接卡 UI 线程。
+ * 这里对常用档案建 Map<id, entity> 缓存；源数组被替换时（loadBase/档案编辑）通过
+ * 版本号比对失效重建。 */
+const _mapCache = new WeakMap();
+function toMap(arr) {
+  let m = _mapCache.get(arr);
+  if (m && m._size === arr.length) return m;
+  m = new Map();
+  for (const x of arr) m.set(x.id, x);
+  m._size = arr.length;
+  _mapCache.set(arr, m);
+  return m;
+}
+const byId = (arr, id) => {
+  if (!arr || !arr.length) return null;
+  return toMap(arr).get(id) || null;
+};
 const prodLabel = (id) => {
   const p = byId(store.products, id);
   return p ? p.name + (p.spec ? `（${p.spec}）` : '') : `商品#${id}`;
@@ -37,4 +56,10 @@ const accountLabel = (id) => (id ? (byId(store.accounts, id)?.name ?? `账户#${
 const clerkLabel = (id) => (id ? (byId(store.clerks, id)?.name ?? `#${id}`) : null);
 const whLabel = (id) => (id ? (byId(store.warehouses, id)?.name ?? `仓库#${id}`) : null);
 const catLabel = (id) => (id ? (byId(store.cats, id)?.name ?? '') : '');
+
+/* 账龄分桶共享色板（工作台与账龄页统一）：品牌橙由深到浅表达账龄递进，
+   超 720 天一档用警示红。08-dashboard 与 22-aging 共用，改色只改这一处 */
+const AGING_COLORS = ['#f26f21', '#ff8a3d', '#ffa864', '#ffc08a', '#ffd9bd', '#ffe7d6', '#e85656'];
+const AGING_LABELS = ['30天内', '60天内', '90天内', '180天内', '360天内', '720天内', '超过720天'];
+const AGING_KEYS = ['d30', 'd60', 'd90', 'd180', 'd360', 'd720', 'over720'];
 

@@ -31,4 +31,8 @@ const DOC_GROUPS = {
   // 出库申请 / 生产任务：申请类单据，走库存模块
   apply: { label: '申请与任务', types: ['outapply', 'prodtask'] },
 };
+/* 支持开单即收付的单据类型（与后端 docs.ts 的 MONEY_FLOW 白名单一致）。
+   报价单/订单/申请类虽带往来单位，但后端审核时跳过其收付款——
+   编辑器据此后台隐藏结算区，避免出现填了也无效的死输入框 */
+const SETTLE_TYPES = new Set(['stockin', 'pin', 'stockout', 'sret']);
 

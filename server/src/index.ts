@@ -73,10 +73,20 @@ app.use((_req, res, next) => {
 // 显著加快首屏与列表加载。阈值以下不压（压缩开销不划算）。
 import zlib from 'node:zlib';
 const GZIP_MIN = 1024;
+// 上限保护：单次响应缓冲超过 32MB 时直接放弃压缩，转发原始响应——
+// 避免报表导出/备份下载这类大响应被整体缓冲进内存推高 RSS。
+const GZIP_MAX_BUFFER = 32 * 1024 * 1024;
 const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
+// 下载/导出路由显式跳过压缩：备份文件已是 SQLite 二进制，压缩无收益且放大内存
+const GZIP_SKIP_PATH = /^\/api\/backup\/download/;
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const accept = String(req.headers['accept-encoding'] ?? '');
   if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
+    next();
+    return;
+  }
+  // 下载路由跳过：直接走原始流式响应
+  if (GZIP_SKIP_PATH.test(req.path)) {
     next();
     return;
   }
@@ -84,6 +94,7 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
   const chunks: Buffer[] = [];
   let size = 0;
   let usingGzip = false;
+  let overflow = false; // 缓冲超上限后放弃压缩，直接转发原始字节
   const origWrite = res.write.bind(res) as (c: unknown) => boolean;
   const origEnd = res.end.bind(res) as (...a: unknown[]) => express.Response;
   const origSetHeader = res.setHeader.bind(res);
@@ -95,6 +106,18 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
   res.write = (chunk: unknown): boolean => {
     if (chunk) {
       const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      // 超上限：放弃压缩，立即把已缓冲内容原样写出，转入直通模式
+      if (!overflow && size + b.length > GZIP_MAX_BUFFER) {
+        overflow = true;
+        for (const c of chunks) origWrite(c);
+        chunks.length = 0;
+        origWrite(b);
+        return true;
+      }
+      if (overflow) {
+        origWrite(b);
+        return true;
+      }
       chunks.push(b);
       size += b.length;
     }
@@ -104,9 +127,21 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     const tail = a[0];
     if (tail) {
       const b = Buffer.isBuffer(tail) ? tail : Buffer.from(String(tail));
+      if (overflow) {
+        origWrite(b);
+        return origEnd();
+      }
+      if (size + b.length > GZIP_MAX_BUFFER) {
+        // 最后一个 chunk 把它顶超上限：原样转发全部
+        for (const c of chunks) origWrite(c);
+        chunks.length = 0;
+        origWrite(b);
+        return origEnd();
+      }
       chunks.push(b);
       size += b.length;
     }
+    if (overflow) return origEnd();
     const type = String(res.getHeader('content-type') ?? '').split(';')[0];
     // 决策：类型可压 + 体积达标 + 未手动指定 Content-Encoding
     if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
@@ -350,7 +385,8 @@ api.post('/product/import', (req, res) => {
       const lowRaw = String(r.lowQty ?? '').trim();
       if (lowRaw !== '') {
         const n = Number(lowRaw);
-        if (!Number.isFinite(n) || n < 0) {
+        // 与单据侧 MAX_QTY 同上限：安全库存是数量不是价格，量级失控同样是录错
+        if (!Number.isFinite(n) || n < 0 || n > 9_999_999) {
           errors.push({ row: rowNo, msg: '安全库存格式不正确' });
           continue;
         }
@@ -485,6 +521,15 @@ function acquireLock(): boolean {
       }
     }
   }
+  // 循环耗尽仍未确认持锁（并发实例同时清残留/重建锁文件的极小概率竞态）：
+  // 以锁文件内容为准复核，避免两个实例同时以「成功」跑起来
+  let locked = false;
+  try {
+    locked = Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid;
+  } catch {
+    /* 锁文件读不到：视为未持锁 */
+  }
+  if (!locked) return false;
   // 退出时清锁（kill -9 等异常退出会留残留文件，由上面的存活检测兜底）
   process.on('exit', () => {
     try {
@@ -494,10 +539,15 @@ function acquireLock(): boolean {
   return true;
 }
 
-/** 把实际端口写进数据目录，供启动器/快捷方式读取后打开浏览器 */
+/** 把实际端口写进数据目录，供启动器/快捷方式读取后打开浏览器。
+ *  原子写：先写临时文件再 rename——launcher 每 2s 轮询读，
+ *  直接 writeFileSync 会让 launcher 读到截断内容返回 null 误判服务未起。 */
 function writePortFile(port: number): void {
   try {
-    fs.writeFileSync(path.join(dataDir(), 'port.txt'), String(port));
+    const target = path.join(dataDir(), 'port.txt');
+    const tmp = `${target}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, String(port));
+    fs.renameSync(tmp, target);
   } catch { /* 数据目录不可写时忽略：仅影响自动开浏览器 */ }
 }
 

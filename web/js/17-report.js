@@ -30,8 +30,12 @@ const ReportPage = {
     const RANK_BY = [{ key: 'cus', label: '按客户' }, { key: 'clerk', label: '按业务员' }, { key: 'prod', label: '按商品' }];
     const rankBy = ref('cus');
     const rankRows = ref([]);
+    // 请求序守卫：排行页签/日期区间连点时，慢的旧响应不得覆盖新结果
+    const rankGuard = seqGuard();
+    const loadGuard = seqGuard();
     async function loadRank() {
       if (!(tab.value in RANK_DIMS)) return;
+      const my = rankGuard.begin();
       loading.value = true;
       try {
         // 收款结算单没有业务员维度，后端会强制按客户归组
@@ -39,12 +43,14 @@ const ReportPage = {
         const r = await api.get('/report/sale-rank', {
           teamId: store.teamId, dimension: tab.value, by, range: 'year', limit: 50,
         });
+        if (!rankGuard.isCurrent(my)) return;
         rankRows.value = r.rows || [];
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) { if (rankGuard.isCurrent(my)) toast(e.message, 'error'); }
+      finally { if (rankGuard.isCurrent(my)) loading.value = false; }
     }
     async function load() {
       if (!range[0] || !range[1]) return toast('请选择日期范围', 'error');
+      const my = loadGuard.begin();
       loading.value = true;
       try {
         const params = { teamId: store.teamId, from: range[0], to: range[1] };
@@ -53,16 +59,20 @@ const ReportPage = {
           api.get('/report/product', params),
           api.get('/report/customer', params),
         ]);
+        if (!loadGuard.isCurrent(my)) return;
         sales.value = s;
         products.value = p.rows || [];
         customers.value = c.rows || [];
         nextTick(renderChart);
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) { if (loadGuard.isCurrent(my)) toast(e.message, 'error'); }
+      finally { if (loadGuard.isCurrent(my)) loading.value = false; }
     }
 
     function renderChart() {
       if (!chartEl.value) return;
+      // 切到排行页签时图表容器被 v-if 销毁，旧实例仍挂在已脱离文档的 DOM 上；
+      // 切回后 chartEl 是新节点，必须重建实例，否则 setOption 渲染进死节点、趋势图永久空白
+      if (chart && chart.getDom() !== chartEl.value) { chart.dispose(); chart = null; }
       if (!chart) chart = echarts.init(chartEl.value);
       const map = new Map((sales.value.days || []).map((d) => [d.day, d]));
       const cats = [];

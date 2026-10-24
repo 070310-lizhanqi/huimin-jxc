@@ -8,14 +8,21 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { validBizDate } from './db';
 
-function rangeOf(req: Request): { from: string; to: string } {
+function rangeOf(req: Request): { from: string; to: string; error: string | null } {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
-  return {
-    from: String(req.query.from ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-01`),
-    to: String(req.query.to ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`),
-  };
+  const from = String(req.query.from ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-01`);
+  const to = String(req.query.to ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`);
+  // 日期参数校验：脏日期（格式错/不存在的日历日）会让字符串比较静默输出错账报表
+  // （如 '2026-01-01' < '2026/1/1' 恒真 → 期初吞下全部历史），必须拒绝而不是猜
+  for (const [label, v] of [['from', from], ['to', to]] as const) {
+    const err = validBizDate(v);
+    if (err) return { from, to, error: `${label} 参数非法：${err}` };
+  }
+  if (from > to) return { from, to, error: 'from 不能晚于 to' };
+  return { from, to, error: null };
 }
 
 /** 单据类型归类：正负方向用于进销存统计
@@ -36,7 +43,12 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       res.status(400).json({ error: 'teamId 不能为空' });
       return;
     }
-    const { from, to } = rangeOf(req);
+    const range = rangeOf(req);
+    if (range.error) {
+      res.status(400).json({ error: range.error });
+      return;
+    }
+    const { from, to } = range;
 
     // 按单据类型汇总
     const byType = db
@@ -54,6 +66,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
 
     // 按商品汇总（入 = stockin/otherin/sret/stockinit，出 = stockout/otherout/pin）
     // 结存数量取 stock 表当前实存（不分期间），避免「只看出库看不出库前库存」导致负数。
+    // 原实现：每行相关子查询 (SELECT SUM(s.qty) FROM stock s WHERE s.productId=i.productId)，
+    // N 个商品 = N 次 stock 全扫。改为 LEFT JOIN 一次性聚合子查询。
     const rows = db
       .prepare(
         `SELECT i.productId, p.name AS prodName, p.spec, p.unit,
@@ -61,16 +75,19 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
                 COALESCE(SUM(CASE WHEN d.type IN ('stockin','otherin','sret','stockinit') THEN i.amount ELSE 0 END), 0) AS inAmount,
                 COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.qty ELSE 0 END), 0) AS outQty,
                 COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.amount ELSE 0 END), 0) AS outAmount,
-                COALESCE((SELECT SUM(s.qty) FROM stock s WHERE s.teamId = d.teamId AND s.productId = i.productId), 0) AS stockQty
+                COALESCE(sq.stockQty, 0) AS stockQty
          FROM doc_item i
          JOIN doc d ON d.id = i.docId
          JOIN product p ON p.id = i.productId
+         LEFT JOIN (SELECT productId, SUM(qty) AS stockQty FROM stock WHERE teamId = ? GROUP BY productId) sq
+           ON sq.productId = i.productId
          WHERE d.teamId = ? AND d.status = 'audit' AND d.date >= ? AND d.date <= ?
+           AND d.type IN ('stockin','otherin','sret','stockinit','stockout','otherout','pin')
          GROUP BY i.productId
          HAVING inQty <> 0 OR outQty <> 0
          ORDER BY outAmount DESC, inAmount DESC`,
       )
-      .all(teamId, from, to) as Array<{
+      .all(teamId, teamId, from, to) as Array<{
       productId: number;
       prodName: string;
       spec: string | null;
@@ -105,7 +122,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       res.status(400).json({ error: 'teamId 不能为空' });
       return;
     }
-    const windowDays = Math.min(365, Math.max(1, Number(req.query.days ?? 30)));
+    // days 参数守护：Number('abc')=NaN 会让 Math.max(1,NaN)=NaN → startD 变 Invalid Date，
+    // 拼出 'NaN-NaN-NaN' 参与日期比较导致接口静默返回空集。
+    const rawDays = Number(req.query.days ?? 30);
+    const windowDays = Number.isFinite(rawDays) ? Math.min(365, Math.max(1, Math.floor(rawDays))) : 30;
     const d = new Date();
     const end = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const startD = new Date(d.getTime() - windowDays * 86_400_000);
@@ -132,15 +152,18 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .all(teamId, start, end) as Array<{ productId: number; qty: number }>;
     const outMap = new Map<number, number>(outs.map((o) => [o.productId, o.qty]));
 
-    // 成本
+    // 成本（与 aging.ts / report.ts 同口径：加 d.date <= 今天 上限，
+    // 未来业务日期的补录入库不参与当前成本估算）
+    const end2 = end;
     const costs = db
       .prepare(
         `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
+           AND d.date <= ?
          GROUP BY l.productId`,
       )
-      .all(teamId) as Array<{ productId: number; avgCost: number }>;
+      .all(teamId, end2) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
 
     const products = db
@@ -208,10 +231,16 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       res.status(400).json({ error: 'partnerId 不能为空' });
       return;
     }
-    const { from, to } = rangeOf(req);
+    const range = rangeOf(req);
+    if (range.error) {
+      res.status(400).json({ error: range.error });
+      return;
+    }
+    const { from, to } = range;
     const partnerType = mode === 'ar' ? 'cus' : 'ven';
     const chargeTypes = mode === 'ar' ? "('stockout','sret')" : "('stockin','pin')";
     const settleType = mode === 'ar' ? 'receipt' : 'payment';
+    const reverseType = mode === 'ar' ? 'payment' : 'receipt';
     const signOf = (type: string) => {
       if (mode === 'ar') return type === 'sret' ? -1 : 1;
       return type === 'pin' ? -1 : 1;
@@ -228,12 +257,15 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       )
       .all(teamId, partnerId, from) as Array<{ type: string; amt: number }>;
     const beforeDocs = beforeRows.reduce((s, r) => s + r.amt * signOf(r.type), 0);
+    // 期初结算净额：正向收款冲减，反向类型（AR 的 payment=现退客户 / AP 的 receipt=供应商退款）
+    // 是退货单审核时落账、bump 往来为正——期初不把它加回去就与 partner_balance 对不上。
+    // 注意占位符顺序：CASE 的 ? 在 SELECT 列表里排第一
     const beforeSettle = db
       .prepare(
-        `SELECT COALESCE(SUM(amount), 0) AS amt FROM settlement
-         WHERE teamId = ? AND type = ? AND partnerType = ? AND partnerId = ? AND date < ?`,
+        `SELECT COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE -amount END), 0) AS amt FROM settlement
+         WHERE teamId = ? AND type IN (?, ?) AND partnerType = ? AND partnerId = ? AND date < ?`,
       )
-      .get(teamId, settleType, partnerType, partnerId, from) as { amt: number };
+      .get(settleType, teamId, settleType, reverseType, partnerType, partnerId, from) as { amt: number };
     const opening = beforeDocs - beforeSettle.amt;
 
     // 期间明细
@@ -254,14 +286,15 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     }>;
     const settleRows = db
       .prepare(
-        `SELECT id, date, amount, accountId, remark FROM settlement
-         WHERE teamId = ? AND type = ? AND partnerType = ? AND partnerId = ? AND date >= ? AND date <= ?
+        `SELECT id, date, amount, type, accountId, remark FROM settlement
+         WHERE teamId = ? AND type IN (?, ?) AND partnerType = ? AND partnerId = ? AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, settleType, partnerType, partnerId, from, to) as Array<{
+      .all(teamId, settleType, reverseType, partnerType, partnerId, from, to) as Array<{
       id: number;
       date: string;
       amount: number;
+      type: string;
       accountId: number | null;
       remark: string | null;
     }>;
@@ -294,10 +327,14 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .get(teamId, partnerId, from) as { amt: number };
     const openingFinal = opening - beforeDep.amt;
     let balance = openingFinal;
-    const merged: Array<{ date: string; seq: number; line: Omit<Line, 'balance'> }> = [];
+    // 同日排序：单据行 → 收付款行 → 订金抵扣行。
+    // ord 是类别权重而非 id 偏移——原先用 1_000_000+id / 2_000_000+id 区分，
+    // doc 自增 id 超过百万后单据行会被排到收付款行之后，同日内错序
+    const merged: Array<{ date: string; ord: number; seq: number; line: Omit<Line, 'balance'> }> = [];
     for (const r of chargeRows) {
       merged.push({
         date: r.date,
+        ord: 0,
         seq: r.id,
         line: {
           date: r.date,
@@ -311,16 +348,20 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       });
     }
     for (const r of settleRows) {
+      const isReverse = r.type !== settleType;
       merged.push({
         date: r.date,
-        seq: 1_000_000 + r.id,
+        ord: 1,
+        seq: r.id,
         line: {
           date: r.date,
           kind: 'settle',
-          billNo: `#${r.id}`,
-          label: settleType === 'receipt' ? '收款' : '付款',
-          debit: 0,
-          credit: r.amount,
+          // 收付款记录无单号体系，用 收-/付- 前缀代替裸 #id（打印件可读）
+          billNo: `${settleType === 'receipt' ? '收' : '付'}-${r.id}`,
+          label: isReverse ? '退款' : (settleType === 'receipt' ? '收款' : '付款'),
+          // 退款（退货单当场退款，审核时 bump 往来为正）在应收/应付上都是「加回」，渲染为借方
+          debit: isReverse ? r.amount : 0,
+          credit: isReverse ? 0 : r.amount,
           remark: r.remark,
         },
       });
@@ -346,19 +387,21 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       if (dep === 0) continue;
       merged.push({
         date: r.date,
-        seq: 2_000_000 + r.id,
+        ord: 2,
+        seq: r.id,
         line: {
           date: r.date,
           kind: 'settle',
           billNo: r.billNo,
           label: '订金抵扣',
-          debit: 0,
+          // 退货单（sret/pin）的订金抵扣方向为负：审核时 bump 往来为正（应收/应付加回），是借方行
+          debit: dep < 0 ? -dep : 0,
           credit: dep > 0 ? dep : 0,
           remark: '开单审核时订金自动冲减往来',
         },
       });
     }
-    merged.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq));
+    merged.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.ord - b.ord || a.seq - b.seq));
     for (const m of merged) {
       balance += m.line.debit - m.line.credit;
       lines.push({ ...m.line, balance });

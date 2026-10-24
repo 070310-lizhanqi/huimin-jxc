@@ -33,7 +33,6 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
   const cols = cfg.fields.join(', ');
   const holders = cfg.fields.map(() => '?').join(', ');
   const updateFields = cfg.fields.filter((f) => !(cfg.createOnlyFields ?? []).includes(f));
-  const sets = updateFields.map((f) => `${f} = ?`).join(', ');
 
   router.get(`/${cfg.table}`, (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
@@ -57,8 +56,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       sql += ` LIMIT ? OFFSET ?`;
       args.push(rows, (page - 1) * rows);
     } else {
-      // 全量兜底上限：极端情况下（误把档案当导入用）也不会一次性吐几十万行
-      sql += ` LIMIT ${CRUD_MAX_ROWS}`;
+      // 全量兜底上限：极端情况下（误把档案当导入用）也不会一次性吐几十万行。
+      // 用占位符而非字符串插值：与上方分页写法一致，防止维护者照搬 ${} 模式引入注入。
+      sql += ` LIMIT ?`;
+      args.push(CRUD_MAX_ROWS);
     }
     return res.json(db.prepare(sql).all(...args));
   });
@@ -94,11 +95,16 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       const err = cfg.validate({ ...(req.body as Record<string, unknown>), id });
       if (err) return res.status(400).json({ error: err });
     }
-    const values: Value[] = updateFields.map((f) => normalize(req.body[f]));
+    // PATCH 式更新：请求体未携带的字段（undefined）保持旧值，显式传 null/'' 才清空。
+    // 原实现把 undefined 一律 normalize 成 NULL——局部更新会静默清掉未携带的字段
+    // （前端目前总发全量字段所以未触发，但 API 是对外契约，不能埋这个雷）
+    const present = updateFields.filter((f) => (req.body as Record<string, unknown>)[f] !== undefined);
+    if (!present.length) return res.status(400).json({ error: '没有可更新的字段' });
+    const values: Value[] = present.map((f) => normalize(req.body[f]));
     let info: { changes: number | bigint };
     try {
       info = db
-        .prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`)
+        .prepare(`UPDATE ${cfg.table} SET ${present.map((f) => `${f} = ?`).join(', ')} WHERE id = ? AND teamId = ?`)
         .run(...values, id, teamId);
     } catch {
       return res.status(400).json({ error: '保存失败：名称可能已存在' });
@@ -128,6 +134,9 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
 
 function normalize(v: unknown): Value {
   if (v === undefined || v === null || v === '') return null;
-  if (typeof v === 'number' || typeof v === 'string') return v;
-  return String(v);
+  // number：NaN/Infinity 会被 better-sqlite3 拒绝或落 NULL，显式转 null 防怪数据
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') return v;
+  // boolean/object 静默 String() 化会落库成 "true"/"[object Object]" 污染档案，显式置 null
+  return null;
 }

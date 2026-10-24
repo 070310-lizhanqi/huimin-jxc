@@ -28,6 +28,10 @@ const FinancePage = {
       ];
     });
 
+    const loading = ref(false);
+    // 余额是否已加载过：顶部「应收/应付合计」卡片无条件渲染且从 balances 计算，
+    // 首屏（页签还在 settle）也必须拉一次，否则两张核心金额卡恒显 ¥0.00
+    let balLoaded = false;
     async function load() {
       const q = { teamId: store.teamId };
       if (fType.value) q.type = fType.value;
@@ -38,15 +42,26 @@ const FinancePage = {
         if (pt) q.partnerType = pt;
         q.partnerId = fPartnerId.value;
       }
-      const [s, b] = await Promise.all([
-        api.get('/settlement/list', q),
-        api.get('/partner/balance', { teamId: store.teamId }),
-      ]);
-      settlements.value = s;
-      balances.value = b;
-      loadDocNos();
+      loading.value = true;
+      try {
+        // 余额与结算筛选无关：首屏或已在余额页签时拉；余额页签下每次刷新都重拉（录入收款后卡片要跟着变）
+        const needBal = tab.value === 'bal' || !balLoaded;
+        const [s, b] = await Promise.all([
+          api.get('/settlement/list', q),
+          needBal ? api.get('/partner/balance', { teamId: store.teamId }) : Promise.resolve(null),
+        ]);
+        settlements.value = s;
+        if (b) { balances.value = b; balLoaded = true; }
+        loadDocNos();
+      } catch (e) {
+        toast('收付款记录加载失败：' + e.message, 'error');
+      } finally {
+        loading.value = false;
+      }
     }
     onMounted(load);
+    // 页签切到往来余额时刷新余额（load 里首屏拉过也会重拉，保证卡片不是旧值）
+    watch(tab, (t) => { if (t === 'bal') api.get('/partner/balance', { teamId: store.teamId }).then((b) => { balances.value = b; }).catch(() => {}); });
 
     // 关联单据单号缓存：收付款记录里只有 refDocId，批量接口一次查完（原实现逐条请求，N+1）
     const docNos = ref({});
@@ -109,6 +124,8 @@ const FinancePage = {
         }
         editor.open = false;
         toast(f.id ? '已保存' : '已登记');
+        // 收付款直接改往来余额：重置 balLoaded 让 load() 强制重拉，顶部合计卡立即更新
+        balLoaded = false;
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
@@ -145,6 +162,8 @@ const FinancePage = {
       try {
         await api.del('/settlement/' + s.id, { teamId: store.teamId });
         toast('已删除');
+        // 删除同样改往来余额：强制重拉余额卡片
+        balLoaded = false;
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
@@ -156,21 +175,24 @@ const FinancePage = {
     function exportBal() {
       if (!balRows.value.length) return toast('没有可导出的往来余额', 'warning');
       exportCsv(
-        `往来余额_${new Date().toISOString().slice(0, 10)}.csv`,
-        ['往来单位', '类型', '余额(元)', '说明'],
-        balRows.value.map((b) => [
-          b.name,
-          b.partnerType === 'cus' ? '客户' : '供应商',
-          (b.balance / 100).toFixed(2),
-          b.partnerType === 'cus'
+        `往来余额_${todayStr()}.csv`,
+        balRows.value.map((b) => ({
+          name: b.name,
+          ptype: b.partnerType === 'cus' ? '客户' : '供应商',
+          balance: (b.balance / 100).toFixed(2),
+          note: b.partnerType === 'cus'
             ? (b.balance > 0 ? '客户欠款（应收）' : b.balance < 0 ? '客户预付（预收）' : '已结清')
             : (b.balance > 0 ? '欠供应商（应付）' : b.balance < 0 ? '供应商预付冲抵' : '已结清'),
-        ]),
+        })),
+        [
+          { key: 'name', label: '往来单位' }, { key: 'ptype', label: '类型' },
+          { key: 'balance', label: '余额(元)' }, { key: 'note', label: '说明' },
+        ],
       );
     }
     return {
       settlements, tab, editor, viewerId, receivable, payable, balRows, openNew, openEdit, remove, save, busy,
-      partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney, exportBal,
+      partnerOpts, partnerName, docNoOf, gotoDoc, load, store, fmtMoney, exportBal, loading, byId,
       fType, fPartnerType, fPartnerId, fRange, partnerFilterOpts, resetFilter, delBusy, filteredSum,
     };
   },
@@ -183,7 +205,7 @@ const FinancePage = {
       </div>
       <div class="stat">
         <div class="ico" style="background:#fff1f0;color:#f5222d"><el-icon><CreditCard/></el-icon></div>
-        <div><div class="num money">{{ fmtMoney(payable) }}</div><div class="lbl">应付金额合计（供应商欠款）</div></div>
+        <div><div class="num money">{{ fmtMoney(payable) }}</div><div class="lbl">应付金额合计（我方欠供应商）</div></div>
       </div>
     </div>
     <div class="page-card" style="margin-top:14px">
@@ -215,15 +237,16 @@ const FinancePage = {
         <span class="muted fb-count">共 {{ settlements.length }} 笔，合计 <b class="money">{{ fmtMoney(filteredSum) }}</b></span>
       </div>
       <div class="tbl-wrap" v-if="tab==='settle'">
-        <table class="tbl">
+        <sk-table v-if="loading && !settlements.length" :rows="8" :cols="8"/>
+        <table class="tbl" v-else>
           <thead><tr><th>日期</th><th>类型</th><th>往来单位</th><th>资金账户</th><th class="r">金额</th><th>关联单据</th><th>备注</th><th class="c" style="width:110px">操作</th></tr></thead>
           <tbody>
             <tr v-if="!settlements.length"><td colspan="8"><div class="empty">暂无收付款记录</div></td></tr>
             <tr v-for="s in settlements" :key="s.id">
               <td>{{ s.date }}</td>
-              <td><span :class="'tag ' + (s.type === 'receipt' ? 'tag-audit' : 'tag-void')">{{ s.type === 'receipt' ? '收款' : '付款' }}</span></td>
-              <td>{{ (s.partnerType === 'cus' ? store.customers.find(c => c.id === s.partnerId) : store.vendors.find(v => v.id === s.partnerId))?.name || '#' + s.partnerId }}</td>
-              <td>{{ store.accounts.find(a => a.id === s.accountId)?.name || '—' }}</td>
+              <td><span :class="'tag ' + (s.type === 'receipt' ? 'tag-in' : 'tag-out')">{{ s.type === 'receipt' ? '收款' : '付款' }}</span></td>
+              <td>{{ byId(s.partnerType === 'cus' ? store.customers : store.vendors, s.partnerId)?.name || '#' + s.partnerId }}</td>
+              <td>{{ byId(store.accounts, s.accountId)?.name || '—' }}</td>
               <td class="r money">{{ fmtMoney(s.amount) }}</td>
               <td>
                 <a v-if="s.refDocId" class="lnk" @click="gotoDoc(s.refDocId)">{{ docNoOf(s.refDocId) }}</a>
@@ -231,8 +254,8 @@ const FinancePage = {
               </td>
               <td class="muted">{{ s.remark || '—' }}</td>
               <td class="c">
-                <a class="lnk" @click="openEdit(s)">编辑</a>
-                <a class="lnk danger" @click="delBusy === s.id ? null : remove(s)">{{ delBusy === s.id ? '删除中…' : '删除' }}</a>
+                <button class="btn sm" @click="openEdit(s)">编辑</button>
+                <button class="btn sm danger" :disabled="delBusy === s.id" @click="remove(s)">{{ delBusy === s.id ? '删除中…' : '删除' }}</button>
               </td>
             </tr>
           </tbody>

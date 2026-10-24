@@ -57,12 +57,15 @@ const DashboardPage = {
       { label: '库存预估', icon: 'TrendCharts', to: '#/forecast' },
       { label: '客户对账单', icon: 'Tickets', to: '#/statement?mode=ar' },
     ];
-    const QUICK_KEY = 'orange.quick.' + store.teamId;
+    // 快捷入口存储 key 按 teamId 动态生成：原先在 setup 时取 store.teamId 还是 null，
+    // 固化成 "orange.quick.null"，换账套后读到别的账号的快捷配置。
+    // 改 computed 让 key 随 teamId 变化自动重算。
+    const QUICK_KEY = computed(() => 'orange.quick.' + (store.teamId ?? 'anon'));
     const quickEdit = ref(false);
 
     function loadQuick() {
       try {
-        const raw = localStorage.getItem(QUICK_KEY);
+        const raw = localStorage.getItem(QUICK_KEY.value);
         const arr = raw ? JSON.parse(raw) : null;
         if (Array.isArray(arr) && arr.length) {
           // 只保留仍存在的默认项（防止旧版本残留失效入口）
@@ -74,9 +77,11 @@ const DashboardPage = {
       return QUICK_DEFAULT.slice();
     }
     const QUICK = ref(loadQuick());
+    // teamId 变化（换账套）时重新加载该账号的快捷配置
+    watch(() => store.teamId, () => { QUICK.value = loadQuick(); });
 
     function persistQuick() {
-      try { localStorage.setItem(QUICK_KEY, JSON.stringify(QUICK.value.map((x) => x.label))); } catch (e) { /* 存储满时忽略 */ }
+      try { localStorage.setItem(QUICK_KEY.value, JSON.stringify(QUICK.value.map((x) => x.label))); } catch (e) { /* 存储满时忽略 */ }
     }
     function removeQuick(label) {
       QUICK.value = QUICK.value.filter((x) => x.label !== label);
@@ -109,13 +114,29 @@ const DashboardPage = {
       ...r,
       prodName: byId(store.products, r.productId)?.name || `#${r.productId}`,
     })));
-    const showGuide = computed(() => !store.products.length && stats.value
+    /** 新手引导：空账套显示；「不再显示」按账套记忆（换账套/新建账套会重新出现） */
+    const guideDoneKey = computed(() => 'oc.guide.done.' + (store.teamId ?? ''));
+    const guideHidden = ref(false);
+    try { guideHidden.value = Boolean(localStorage.getItem('oc.guide.done.' + (store.teamId ?? ''))); } catch { /* ignore */ }
+    function dismissGuide() {
+      guideHidden.value = true;
+      try { localStorage.setItem(guideDoneKey.value, '1'); } catch { /* ignore */ }
+    }
+    const showGuide = computed(() => !guideHidden.value && !store.products.length && stats.value
       && Number(stats.value.draftCount ?? 0) === 0 && Number(stats.value.totalQty ?? 0) === 0);
 
-    /** 环形图公共配置 */
-    const BUCKET_LABELS = ['30天内', '60天内', '90天内', '180天内', '360天内', '720天内', '超过720天'];
-    const BUCKET_COLORS = ['#5b8ff9', '#8fd16a', '#f6bd16', '#f56c6c', '#6dc8ec', '#5ad8a6', '#ff9845'];
-    const BUCKET_KEYS = ['d30', 'd60', 'd90', 'd180', 'd360', 'd720', 'over720'];
+    /** 环形图公共配置（色板/标签与 22-aging 共享 AGING_* 常量） */
+    const BUCKET_LABELS = AGING_LABELS;
+    /* 图表统一用色（品牌橙系单色渐变）：账龄由深到浅表达「越老越严重」的递进，
+       超 720 天一档用警示红；替代此前 AntV 默认蓝绿混搭（与品牌橙零关联） */
+    const C = { brand: '#f26f21', brandSoft: '#ff8a3d', brandLight: '#ffc08a', grayAxis: '#8a919c', grayText: '#5c6670', neg: '#e85656', outBar: '#b8c2cc' };
+    const BUCKET_COLORS = AGING_COLORS;
+    const BUCKET_KEYS = AGING_KEYS;
+    /* 深色 tooltip：三处图表共用一套观感（此前趋势图是 ECharts 默认白底） */
+    const CHART_TOOLTIP = {
+      backgroundColor: 'rgba(45,55,68,.94)', borderWidth: 0,
+      textStyle: { color: '#fff', fontSize: 12 }, padding: [7, 11],
+    };
 
     /**
      * 账龄环形图：中心显示未结合计，左侧图例两行排版（档位 + 占比/金额）。
@@ -144,8 +165,7 @@ const DashboardPage = {
             const sign = rv < 0 ? '（退货冲减）' : '';
             return `${p.name}\n${fmtMoney(rv)} ${unit} · ${p.percent}%${sign}`;
           },
-          backgroundColor: 'rgba(45,55,68,.94)', borderWidth: 0,
-          textStyle: { color: '#fff', fontSize: 12 }, padding: [7, 11],
+          ...CHART_TOOLTIP,
         },
         legend: {
           orient: 'vertical', left: 2, top: 'middle',
@@ -203,13 +223,11 @@ const DashboardPage = {
       if (!el) return null;
       const c = echarts.init(el);
       const data = (rows || []).slice().reverse();
-      const hasNeg = data.some((r) => r.amount < 0);
       c.setOption({
         grid: { left: 104, right: 52, top: 8, bottom: 8 },
         tooltip: {
           trigger: 'axis', axisPointer: { type: 'shadow' },
-          backgroundColor: 'rgba(45,55,68,.94)', borderWidth: 0,
-          textStyle: { color: '#fff', fontSize: 12 }, padding: [7, 11],
+          ...CHART_TOOLTIP,
           formatter: (p) => `${p[0].name}\n${fmtMoney(p[0].value)} ${unit}`,
         },
         xAxis: {
@@ -217,8 +235,6 @@ const DashboardPage = {
           splitLine: { lineStyle: { color: '#f2f3f5' } },
           axisLabel: { color: '#9aa3ad', fontSize: 11, formatter: (v) => (v === 0 ? '0' : fmtMoney(v)) },
           axisLine: { show: false }, axisTick: { show: false },
-          // 有负值时把 0 轴画出来，负条才有基线
-          ...(hasNeg ? {} : {}),
         },
         yAxis: {
           type: 'category', data: data.map((r) => r.name),
@@ -230,16 +246,14 @@ const DashboardPage = {
           data: data.map((r) => ({
             value: r.amount,
             itemStyle: {
-              color: r.amount < 0 ? '#f56c6c' : '#ff9845',
+              color: r.amount < 0 ? C.neg : C.brand,
               borderRadius: r.amount < 0 ? [3, 0, 0, 3] : [0, 3, 3, 0],
             },
           })),
           label: {
             show: true, position: 'right', fontSize: 11,
-            color: (p) => (p.value < 0 ? '#f56c6c' : '#8a919c'),
+            color: (p) => (p.value < 0 ? C.neg : C.grayAxis),
             formatter: (p) => fmtMoney(p.value),
-            // 负值标签放到条的左侧，避免贴住零点
-            ...(hasNeg ? {} : {}),
           },
           labelLayout: (params) => (params.rect && params.rect.width < 0 ? { x: params.rect.x - 8 } : {}),
         }],
@@ -264,16 +278,20 @@ const DashboardPage = {
         inData.push(row ? row.inQty : 0);
         outData.push(row ? row.outQty : 0);
       }
+      // 重复调用前先 dispose 旧实例：每次 reloadAll 重新 init 会累积 echarts 实例，
+      // 长会话内存持续上涨。getInstanceByDom 是官方查重接口。
+      const existing = echarts.getInstanceByDom(trendEl.value);
+      if (existing) existing.dispose();
       const c = echarts.init(trendEl.value);
       c.setOption({
         grid: { left: 44, right: 12, top: 34, bottom: 26 },
-        tooltip: { trigger: 'axis' },
-        legend: { data: ['入库', '出库'], right: 0, top: 0, itemWidth: 12 },
-        xAxis: { type: 'category', data: days, axisLine: { lineStyle: { color: '#e8eaed' } }, axisLabel: { color: '#8a919c' } },
-        yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f0f1f3' } }, axisLabel: { color: '#8a919c' } },
+        tooltip: { trigger: 'axis', ...CHART_TOOLTIP, valueFormatter: (v) => String(v) },
+        legend: { data: ['入库', '出库'], right: 0, top: 0, itemWidth: 12, textStyle: { color: C.grayText } },
+        xAxis: { type: 'category', data: days, axisLine: { lineStyle: { color: '#e8eaed' } }, axisLabel: { color: C.grayAxis } },
+        yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f0f1f3' } }, axisLabel: { color: C.grayAxis } },
         series: [
-          { name: '入库', type: 'bar', data: inData, itemStyle: { color: '#ff9a3c', borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
-          { name: '出库', type: 'bar', data: outData, itemStyle: { color: '#b8c2cc', borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
+          { name: '入库', type: 'bar', data: inData, itemStyle: { color: C.brand, borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
+          { name: '出库', type: 'bar', data: outData, itemStyle: { color: C.outBar, borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
         ],
       });
       charts.push(c);
@@ -309,70 +327,98 @@ const DashboardPage = {
       await Promise.all(['order', 'out', 'receipt'].map((k) => loadRank(k)));
     }
 
+    /* 请求序守卫：快速切「今日/本月/本年」时，慢响应不得覆盖新选择 */
+    let loadSeq = 0;
+
+    /** 销售概要（订单/出库/收款/毛利 KPI）：range 变化只影响它和排行卡 */
+    async function loadSales() {
+      // 自取序号而非依赖调用方传参：模板 @click 直接调 loadSales() 时
+      // 不传参会绕过 mySeq!==loadSeq 守卫，慢的旧响应照样覆盖新区间
+      const mySeq = ++loadSeq;
+      const s = await api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value });
+      if (mySeq !== loadSeq) return;
+      sales.value = s;
+    }
+
+    /** 仪表盘统计卡：与 range 无关，手动刷新时才重新拉 */
+    async function loadDash() {
+      stats.value = await api.get('/stats/dashboard', { teamId: store.teamId });
+    }
+
     async function reloadAll() {
+      const mySeq = ++loadSeq;
       try {
-        const [s, sum] = await Promise.all([
-          api.get('/stats/dashboard', { teamId: store.teamId }),
-          api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
-        ]);
-        stats.value = s;
-        sales.value = sum;
+        await Promise.all([loadDash(), loadSales()]);
         await loadAllRanks();
       } catch (e) {
-        toast('工作台数据加载失败：' + e.message, 'error');
+        if (mySeq === loadSeq) toast('工作台数据加载失败：' + e.message, 'error');
       }
     }
 
     function onResize() { for (const c of charts) c.resize(); }
 
+    /* 自动刷新：前台收银场景页面常开，每 5 分钟静默刷新一次（页面隐藏时跳过） */
+    let refreshTimer = 0;
+    /* 卸载标志：onMounted 是长 async，首屏请求未返回前用户可能已切走页面——
+       卸载钩子先执行（当时无可清理），await 恢复后若继续注册监听/interval，
+       就变成对已卸载组件每 5 分钟发一轮请求的泄漏。每个 await 后都要检查 */
+    let disposed = false;
 
     onMounted(async () => {
-      try {
-        const [s, sum, t, d, ar, ap, sa] = await Promise.all([
-          api.get('/stats/dashboard', { teamId: store.teamId }),
-          api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
-          api.get('/stats/trend', { teamId: store.teamId }),
-          api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
-          api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
-          api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
-          api.get('/report/stock-aging', { teamId: store.teamId }),
-        ]);
-        stats.value = s; sales.value = sum; trend.value = t; recent.value = d;
-        arAging.value = ar; apAging.value = ap; stockAging.value = sa;
-        const [art, apt] = await Promise.all([
-          api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
-          api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
-        ]);
-        arTop.value = art.rows || [];
-        apTop.value = apt.rows || [];
-        await nextTick();
-        renderTrend();
-        donut(arEl.value, ar.totals, '元', '应收未结');
-        donut(apEl.value, ap.totals, '元', '应付未结');
-        donut(stockEl.value, sa.totals, '元', '库存货值');
-        barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
-        barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
-        await loadAllRanks();
-      } catch (e) {
-        toast('工作台数据加载失败：' + e.message, 'error');
-      }
+      // 7 个首屏请求各自独立：一个接口失败只影响它对应区块，不再整体空白
+      const settled = await Promise.allSettled([
+        api.get('/stats/dashboard', { teamId: store.teamId }),
+        api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
+        api.get('/stats/trend', { teamId: store.teamId }),
+        api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
+        api.get('/report/stock-aging', { teamId: store.teamId }),
+      ]);
+      if (disposed) return;
+      const [s, sum, t, d, ar, ap, sa] = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+      const failed = settled.filter((r) => r.status === 'rejected').length;
+      if (failed) toast(`工作台有 ${failed} 个数据区块加载失败，可点右上角刷新重试`, 'warning');
+      stats.value = s; sales.value = sum; trend.value = t; recent.value = d;
+      arAging.value = ar; apAging.value = ap; stockAging.value = sa;
+      const tops = await Promise.allSettled([
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
+      ]);
+      if (disposed) return;
+      arTop.value = tops[0].status === 'fulfilled' ? (tops[0].value.rows || []) : [];
+      apTop.value = tops[1].status === 'fulfilled' ? (tops[1].value.rows || []) : [];
+      await nextTick();
+      if (disposed) return;
+      // 渲染只对成功取到数据的区块进行；失败区块保持骨架/空态
+      if (t) renderTrend();
+      if (ar) donut(arEl.value, ar.totals, '元', '应收未结');
+      if (ap) donut(apEl.value, ap.totals, '元', '应付未结');
+      if (sa) donut(stockEl.value, sa.totals, '元', '库存货值');
+      if (arTop.value.length) barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
+      if (apTop.value.length) barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
+      await loadAllRanks();
+      if (disposed) return;
       window.addEventListener('resize', onResize);
+      refreshTimer = setInterval(() => { if (!document.hidden) reloadAll(); }, 5 * 60 * 1000);
     });
     onBeforeUnmount(() => {
+      disposed = true;
       window.removeEventListener('resize', onResize);
+      if (refreshTimer) clearInterval(refreshTimer);
       for (const c of charts) c.dispose();
       charts.length = 0;
     });
 
     return {
-      stats, sales, range, trend, recent, viewerId, kpis, lowStockItems, showGuide,
+      stats, sales, range, trend, recent, viewerId, kpis, lowStockItems, showGuide, dismissGuide,
       goPurchase: () => nav('#/doc/purchase?type=stockin&new=1'),
       arAging, apAging, stockAging, arTop, apTop,
       trendEl, arEl, apEl, stockEl, arTopEl, apTopEl,
       RANK_CARDS, rankData, rankRange, rankBy, rankRefs, loadAllRanks, loadRank,
       QUICK, quickEdit, removeQuick, restoreQuick, resetQuick,
       BUCKET_LABELS, BUCKET_COLORS, BUCKET_KEYS, hasAging,
-      reloadAll, store,
+      reloadAll, loadSales, loadDash, store,
       fmtMoney, prodLabel, partnerLabel, STATUS_TEXT, DOC_META, nav, whLabel,
     };
   },
@@ -407,7 +453,8 @@ const DashboardPage = {
     </div>
 
     <!-- 新手引导 -->
-    <div v-if="showGuide" class="card" style="margin-bottom:14px;padding:18px 20px;border-left:4px solid var(--brand)">
+    <div v-if="showGuide" class="card" style="margin-bottom:14px;padding:18px 20px;border-left:4px solid var(--brand);position:relative">
+      <span class="x" title="不再显示" style="position:absolute;top:10px;right:14px;cursor:pointer;color:var(--muted);font-size:16px" @click="dismissGuide">×</span>
       <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用惠民云进销存 —— 3 步开账</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:var(--text)">
         <div style="flex:1;min-width:200px">
@@ -435,7 +482,7 @@ const DashboardPage = {
           新增销售数据
           <span class="ct-ops">
             <a v-for="r in [{k:'today',t:'今日'},{k:'month',t:'本月'},{k:'year',t:'本年'}]" :key="r.k"
-               :class="['ct-op', { on: range === r.k }]" @click="range = r.k; reloadAll()">{{ r.t }}</a>
+               :class="['ct-op', { on: range === r.k }]" @click="range = r.k; loadSales()">{{ r.t }}</a>
           </span>
         </div>
         <div class="kpi4" v-if="kpis.length">
