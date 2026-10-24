@@ -171,6 +171,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
 
     const amount = req.body.amount != null ? Math.round(Number(req.body.amount)) : old.amount;
     if (!(amount > 0)) return res.status(400).json({ error: '金额必须大于 0' });
+    // 金额上限与创建路径同口径：编辑侧漏拦会让误录 15 位数改写往来/账户
+    if (amount > 1e11) return res.status(400).json({ error: '金额超出上限（10 亿元），请核对后重试' });
     const accountId = req.body.accountId !== undefined
       ? (req.body.accountId ? Number(req.body.accountId) : null)
       : old.accountId;

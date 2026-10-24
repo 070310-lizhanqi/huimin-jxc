@@ -17,20 +17,26 @@ const StockPage = {
     /** 钻取时的临时过滤词：独立于用户搜索框，切回汇总后不残留 */
     const drillKw = ref('');
 
+    // 请求序守卫：仓库/关键词/显示零库存连点时，慢的旧响应不得覆盖新结果
+    const loadGuard = seqGuard();
+
     async function load() {
+      const my = loadGuard.begin();
       loading.value = true;
       try {
         // 钻取词优先于用户搜索词，仅在明细钻取场景生效
         const effKw = view.value === 'detail' && drillKw.value ? drillKw.value : kw.value;
-        list.value = await api.get('/stock/list', {
+        const rows = await api.get('/stock/list', {
           teamId: store.teamId, kw: effKw,
           warehouseId: warehouseId.value,
           ifShowZero: ifShowZero.value ? '' : '0',
         });
+        if (!loadGuard.isCurrent(my)) return;
+        list.value = rows;
       } catch (e) {
-        toast('库存查询失败：' + e.message, 'error');
+        if (loadGuard.isCurrent(my)) toast('库存查询失败：' + e.message, 'error');
       } finally {
-        loading.value = false;
+        if (loadGuard.isCurrent(my)) loading.value = false;
       }
     }
     onMounted(load);

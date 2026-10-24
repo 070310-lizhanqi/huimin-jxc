@@ -7,10 +7,13 @@ function todayStr() {
   const p = (n) => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
-/** 元 → 分：加 epsilon 纠正 1.005*100=100.49999999999999 这类浮点误差；非法输入按 0 */
+/** 元 → 分：加 epsilon 纠正 1.005*100=100.49999999999999 这类浮点误差。
+ *  非法输入（NaN/Infinity）按 0；负数保留原值——余额（透支）业务上可为负，
+ *  价格/收付款等禁止负数的场景由调用方先校验原始值再转换，
+ *  静默归零会让「屏幕显示 -5、落库 0」的金额不一致蒙混过关 */
 function toCents(v) {
   const n = Number(v);
-  if (!isFinite(n) || n <= 0) return 0;
+  if (!isFinite(n)) return 0;
   return Math.round(n * 100 + Number.EPSILON * Math.sign(n) * 100);
 }
 /** HTML 转义：拼打印页/弹窗 HTML 时必须包一层，防用户输入的名称/备注注入脚本 */

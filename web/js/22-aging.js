@@ -79,21 +79,29 @@ const AgingPage = {
       if (existing && existing !== chart) existing.dispose();
       if (!chart) chart = echarts.init(chartEl.value);
       const t = totals.value || {};
+      // 扇区值保留原始分（tooltip 用 fmtMoney 精确到分）：取整到元会让大额账龄丢分
       const data = BUCKET_KEYS.map((k, i) => ({
-        name: BUCKET_LABELS[i], value: Math.round((t[k] || 0) / 100), itemStyle: { color: BUCKET_COLORS[i] },
+        name: BUCKET_LABELS[i], value: t[k] || 0, itemStyle: { color: BUCKET_COLORS[i] },
       })).filter((d) => d.value > 0);
       chart.setOption({
-        tooltip: { trigger: 'item', valueFormatter: (v) => `¥${Number(v).toLocaleString()}` },
+        tooltip: { trigger: 'item', valueFormatter: (v) => fmtMoney(Number(v)) },
         legend: { right: 8, top: 'middle', orient: 'vertical', itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 12 } },
         series: [{
           type: 'pie', radius: ['48%', '68%'], center: ['32%', '50%'],
           label: { show: false }, labelLine: { show: false },
-          // 点击扇区下钻：表格只显示该区间的行
-          onClick: (p) => { drillBucket.value = p.name === drillBucket.value ? '' : p.name; },
           // 占位扇区静默：悬停不出「¥1」假数据
           data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#eceff2' }, silent: true, tooltip: { show: false } }],
         }],
       }, true);
+      // 点击扇区下钻：ECharts 事件必须用 chart.on 注册（option 里没有 onClick 字段，会被静默忽略）。
+      // p.name 是档位标签（如「30天内」），要换算回行键（d30/d60/…）才能用于过滤
+      chart.off('click');
+      chart.on('click', (p) => {
+        if (p.name === '暂无数据') return;
+        const key = BUCKET_LABELS.indexOf(p.name) >= 0 ? BUCKET_KEYS[BUCKET_LABELS.indexOf(p.name)] : '';
+        if (!key) return;
+        drillBucket.value = drillBucket.value === key ? '' : key;
+      });
     }
 
     const cards = computed(() => {
@@ -188,7 +196,7 @@ const AgingPage = {
     <div class="card" style="margin:12px 0">
       <div class="card-title" style="margin-bottom:8px">
         账龄分布（元）
-        <a v-if="drillBucket" class="lnk" style="margin-left:10px;font-size:12.5px" @click="clearDrill">已筛选：{{ drillBucket }} ×清除</a>
+        <a v-if="drillBucket" class="lnk" style="margin-left:10px;font-size:12.5px" @click="clearDrill">已筛选：{{ bucketLabel(drillBucket) }} ×清除</a>
       </div>
       <div ref="chartEl" style="height:230px"></div>
     </div>

@@ -17,20 +17,34 @@ const DocEditor = {
     const saving = ref(false);
     /* 当前仓库的库存快照：productId -> 可用数量（用于明细表「库存数量」列） */
     const stockMap = ref({});
-    // 客户价格记忆：选中客户后批量取回，选商品时优先使用
+    // 客户价格记忆：选中客户后批量取回，选商品时优先使用。
+    // 请求序守卫：快速先选客户 A 再改选 B 时，A 的慢响应后到会把价表覆盖回去，
+    // 之后选商品会用 A 的记忆价给 B 的单预填单价
     const priceMem = ref({});
+    let priceMemSeq = 0;
     async function loadPriceMem(pid) {
-      if (!pid) { priceMem.value = {}; return; }
+      const my = ++priceMemSeq;
+      if (!pid) { if (my === priceMemSeq) priceMem.value = {}; return; }
       try {
         const r = await api.get('/price/memory', { teamId: store.teamId, partnerId: pid });
+        if (my !== priceMemSeq) return;
         const m = {};
         for (const it of r.list || []) m[it.productId] = it.price;
         priceMem.value = m;
-      } catch { priceMem.value = {}; }
+      } catch { if (my === priceMemSeq) priceMem.value = {}; }
     }
 
     const emeta = computed(() => DOC_META[props.type] || {});
     const epartners = computed(() => emeta.value.partner === 'ven' ? store.vendors : store.customers);
+
+    /** 校验原始输入的金额字段：负数/非数必须在这里报错，不能交给 toCents——
+     *  toCents 对负数静默返回 0，而界面合计按原始负值计算，
+     *  用户屏幕上确认的应收与落库金额会不一致（差一个折扣/收款的绝对值） */
+    const assertNonNegative = (v, label) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`${label}不能为负数`);
+      return n;
+    };
 
     /* 编辑态合计：全程整数分路径消除浮点误差。
      *  0.1 + 0.2 = 0.30000000000000004 这类浮点噪声在数量大时会直接体现在应收金额上。
@@ -43,16 +57,19 @@ const DocEditor = {
     const grossCents = computed(() => editor.form
       ? editor.form.items.reduce((s, it) => s + lineCents(it), 0) : 0);
     const grossAmt = computed(() => grossCents.value / 100);
-    const totalQty = computed(() => editor.form ? editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0) : 0);
+      const totalQty = computed(() => editor.form ? fmtQty(editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0), 4) : 0);
     const totalCents = computed(() => Math.max(0, grossCents.value - Math.round((Number(editor.form?.discount) || 0) * 100)));
     const totalAmt = computed(() => totalCents.value / 100);
     const oweCents = computed(() => Math.max(0,
       totalCents.value - Math.round((Number(editor.form?.paidAmount) || 0) * 100) - Math.round((Number(editor.form?.deposit) || 0) * 100)));
     const oweAmt = computed(() => oweCents.value / 100);
 
+    let stockSeq = 0;
     async function loadStock(warehouseId) {
-      if (!warehouseId) { stockMap.value = {}; return; }
+      const my = ++stockSeq;
+      if (!warehouseId) { if (my === stockSeq) stockMap.value = {}; return; }
       const rows2 = await api.get('/stock/list', { teamId: store.teamId, warehouseId, ifShowZero: '' });
+      if (my !== stockSeq) return;
       const m = {};
       for (const r of rows2) m[r.productId] = (m[r.productId] || 0) + r.qty;
       stockMap.value = m;
@@ -145,20 +162,23 @@ const DocEditor = {
             discount: (doc.discount || 0) / 100, paidAmount: (doc.paidAmount || 0) / 100,
             accountId: doc.accountId || null, deposit: (doc.deposit || 0) / 100,
             items: items.map(it => ({
-              productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
+              _uid: ++uidSeq, productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
               batchNo: it.batchNo || '', toWarehouseId: it.toWarehouseId, remark: it.remark || '',
             })),
           };
           if (!editor.form.items.length) editor.form.items.push(blankItem());
           // 库存快照与价格记忆由 watch(warehouseId/partnerId) 在表单赋值时统一加载，
           // 此处不再显式调用（此前双发两个请求）
+          // 快照必须在表单赋值之后拍：异步加载前拍到的恒为 "null"，
+          // 会让「打开草稿不做任何修改」也弹「有未保存的修改」的假警报
+          snap();
         }).catch(e => toast(e.message, 'error'));
       } else {
         editor.id = null; editor.billNo = '';
         editor.status = 'draft'; editor.ro = false;
         editor.form = blankForm();
+        snap();
       }
-      snap();
     }
     onMounted(init);
 
@@ -272,6 +292,10 @@ const DocEditor = {
         // 调拨单必须指定调往仓库：后端不校验必填，空值过账会变成「源仓出又入源仓」的无效调拨
         if (m.toWarehouse && !it.toWarehouseId) throw new Error(`第 ${i + 1} 行未选择调往仓库`);
       }
+      // 负数在这里拦下（理由见 assertNonNegative 注释）：toCents 会把负数静默归零
+      assertNonNegative(f.discount, '整单折扣');
+      assertNonNegative(f.paidAmount, m.payLabel ? '本次付款' : '本次收款');
+      assertNonNegative(f.deposit, '抵扣订金');
       if (Math.round(Number(f.discount) * 100) > grossCents.value) throw new Error('整单折扣不能超过单据金额');
       if (Math.round(Number(f.paidAmount) * 100) + Math.round(Number(f.deposit) * 100) > totalCents.value) {
         throw new Error('本次收款 + 抵扣订金不能超过应收金额');
@@ -485,7 +509,7 @@ const DocEditor = {
           <template v-if="SETTLE_TYPES.has(type)">
           <div class="fi"><label>{{ emeta.payLabel || '减本次收款' }}</label>
             <div class="fc"><input type="number" step="0.01" min="0" class="num" v-model.number="editor.form.paidAmount" :disabled="editor.ro"/>
-              <span class="lnk" :title="emeta.payLabel ? '本次付款 = 应付金额' : '本次收款 = 应收金额'" @click="setFullPaid">设为全收</span></div>
+              <span class="lnk" :title="emeta.payLabel ? '本次付款 = 应付金额' : '本次收款 = 应收金额'" @click="setFullPaid">{{ emeta.payLabel ? '设为全付' : '设为全收' }}</span></div>
             <div class="fi-tip muted" v-if="(emeta.payLabel ? type === 'pin' : type === 'sret')" style="font-size:11.5px;width:100%">
               退货单此栏是「退现金」：欠款客户退货请留空（货款自动冲减欠款），仅预收客户退款时填写
             </div>

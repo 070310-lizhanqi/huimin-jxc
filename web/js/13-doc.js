@@ -55,8 +55,8 @@ const DocPage = {
     });
     function onRowsChange(e) { rows.value = Number(e.target.value) || 20; pageSizeSave('doc', rows.value); page.value = 1; load(); }
 
-    /* 列表页底部合计 */
-    const sumQty = computed(() => list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0));
+    /* 列表页底部合计（数量按 fmtQty 归一：0.1+0.2 的浮点和会显示成 0.30000000000000004） */
+    const sumQty = computed(() => fmtQty(list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0), 4));
     const sumAmount = computed(() => list.value.reduce((s, d) => s + (Number(d.totalAmount) || 0), 0));
     const sumPaid = computed(() => list.value.reduce((s, d) => s + (Number(d.paidAmount) || 0) + (Number(d.deposit) || 0), 0));
     /** 表尾合计行的前置单元格数：单号+日期+商品摘要+备注 = 4，另加可选的往来单位/仓库列 */
@@ -221,7 +221,12 @@ const DocPage = {
       try {
         const r = await api.post('/doc/convert', { teamId: store.teamId, id: row.id });
         toast(`已生成 ${r.billNo}`);
-        activeType.value = m.convertTo;
+        // 转化出的类型通常不在本页类型组里（申请页 → 销售出库、任务页 → 生产组装）：
+        // 原地改 activeType 会让类型页签全部不高亮、列表显示别组单据且路由无法纠正。
+        // 找到目标类型所在的页面组并整体导航过去
+        const entry = Object.entries(DOC_GROUPS).find(([, g]) => g.types.includes(m.convertTo));
+        if (entry) nav(`#/doc/${entry[0]}?type=${m.convertTo}`);
+        else activeType.value = m.convertTo;
       } catch (e) { toast(e.message, 'error'); }
       finally { busyId.value = null; }
     }
@@ -388,7 +393,7 @@ const DocPage = {
       <input class="finp w-key" v-model="kw" placeholder="单号 / 备注 模糊" @keyup.enter="page=1;load()"/>
       <button class="btn" @click="page=1;load()">查询</button>
       <button class="btn icon-only" title="重置" @click="resetFilter"><el-icon><RefreshLeft/></el-icon></button>
-      <button class="btn icon-only" title="刷新" @click="load()"><el-icon><Refresh/></el-icon></button>
+      <button class="btn icon-only" title="刷新（回到第 1 页重查，数据变少时不留空页）" @click="page=1;load()"><el-icon><Refresh/></el-icon></button>
       <span class="fb-gap"></span>
       <span class="muted fb-count">共 {{ total }} 条<template v-if="selected.length"> · 已选 {{ selected.length }}</template></span>
       <button class="btn" @click="impOpen = true"><el-icon><Upload/></el-icon> Excel 导入</button>
@@ -457,7 +462,7 @@ const DocPage = {
               {{ d.summary || '—' }}<template v-if="d.itemCount > 3"> 等 {{ d.itemCount }} 项</template>
             </td>
             <td class="muted ellip" :title="d.remark || ''">{{ d.remark || '—' }}</td>
-            <td class="r" nowrap>{{ d.totalQty }}</td>
+            <td class="r" nowrap>{{ fmtQty(d.totalQty, 4) }}</td>
             <td class="r money" nowrap>{{ fmtMoney(d.totalAmount) }}</td>
             <td v-if="showPaid" class="r money muted" nowrap :title="((Number(d.paidAmount)||0) + (Number(d.deposit)||0)) < (d.totalAmount||0) ? '未结清' : '已结清'">{{ fmtMoney((Number(d.paidAmount)||0) + (Number(d.deposit)||0)) }}</td>
             <td><span :class="'tag tag-' + d.status">{{ STATUS_TEXT[d.status] }}</span></td>

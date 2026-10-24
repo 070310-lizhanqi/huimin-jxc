@@ -83,7 +83,7 @@ const DocViewer = {
         }</table>
         <table class="items"><thead><tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th><th>批次</th><th>调往仓库</th><th>备注</th></tr></thead>
         <tbody>${items}</tbody></table>
-        <div class="total">合计数量：${escapeHtml(String(d.doc.totalQty))}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>
+        <div class="total">合计数量：${escapeHtml(fmtQtyPrint(d.doc.totalQty))}　合计金额：￥${fmtMoney(d.doc.totalAmount)}</div>
         <div style="margin-top:4px;text-align:right;font-size:12px;color:#555">金额大写：${escapeHtml(rmbUpper(d.doc.totalAmount))}</div>
         ${d.doc.remark ? `<div style="margin-top:8px">备注：${escapeHtml(d.doc.remark)}</div>` : ''}
         ${conf.footer ? `<div style="margin-top:14px;text-align:center;color:#888;font-size:12px">${escapeHtml(conf.footer)}</div>` : ''}
@@ -98,7 +98,12 @@ const DocViewer = {
     function escapeHtml(s) {
       return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
     }
-    return { data, close, printDoc, fmtMoney, prodLabel, partnerLabel, whLabel, clerkLabel, STATUS_TEXT, DOC_META, accountLabel,
+    /** 打印页合计数量：null/undefined 不许印出字面 'null' */
+    function fmtQtyPrint(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    }
+    return { data, close, printDoc, fmtMoney, fmtQtyPrint, prodLabel, partnerLabel, whLabel, clerkLabel, STATUS_TEXT, DOC_META, accountLabel,
       oweOf: computed(() => {
         const d = data.value && data.value.doc;
         if (!d) return 0;
@@ -152,11 +157,12 @@ const DocViewer = {
           </tbody>
         </table>
         <div class="tfoot-bar">
-          <span>合计数量 <b>{{ data.doc.totalQty }}</b></span>
+          <span>合计数量 <b>{{ fmtQtyPrint(data.doc.totalQty) }}</b></span>
           <span>商品金额 <b class="money">{{ fmtMoney((data.doc.totalAmount || 0) + (data.doc.discount || 0)) }}</b></span>
           <span v-if="(data.doc.discount||0) > 0">折扣 <b class="money">{{ fmtMoney(data.doc.discount || 0) }}</b></span>
-          <span>应收金额 <b class="money" style="color:var(--brand)">{{ fmtMoney(data.doc.totalAmount) }}</b></span>
-          <span v-if="oweOf > 0">本次欠款 <b class="money" style="color:#f56c6c">{{ fmtMoney(oweOf) }}</b></span>
+          <!-- 采购向单据是「应付」：与编辑器 recvLabel 同口径，否则同一张单两页两个叫法 -->
+          <span>{{ data.doc.partnerType === 'ven' ? '应付金额' : '应收金额' }} <b class="money" style="color:var(--brand)">{{ fmtMoney(data.doc.totalAmount) }}</b></span>
+          <span v-if="oweOf > 0">{{ data.doc.partnerType === 'ven' ? '本次欠款' : '本次欠款' }} <b class="money" style="color:#f56c6c">{{ fmtMoney(oweOf) }}</b></span>
         </div>
       </div>
       <div class="modal-body" v-else><sk-table :rows="6" :cols="4"/></div>

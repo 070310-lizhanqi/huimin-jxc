@@ -186,9 +186,12 @@ function parseCents(raw: string): number | null {
 function parseDate(raw: string): string | null {
   const s = String(raw ?? '').trim();
   if (!s) return null;
-  // 纯数字：Excel 日期序列（1900 体系）
+  // 纯数字：Excel 日期序列（1900 体系）。序列分支同样要过 validBizDate：
+  // excelSerialToDate 只挡 1900-03 前与 2173 后，1901~1999 与 2101+ 的序列
+  // 会换成越界年份直接落库，绕过其它分支都在执行的年份区间校验
   if (/^\d+(\.\d+)?$/.test(s)) {
-    return excelSerialToDate(parseFloat(s));
+    const out = excelSerialToDate(parseFloat(s));
+    return out !== null && !validBizDate(out) ? out : null;
   }
   let m = s.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
   if (m) {
@@ -398,6 +401,37 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           }
         }
 
+        // 仓库：列值匹配 > 第一个仓库。
+        // 必须放在往来单位/商品自动建档**之前**：自动建档发生在事务外（autocommit），
+        // 若先建档再因仓库无效跳单，档案没有对应的单据，也不会被 ROLLBACK 清理——
+        // 用户会得到一个自己没录过的「幽灵客户」
+        let warehouseId: number | null = null;
+        let warehouseName = '';
+        if (first.warehouseName) {
+          const hit = warehouses.find((w) => w.name === first.warehouseName);
+          if (!hit) {
+            skipped.push({
+              srcBillNo: srcLabel,
+              type: first.type,
+              reason: `仓库「${first.warehouseName}」不存在`,
+            });
+            continue;
+          }
+          warehouseId = hit.id;
+          warehouseName = hit.name;
+        } else if (warehouses.length) {
+          warehouseId = warehouses[0].id;
+          warehouseName = warehouses[0].name;
+          warnings.push(`未指定仓库，默认使用「${warehouseName}」`);
+        } else {
+          skipped.push({
+            srcBillNo: srcLabel,
+            type: first.type,
+            reason: '团队没有仓库档案',
+          });
+          continue;
+        }
+
         // 往来单位匹配
         let partnerId: number | null = null;
         let partnerNewlyCreated = false;
@@ -443,34 +477,6 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         // 已被真实单据引用的往来单位连档删掉，历史单据 partnerId 悬挂
         if (partnerNewlyCreated) {
           pendingPartnerCreates.push({ table: isCus ? 'customer' : 'vendor', id: partnerId });
-        }
-
-        // 仓库：列值匹配 > 第一个仓库
-        let warehouseId: number | null = null;
-        let warehouseName = '';
-        if (first.warehouseName) {
-          const hit = warehouses.find((w) => w.name === first.warehouseName);
-          if (!hit) {
-            skipped.push({
-              srcBillNo: srcLabel,
-              type: first.type,
-              reason: `仓库「${first.warehouseName}」不存在`,
-            });
-            continue;
-          }
-          warehouseId = hit.id;
-          warehouseName = hit.name;
-        } else if (warehouses.length) {
-          warehouseId = warehouses[0].id;
-          warehouseName = warehouses[0].name;
-          warnings.push(`未指定仓库，默认使用「${warehouseName}」`);
-        } else {
-          skipped.push({
-            srcBillNo: srcLabel,
-            type: first.type,
-            reason: '团队没有仓库档案',
-          });
-          continue;
         }
 
         // 明细行

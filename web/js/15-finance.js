@@ -29,6 +29,9 @@ const FinancePage = {
     });
 
     const loading = ref(false);
+    // 余额是否已加载过：顶部「应收/应付合计」卡片无条件渲染且从 balances 计算，
+    // 首屏（页签还在 settle）也必须拉一次，否则两张核心金额卡恒显 ¥0.00
+    let balLoaded = false;
     async function load() {
       const q = { teamId: store.teamId };
       if (fType.value) q.type = fType.value;
@@ -41,14 +44,14 @@ const FinancePage = {
       }
       loading.value = true;
       try {
-        // 余额与结算筛选无关：只在页签切到「往来余额」时才需要，避免每次筛选都多打一枪
-        const needBal = tab.value === 'bal';
+        // 余额与结算筛选无关：首屏或已在余额页签时拉；余额页签下每次刷新都重拉（录入收款后卡片要跟着变）
+        const needBal = tab.value === 'bal' || !balLoaded;
         const [s, b] = await Promise.all([
           api.get('/settlement/list', q),
           needBal ? api.get('/partner/balance', { teamId: store.teamId }) : Promise.resolve(null),
         ]);
         settlements.value = s;
-        if (b) balances.value = b;
+        if (b) { balances.value = b; balLoaded = true; }
         loadDocNos();
       } catch (e) {
         toast('收付款记录加载失败：' + e.message, 'error');
@@ -57,8 +60,8 @@ const FinancePage = {
       }
     }
     onMounted(load);
-    // 页签切到往来余额时补拉一次余额（load 里按需跳过了它）
-    watch(tab, (t) => { if (t === 'bal' && !balances.value.length) api.get('/partner/balance', { teamId: store.teamId }).then((b) => { balances.value = b; }).catch(() => {}); });
+    // 页签切到往来余额时刷新余额（load 里首屏拉过也会重拉，保证卡片不是旧值）
+    watch(tab, (t) => { if (t === 'bal') api.get('/partner/balance', { teamId: store.teamId }).then((b) => { balances.value = b; }).catch(() => {}); });
 
     // 关联单据单号缓存：收付款记录里只有 refDocId，批量接口一次查完（原实现逐条请求，N+1）
     const docNos = ref({});
@@ -121,6 +124,8 @@ const FinancePage = {
         }
         editor.open = false;
         toast(f.id ? '已保存' : '已登记');
+        // 收付款直接改往来余额：重置 balLoaded 让 load() 强制重拉，顶部合计卡立即更新
+        balLoaded = false;
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
@@ -157,6 +162,8 @@ const FinancePage = {
       try {
         await api.del('/settlement/' + s.id, { teamId: store.teamId });
         toast('已删除');
+        // 删除同样改往来余额：强制重拉余额卡片
+        balLoaded = false;
         load();
         loadBase();
       } catch (e) { toast(e.message, 'error'); }
@@ -198,7 +205,7 @@ const FinancePage = {
       </div>
       <div class="stat">
         <div class="ico" style="background:#fff1f0;color:#f5222d"><el-icon><CreditCard/></el-icon></div>
-        <div><div class="num money">{{ fmtMoney(payable) }}</div><div class="lbl">应付金额合计（供应商欠款）</div></div>
+        <div><div class="num money">{{ fmtMoney(payable) }}</div><div class="lbl">应付金额合计（我方欠供应商）</div></div>
       </div>
     </div>
     <div class="page-card" style="margin-top:14px">

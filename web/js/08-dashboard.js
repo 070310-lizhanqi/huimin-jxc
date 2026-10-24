@@ -223,7 +223,6 @@ const DashboardPage = {
       if (!el) return null;
       const c = echarts.init(el);
       const data = (rows || []).slice().reverse();
-      const hasNeg = data.some((r) => r.amount < 0);
       c.setOption({
         grid: { left: 104, right: 52, top: 8, bottom: 8 },
         tooltip: {
@@ -236,8 +235,6 @@ const DashboardPage = {
           splitLine: { lineStyle: { color: '#f2f3f5' } },
           axisLabel: { color: '#9aa3ad', fontSize: 11, formatter: (v) => (v === 0 ? '0' : fmtMoney(v)) },
           axisLine: { show: false }, axisTick: { show: false },
-          // 有负值时把 0 轴画出来，负条才有基线
-          ...(hasNeg ? {} : {}),
         },
         yAxis: {
           type: 'category', data: data.map((r) => r.name),
@@ -257,8 +254,6 @@ const DashboardPage = {
             show: true, position: 'right', fontSize: 11,
             color: (p) => (p.value < 0 ? C.neg : C.grayAxis),
             formatter: (p) => fmtMoney(p.value),
-            // 负值标签放到条的左侧，避免贴住零点
-            ...(hasNeg ? {} : {}),
           },
           labelLayout: (params) => (params.rect && params.rect.width < 0 ? { x: params.rect.x - 8 } : {}),
         }],
@@ -336,9 +331,12 @@ const DashboardPage = {
     let loadSeq = 0;
 
     /** 销售概要（订单/出库/收款/毛利 KPI）：range 变化只影响它和排行卡 */
-    async function loadSales(mySeq) {
+    async function loadSales() {
+      // 自取序号而非依赖调用方传参：模板 @click 直接调 loadSales() 时
+      // 不传参会绕过 mySeq!==loadSeq 守卫，慢的旧响应照样覆盖新区间
+      const mySeq = ++loadSeq;
       const s = await api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value });
-      if (mySeq !== undefined && mySeq !== loadSeq) return;
+      if (mySeq !== loadSeq) return;
       sales.value = s;
     }
 
@@ -350,7 +348,7 @@ const DashboardPage = {
     async function reloadAll() {
       const mySeq = ++loadSeq;
       try {
-        await Promise.all([loadDash(), loadSales(mySeq)]);
+        await Promise.all([loadDash(), loadSales()]);
         await loadAllRanks();
       } catch (e) {
         if (mySeq === loadSeq) toast('工作台数据加载失败：' + e.message, 'error');
@@ -361,6 +359,10 @@ const DashboardPage = {
 
     /* 自动刷新：前台收银场景页面常开，每 5 分钟静默刷新一次（页面隐藏时跳过） */
     let refreshTimer = 0;
+    /* 卸载标志：onMounted 是长 async，首屏请求未返回前用户可能已切走页面——
+       卸载钩子先执行（当时无可清理），await 恢复后若继续注册监听/interval，
+       就变成对已卸载组件每 5 分钟发一轮请求的泄漏。每个 await 后都要检查 */
+    let disposed = false;
 
     onMounted(async () => {
       // 7 个首屏请求各自独立：一个接口失败只影响它对应区块，不再整体空白
@@ -373,6 +375,7 @@ const DashboardPage = {
         api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
         api.get('/report/stock-aging', { teamId: store.teamId }),
       ]);
+      if (disposed) return;
       const [s, sum, t, d, ar, ap, sa] = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
       const failed = settled.filter((r) => r.status === 'rejected').length;
       if (failed) toast(`工作台有 ${failed} 个数据区块加载失败，可点右上角刷新重试`, 'warning');
@@ -382,9 +385,11 @@ const DashboardPage = {
         api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
         api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
       ]);
+      if (disposed) return;
       arTop.value = tops[0].status === 'fulfilled' ? (tops[0].value.rows || []) : [];
       apTop.value = tops[1].status === 'fulfilled' ? (tops[1].value.rows || []) : [];
       await nextTick();
+      if (disposed) return;
       // 渲染只对成功取到数据的区块进行；失败区块保持骨架/空态
       if (t) renderTrend();
       if (ar) donut(arEl.value, ar.totals, '元', '应收未结');
@@ -393,10 +398,12 @@ const DashboardPage = {
       if (arTop.value.length) barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
       if (apTop.value.length) barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
       await loadAllRanks();
+      if (disposed) return;
       window.addEventListener('resize', onResize);
       refreshTimer = setInterval(() => { if (!document.hidden) reloadAll(); }, 5 * 60 * 1000);
     });
     onBeforeUnmount(() => {
+      disposed = true;
       window.removeEventListener('resize', onResize);
       if (refreshTimer) clearInterval(refreshTimer);
       for (const c of charts) c.dispose();

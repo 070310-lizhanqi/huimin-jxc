@@ -384,6 +384,24 @@ const SettingsPage = {
     const backupDir = ref('');
     const backupLoading = ref(false);
     const backupBusy = ref(false);
+    /** 恢复重连轮询的句柄（setup 顶层持有，卸载时统一清理） */
+    const restorePollTimers = [];
+    let restorePollStopped = false;
+    /** 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态 */
+    const pollRestore = (retries) => {
+      if (restorePollStopped) return;
+      api.get('/auth/status')
+        .then(() => { if (!restorePollStopped) location.reload(); })
+        .catch(() => {
+          if (restorePollStopped || retries <= 0) return;
+          restorePollTimers.push(setTimeout(() => pollRestore(retries - 1), 2000));
+        });
+    };
+    onBeforeUnmount(() => {
+      restorePollStopped = true;
+      for (const t of restorePollTimers) clearTimeout(t);
+      restorePollTimers.length = 0;
+    });
 
     const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
     const fmtBackupName = (f) => {
@@ -438,16 +456,11 @@ const SettingsPage = {
         await api.post('/backup/restore', { file: row.file, password });
         toast('恢复已排队，服务正在重启……页面稍后自动重连');
         // 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态。
-        // 组件卸载时必须停轮：否则路由切走后 setTimeout 还在跑 60s。
-        let stopped = false;
-        onBeforeUnmount(() => { stopped = true; });
-        const poll = (retries) => {
-          if (stopped) return;
-          api.get('/auth/status')
-            .then(() => { if (!stopped) location.reload(); })
-            .catch(() => { if (!stopped && retries > 0) setTimeout(() => poll(retries - 1), 2000); });
-        };
-        setTimeout(() => poll(30), 3000);
+        // stopped 必须是 setup 顶层变量、由组件级 onBeforeUnmount 置位：
+        // 原先把 onBeforeUnmount 注册在异步点击处理器里，Vue 无活动实例时会静默忽略，
+        // 路由切走后轮询照样跑完 63 秒
+        const timer = setTimeout(() => pollRestore(30), 3000);
+        restorePollTimers.push(timer);
       } catch (e) {
         toast(e.message, 'error');
         backupBusy.value = false;

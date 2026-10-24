@@ -105,6 +105,13 @@ function rmbUpper(cents) {
     // 组后补零衔接（如 100000100 → 壹亿零壹佰）
     if (g > 0 && groups[g - 1] > 0 && groups[g - 1] < 1000 && !out.endsWith('零')) out += '零';
   }
+  // 金额不足 1 元时规范写法不写「零元」：0.05 → 伍分、0.10 → 壹角
+  if (yuanPart === 0 && (jiao > 0 || fen > 0)) {
+    out = '';
+    if (jiao > 0) out += DIGITS[jiao] + '角';
+    if (fen > 0) out += DIGITS[fen] + '分';
+    return (NEG ? '负' : '') + out;
+  }
   out = out.replace(/零+/g, '零').replace(/零$/, '') || '零';
   out += '元';
   if (jiao === 0 && fen === 0) out += '整';
@@ -140,7 +147,8 @@ function exportCsv(filename, rows, headers) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(a.href);
+  // rAF 延迟 revoke：与 api.download 同款——同步 revoke 在 Firefox 下可能截断下载
+  requestAnimationFrame(() => URL.revokeObjectURL(a.href));
   toast('已导出 ' + filename);
 }
 

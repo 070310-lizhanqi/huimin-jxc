@@ -116,6 +116,11 @@ function colIndex(ref: string): number {
   return n - 1;
 }
 
+/** Excel 真实最大列数（XFD，即 16384 列）。超出视为非法引用直接丢弃：
+ *  恶意 xlsx 可声明 r="ZZZZZZZZ1" 这类天文列号，若照单全收，
+ *  下面的 while 补空循环会一次性分配数十 GB 的占位数组（12MB 上传即可打挂进程）。 */
+const MAX_XLSX_COLS = 16384;
+
 /** 解析 sharedStrings.xml 为字符串表 */
 function parseSharedStrings(xml: string): string[] {
   const out: string[] = [];
@@ -148,7 +153,10 @@ export function readXlsx(buf: Buffer): { sheets: SheetData[] } {
     const id = attr(rel, 'Id');
     const target = attr(rel, 'Target');
     if (id && target && target.includes('worksheets/')) {
-      relMap.set(id, 'xl/' + target.replace(/^\//, ''));
+      // Target 有相对（worksheets/sheet1.xml）与绝对（/xl/worksheets/sheet1.xml）两种写法，
+      // 统一规范成包内路径，避免绝对写法被拼成 xl/xl/worksheets/…
+      const norm = target.startsWith('/') ? target.slice(1) : 'xl/' + target;
+      relMap.set(id, norm);
     }
   }
 
@@ -199,10 +207,11 @@ function backfillShared(xml: string, shared: string[]): string[][] {
         }
       }
       const ci = colIndex(ref);
-      if (ci >= 0) {
+      if (ci >= 0 && ci < MAX_XLSX_COLS) {
         while (cells.length < ci) cells.push('');
         cells[ci] = value;
       } else if (value !== '') {
+        // 无列引用或超界引用但带值：退化为顺序追加，保证不丢数据
         cells.push(value);
       }
     }

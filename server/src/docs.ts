@@ -135,8 +135,10 @@ const MONEY_FLOW: Record<string, 'receipt' | 'payment'> = {
   pin: 'receipt', // 采购退货：收回供应商退款
 };
 
-/** 纯库存单据：只动库存，不涉及往来单位与收付款，跳过结算金额校验 */
-const NO_SETTLE_TYPES = new Set(['transfer', 'stocktake', 'assembly', 'adjust', 'otherin', 'otherout']);
+/** 纯库存单据：只动库存，不涉及往来单位与收付款，跳过结算金额校验。
+ *  含 stockinit（期初库存）：不在 MONEY_FLOW 白名单，审核时收付款会被静默跳过——
+ *  漏列它就会重演「单据显示已收款但钱不落账」的缺口（v0.4.0 修报价/订单类时漏了此类型） */
+const NO_SETTLE_TYPES = new Set(['transfer', 'stocktake', 'assembly', 'adjust', 'otherin', 'otherout', 'stockinit']);
 /** 类型元信息：中文名 + 过账方向 + 单据性质 */
 export const DOC_META: Record<string, { label: string; kind: 'order' | 'stock' | 'partner' }> = {
   porder: { label: '采购订单', kind: 'order' },
@@ -816,7 +818,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.post('/doc/reject', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const id = Number(req.body.id);
-    const reason = String(req.body.reason ?? '').trim();
+    // 驳回原因限长与作废原因同口径（200 字）：无限长文本会原样落库并被详情页整段渲染
+    const reason = String(req.body.reason ?? '').trim().slice(0, 200);
     // UPDATE 带状态守卫：仅待审核可驳回，防止驳回已过账单据
     const info = db
       .prepare(`UPDATE doc SET status='draft', rejectReason=? WHERE id=? AND teamId=? AND status='pending'`)
@@ -863,7 +866,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.post('/doc/audit', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const id = Number(req.body.id);
-    const auditBy = String(req.body.auditBy ?? '').trim();
+    const auditBy = String(req.body.auditBy ?? '').trim().slice(0, 50);
     const doc = db
       .prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`)
       .get(id, teamId) as
@@ -890,35 +893,50 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
     db.exec('BEGIN IMMEDIATE');
     try {
-      // 写锁内二次校验状态：预检在锁外，并发请求可能已抢先过账，防重复结算/双扣库存
-      const freshAudit = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
-        | { status: string }
+      // 写锁内重读整行并复核状态：预检在锁外，期间草稿可能被并发编辑（paidAmount/partnerId/
+      // refOrderId 都可变）——若沿用锁外快照，postStock 用新值而 settleOnAudit 用旧值，
+      // 单据与结算记录会错位。此后全部逻辑一律使用锁内最新行。
+      const freshDoc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        | {
+            id: number;
+            status: string;
+            type: string;
+            partnerType: string | null;
+            partnerId: number | null;
+            totalAmount: number;
+            paidAmount: number | null;
+            deposit: number | null;
+            accountId: number | null;
+            date: string;
+            refOrderId: number | null;
+          }
         | undefined;
-      if (!freshAudit || (freshAudit.status !== 'draft' && freshAudit.status !== 'pending')) {
+      if (!freshDoc || (freshDoc.status !== 'draft' && freshDoc.status !== 'pending')) {
         throw new Error('单据状态已变化，请刷新后重试');
       }
+      const docLocked = freshDoc;
       // 来源订单复核：转出的草稿在父订单作废后不应再被过账
       // （否则库存/应收按一张「来源已作废」的单入账，履约统计也对不上）
-      if (doc.refOrderId) {
+      if (docLocked.refOrderId) {
         const parent = db
           .prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`)
-          .get(doc.refOrderId, teamId) as { status: string } | undefined;
+          .get(docLocked.refOrderId, teamId) as { status: string } | undefined;
         if (!parent || parent.status !== 'audit') {
           throw new StockError('来源订单已作废或不存在，请先删除本单或重新转单');
         }
       }
-      if (COST_TYPES.has(doc.type)) {
+      if (COST_TYPES.has(docLocked.type)) {
         // 盘点单：先把「实盘 - 账面」固化成 postQty，后续过账与作废都基于这个差额
-        if (doc.type === 'stocktake') snapshotStocktake(db, id);
+        if (docLocked.type === 'stocktake') snapshotStocktake(db, id);
         const err = precheckStock(db, id);
         if (err) throw new StockError(err);
         postStock(db, id);
       }
       // 开单时填写的「本次收款 / 抵扣订金」在审核时入账：
       //   现金部分走资金账户 + 生成收支记录；订金部分只冲往来余额，不动账户
-      settleOnAudit(db, teamId, doc);
+      settleOnAudit(db, teamId, docLocked);
       // 客户价格记忆：销售类单据审核后记住每个商品的成交价
-      rememberPrices(db, { ...doc, teamId }, id);
+      rememberPrices(db, { ...docLocked, teamId }, id);
       db.prepare(
         `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=?, auditUserId=? WHERE id=? AND teamId=?`,
       ).run(auditBy || null, req.auth?.userId ?? null, id, teamId);
@@ -966,10 +984,12 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
       reverseSettleOnVoid(db, teamId, doc);
       // 作废留痕：谁在何时因何作废（原因可空，但操作人与时间必记）
+      // voidAt 与 submitAt/auditAt 同口径用 localtime：toISOString 是 UTC，
+      // 前端直接展示会让中国用户看到比实际早 8 小时的作废时间
       const voidReason = String((req.body as { reason?: string }).reason ?? '').trim().slice(0, 200) || null;
       db.prepare(
-        `UPDATE doc SET status='void', voidAt=?, voidReason=?, voidUserId=? WHERE id=? AND teamId=?`,
-      ).run(new Date().toISOString(), voidReason, req.auth?.userId ?? null, id, teamId);
+        `UPDATE doc SET status='void', voidAt=datetime('now','localtime'), voidReason=?, voidUserId=? WHERE id=? AND teamId=?`,
+      ).run(voidReason, req.auth?.userId ?? null, id, teamId);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');

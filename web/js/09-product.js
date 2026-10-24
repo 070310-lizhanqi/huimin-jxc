@@ -42,6 +42,11 @@ const ProductPage = {
       if (busy.value) return;
       const f = editor.form;
       if (!String(f.name || '').trim()) return toast('请输入商品名称', 'error');
+      // 四价与安全库存禁止负数：toCents 不再静默归零，必须显式拦截
+      for (const k of ['salePrice', 'retailPrice', 'wholePrice', 'purchasePrice', 'lowQty']) {
+        const n = Number(f[k]);
+        if (!Number.isFinite(n) || n < 0) return toast('价格 / 安全库存不能为负数', 'error');
+      }
       const body = {
         teamId: store.teamId, name: f.name, barcode: f.barcode, unit: f.unit, spec: f.spec,
         catId: f.catId || null,

@@ -327,10 +327,14 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .get(teamId, partnerId, from) as { amt: number };
     const openingFinal = opening - beforeDep.amt;
     let balance = openingFinal;
-    const merged: Array<{ date: string; seq: number; line: Omit<Line, 'balance'> }> = [];
+    // 同日排序：单据行 → 收付款行 → 订金抵扣行。
+    // ord 是类别权重而非 id 偏移——原先用 1_000_000+id / 2_000_000+id 区分，
+    // doc 自增 id 超过百万后单据行会被排到收付款行之后，同日内错序
+    const merged: Array<{ date: string; ord: number; seq: number; line: Omit<Line, 'balance'> }> = [];
     for (const r of chargeRows) {
       merged.push({
         date: r.date,
+        ord: 0,
         seq: r.id,
         line: {
           date: r.date,
@@ -347,7 +351,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       const isReverse = r.type !== settleType;
       merged.push({
         date: r.date,
-        seq: 1_000_000 + r.id,
+        ord: 1,
+        seq: r.id,
         line: {
           date: r.date,
           kind: 'settle',
@@ -382,7 +387,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       if (dep === 0) continue;
       merged.push({
         date: r.date,
-        seq: 2_000_000 + r.id,
+        ord: 2,
+        seq: r.id,
         line: {
           date: r.date,
           kind: 'settle',
@@ -395,7 +401,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
         },
       });
     }
-    merged.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq));
+    merged.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.ord - b.ord || a.seq - b.seq));
     for (const m of merged) {
       balance += m.line.debit - m.line.credit;
       lines.push({ ...m.line, balance });

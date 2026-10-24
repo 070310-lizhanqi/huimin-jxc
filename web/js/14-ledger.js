@@ -59,19 +59,43 @@ const LedgerPage = {
       if (!list.value.length) return toast('没有可导出的流水', 'warning');
       const prodName = (id) => byId(store.products, id)?.name ?? '#' + id;
       const whName = (id) => byId(store.warehouses, id)?.name ?? '—';
-      exportCsv(
-        `库存流水_${todayStr()}.csv`,
-        list.value.map((l) => ({
-          createdAt: l.createdAt, prod: prodName(l.productId), wh: whName(l.warehouseId),
-          batchNo: l.batchNo || '—', dir: l.direction === 'in' ? '入库' : '出库', qty: l.qty,
-          cost: (l.unitCost / 100).toFixed(2), doc: docNos.value[l.refDocId] ?? ('#' + l.refDocId),
-        })),
-        [
-          { key: 'createdAt', label: '时间' }, { key: 'prod', label: '商品' }, { key: 'wh', label: '仓库' },
-          { key: 'batchNo', label: '批次' }, { key: 'dir', label: '方向' }, { key: 'qty', label: '数量' },
-          { key: 'cost', label: '成本单价(元)' }, { key: 'doc', label: '关联单据' },
-        ],
-      );
+      const head = [
+        { key: 'createdAt', label: '时间' }, { key: 'prod', label: '商品' }, { key: 'wh', label: '仓库' },
+        { key: 'batchNo', label: '批次' }, { key: 'dir', label: '方向' }, { key: 'qty', label: '数量' },
+        { key: 'cost', label: '成本单价(元)' }, { key: 'doc', label: '关联单据' },
+      ];
+      const mapRow = (l) => ({
+        createdAt: l.createdAt, prod: prodName(l.productId), wh: whName(l.warehouseId),
+        batchNo: l.batchNo || '—', dir: l.direction === 'in' ? '入库' : '出库', qty: l.qty,
+        cost: (l.unitCost / 100).toFixed(2), doc: docNos.value[l.refDocId] ?? ('#' + l.refDocId),
+      });
+      // 分页时只导当前页容易误解（帮助文档承诺「导出当前筛选结果」）：
+      // 与单据列表页同款交互——超过一页就询问，确认后按当前筛选把全部页拉完合并导出
+      if (total.value > list.value.length) {
+        confirmBox(
+          `当前只显示第 ${page.value} 页的 ${list.value.length} 条流水，共 ${total.value} 条。\n是否导出全部 ${total.value} 条（按当前筛选条件）？`,
+          '导出范围',
+        ).then(async (all) => {
+          if (!all) return exportCsv(`库存流水_第${page.value}页.csv`, list.value.map(mapRow), head);
+          try {
+            const merged = [];
+            let p = 1;
+            const baseQ = { teamId: store.teamId, rows: 200 };
+            if (productId.value) baseQ.productId = productId.value;
+            if (warehouseId.value) baseQ.warehouseId = warehouseId.value;
+            if (fRange.value?.length === 2) { baseQ.from = fRange.value[0]; baseQ.to = fRange.value[1]; }
+            while (p <= 50) {
+              const r = await api.get('/stock/ledger', { ...baseQ, page: p });
+              merged.push(...(r.rows || []));
+              if (merged.length >= (r.total || 0) || !(r.rows || []).length) break;
+              p++;
+            }
+            exportCsv(`库存流水_全部${merged.length}条.csv`, merged.map(mapRow), head);
+          } catch (e) { toast('导出失败：' + e.message, 'error'); }
+        });
+        return;
+      }
+      exportCsv(`库存流水_${todayStr()}.csv`, list.value.map(mapRow), head);
     }
 
     onMounted(load);

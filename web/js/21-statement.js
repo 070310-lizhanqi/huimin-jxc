@@ -63,7 +63,7 @@ const StatementPage = {
       // 打印抬头里的公司名（功能设置 → 打印抬头），对账单给对方看，抬头必须有
       const company = (store.print?.company || '').trim();
       const rowsHtml = d.lines.map((l) => `<tr>
-        <td>${l.date}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
+        <td>${escapeHtml(l.date)}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
         <td class="r">${l.credit ? fmtMoney(l.credit) : ''}</td>
         <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`).join('');

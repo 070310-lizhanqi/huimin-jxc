@@ -33,7 +33,6 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
   const cols = cfg.fields.join(', ');
   const holders = cfg.fields.map(() => '?').join(', ');
   const updateFields = cfg.fields.filter((f) => !(cfg.createOnlyFields ?? []).includes(f));
-  const sets = updateFields.map((f) => `${f} = ?`).join(', ');
 
   router.get(`/${cfg.table}`, (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
@@ -96,11 +95,16 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       const err = cfg.validate({ ...(req.body as Record<string, unknown>), id });
       if (err) return res.status(400).json({ error: err });
     }
-    const values: Value[] = updateFields.map((f) => normalize(req.body[f]));
+    // PATCH 式更新：请求体未携带的字段（undefined）保持旧值，显式传 null/'' 才清空。
+    // 原实现把 undefined 一律 normalize 成 NULL——局部更新会静默清掉未携带的字段
+    // （前端目前总发全量字段所以未触发，但 API 是对外契约，不能埋这个雷）
+    const present = updateFields.filter((f) => (req.body as Record<string, unknown>)[f] !== undefined);
+    if (!present.length) return res.status(400).json({ error: '没有可更新的字段' });
+    const values: Value[] = present.map((f) => normalize(req.body[f]));
     let info: { changes: number | bigint };
     try {
       info = db
-        .prepare(`UPDATE ${cfg.table} SET ${sets} WHERE id = ? AND teamId = ?`)
+        .prepare(`UPDATE ${cfg.table} SET ${present.map((f) => `${f} = ?`).join(', ')} WHERE id = ? AND teamId = ?`)
         .run(...values, id, teamId);
     } catch {
       return res.status(400).json({ error: '保存失败：名称可能已存在' });

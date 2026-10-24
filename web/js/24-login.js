@@ -61,7 +61,7 @@ const LoginPage = {
         // 仅允许本站已知路由前缀，防止跳到伪协议/站外。
         const back = sessionStorage.getItem(RETURN_KEY);
         sessionStorage.removeItem(RETURN_KEY);
-        const ALLOW = /^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings?)(\/|$|\?)/;
+        const ALLOW = /^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings|approval|product|partner|jxcstat)(\/|$|\?)/;
         const target = back && !back.startsWith('#/login') && ALLOW.test(back) ? back : '#/dashboard';
         location.hash = target;
       } catch (e) {

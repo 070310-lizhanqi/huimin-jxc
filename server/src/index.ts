@@ -385,7 +385,8 @@ api.post('/product/import', (req, res) => {
       const lowRaw = String(r.lowQty ?? '').trim();
       if (lowRaw !== '') {
         const n = Number(lowRaw);
-        if (!Number.isFinite(n) || n < 0) {
+        // 与单据侧 MAX_QTY 同上限：安全库存是数量不是价格，量级失控同样是录错
+        if (!Number.isFinite(n) || n < 0 || n > 9_999_999) {
           errors.push({ row: rowNo, msg: '安全库存格式不正确' });
           continue;
         }
@@ -520,6 +521,15 @@ function acquireLock(): boolean {
       }
     }
   }
+  // 循环耗尽仍未确认持锁（并发实例同时清残留/重建锁文件的极小概率竞态）：
+  // 以锁文件内容为准复核，避免两个实例同时以「成功」跑起来
+  let locked = false;
+  try {
+    locked = Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid;
+  } catch {
+    /* 锁文件读不到：视为未持锁 */
+  }
+  if (!locked) return false;
   // 退出时清锁（kill -9 等异常退出会留残留文件，由上面的存活检测兜底）
   process.on('exit', () => {
     try {
