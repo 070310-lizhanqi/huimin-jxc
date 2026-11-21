@@ -8,7 +8,7 @@
  *   后端 API 层已被多轮脚本覆盖，但「用户在界面上点出来的账」与「API 发出来的账」
  *   之间隔着表单绑定 / 字段映射这层胶水，只有走 UI 才能覆盖。
  *
- * 前置：服务已启动；账套里已有种子档案（admin/admin123456、仓库、客户、商品）。
+ * 前置：服务已启动；账套里已有种子档案（admin/B2cost!9Xq、仓库、客户、商品）。
  * 缺 playwright 时自行跳过（exit 0），不计入失败。
  */
 let chromium;
@@ -61,7 +61,7 @@ function query(sql, ...args) {
   await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(800);
   await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-  await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+  await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
   await page.getByRole('button', { name: /登\s*录/ }).click();
   await page.waitForTimeout(2000);
   ok(page.url().includes('#/dashboard'), '登录进入工作台', page.url());

@@ -4,7 +4,7 @@
  */
 const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const USER = process.env.ORANGE_USER || 'admin';
-const PASS = process.env.ORANGE_PASS || 'admin123456';
+const PASS = process.env.ORANGE_PASS || 'B2cost!9Xq';
 
 let token = null;
 

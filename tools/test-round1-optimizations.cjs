@@ -29,10 +29,10 @@ function ok(cond, name, detail) {
   // 登录
   const st = await j('GET', '/auth/status');
   if (st.body && st.body.initialized === false) {
-    const r = await j('POST', '/auth/register', { username: 'admin', password: 'admin123456' });
+    const r = await j('POST', '/auth/register', { username: 'admin', password: 'B2cost!9Xq' });
     token = r.body.token; teamId = r.body.teamId;
   } else {
-    const r = await j('POST', '/auth/login', { username: 'admin', password: 'admin123456' });
+    const r = await j('POST', '/auth/login', { username: 'admin', password: 'B2cost!9Xq' });
     token = r.body.token; teamId = r.body.team.id;
   }
   ok(!!token, '登录成功');

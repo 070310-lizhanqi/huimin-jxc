@@ -45,7 +45,7 @@ const ok = (cond, name, detail) => {
   await page.waitForTimeout(800);
   const userBox = page.getByRole('textbox', { name: '用户名' });
   await userBox.fill('admin');
-  await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+  await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
   await page.getByRole('button', { name: /登\s*录/ }).click();
   await page.waitForTimeout(2000);
   ok(page.url().includes('#/dashboard'), '登录跳转到工作台', page.url());

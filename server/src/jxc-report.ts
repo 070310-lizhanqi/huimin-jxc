@@ -3,12 +3,14 @@
  *
  * 进销存统计（period 内四类单据的数量与金额）：
  *   采购入库、采购退货、销售出库、销售退货、其它入库、其它出库、调拨
- * 库存预估：按当前库存 × 加权平均成本 + 最近 N 天日均出库 → 可售天数
+ * 库存预估：按当前库存 × 历史采购均价（估算） + 最近 N 天日均出库 → 可售天数
  * 对账单：往来单位在一段时间内的应收/应付发生额与结余（期初 + 期间发生 - 期间收付 = 期末）
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
+import { allocateDocDiscounts, type DiscountableLine } from './report';
+// 无循环引用：report.ts 只 import ./db，与 dashboard.ts 引用 allocateDocDiscounts 的方式相同。
 
 function rangeOf(req: Request): { from: string; to: string; error: string | null } {
   const d = new Date();
@@ -66,38 +68,80 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
 
     // 按商品汇总（入 = stockin/otherin/sret/stockinit，出 = stockout/otherout/pin）
     // 结存数量取 stock 表当前实存（不分期间），避免「只看出库看不出库前库存」导致负数。
-    // 原实现：每行相关子查询 (SELECT SUM(s.qty) FROM stock s WHERE s.productId=i.productId)，
-    // N 个商品 = N 次 stock 全扫。改为 LEFT JOIN 一次性聚合子查询。
-    const rows = db
+    // 金额口径（B-数7）：明细毛额先按 (单据, 商品) 聚合、带上整单折扣走 allocateDocDiscounts
+    // （与 /report/product、工作台毛利同口径，尾差归该单金额最大的行），再按商品汇总净额；
+    // 否则有折扣的销售单会出现 rows 金额（毛额）> byType 金额（totalAmount，已扣折扣），两处对不上。
+    const lines = db
       .prepare(
-        `SELECT i.productId, p.name AS prodName, p.spec, p.unit,
-                COALESCE(SUM(CASE WHEN d.type IN ('stockin','otherin','sret','stockinit') THEN i.qty ELSE 0 END), 0) AS inQty,
-                COALESCE(SUM(CASE WHEN d.type IN ('stockin','otherin','sret','stockinit') THEN i.amount ELSE 0 END), 0) AS inAmount,
-                COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.qty ELSE 0 END), 0) AS outQty,
-                COALESCE(SUM(CASE WHEN d.type IN ('stockout','otherout','pin') THEN i.amount ELSE 0 END), 0) AS outAmount,
-                COALESCE(sq.stockQty, 0) AS stockQty
+        `SELECT i.docId, i.productId, d.type, d.discount,
+                p.name AS prodName, p.spec, p.unit,
+                SUM(i.qty) AS qty, SUM(i.amount) AS amount
          FROM doc_item i
          JOIN doc d ON d.id = i.docId
          JOIN product p ON p.id = i.productId
-         LEFT JOIN (SELECT productId, SUM(qty) AS stockQty FROM stock WHERE teamId = ? GROUP BY productId) sq
-           ON sq.productId = i.productId
          WHERE d.teamId = ? AND d.status = 'audit' AND d.date >= ? AND d.date <= ?
            AND d.type IN ('stockin','otherin','sret','stockinit','stockout','otherout','pin')
-         GROUP BY i.productId
-         HAVING inQty <> 0 OR outQty <> 0
-         ORDER BY outAmount DESC, inAmount DESC`,
+         GROUP BY i.docId, i.productId`,
       )
-      .all(teamId, teamId, from, to) as Array<{
+      .all(teamId, from, to) as Array<{
+      docId: number;
       productId: number;
+      type: string;
+      discount: number | null;
       prodName: string;
       spec: string | null;
       unit: string | null;
-      inQty: number;
-      inAmount: number;
-      outQty: number;
-      outAmount: number;
-      stockQty: number;
+      qty: number;
+      amount: number;
     }>;
+    const netLineAmount = allocateDocDiscounts(lines as DiscountableLine[]);
+    const stockMap = new Map<number, number>(
+      (
+        db
+          .prepare(`SELECT productId, COALESCE(SUM(qty), 0) AS stockQty FROM stock WHERE teamId = ? GROUP BY productId`)
+          .all(teamId) as Array<{ productId: number; stockQty: number }>
+      ).map((s) => [s.productId, s.stockQty]),
+    );
+    const IN_TYPES = new Set(['stockin', 'otherin', 'sret', 'stockinit']);
+    const aggMap = new Map<
+      number,
+      {
+        productId: number;
+        prodName: string;
+        spec: string | null;
+        unit: string | null;
+        inQty: number;
+        inAmount: number;
+        outQty: number;
+        outAmount: number;
+        stockQty: number;
+      }
+    >();
+    for (const l of lines) {
+      const a = aggMap.get(l.productId) ?? {
+        productId: l.productId,
+        prodName: l.prodName,
+        spec: l.spec,
+        unit: l.unit,
+        inQty: 0,
+        inAmount: 0,
+        outQty: 0,
+        outAmount: 0,
+        stockQty: stockMap.get(l.productId) ?? 0,
+      };
+      const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
+      if (IN_TYPES.has(l.type)) {
+        a.inQty += l.qty;
+        a.inAmount += net;
+      } else {
+        a.outQty += l.qty;
+        a.outAmount += net;
+      }
+      aggMap.set(l.productId, a);
+    }
+    const rows = [...aggMap.values()]
+      .filter((r) => r.inQty !== 0 || r.outQty !== 0)
+      .sort((a, b) => b.outAmount - a.outAmount || b.inAmount - a.inAmount);
 
     const totals = rows.reduce(
       (s, r) => ({
@@ -109,11 +153,23 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       { inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 },
     );
 
-    res.json({ from, to, byType, rows, totals });
+    res.json({
+      from,
+      to,
+      byType,
+      rows,
+      totals,
+      // 口径说明（B-数7，选了“返回里注明口径”而非“补齐类型”）：
+      // rows（按商品）仅含进销类单据（stockin/otherin/sret/stockinit/stockout/otherout/pin），
+      // byType（按类型）另含 transfer/adjust/stocktake/assembly，两者合计口径不同，不可直接勾稽；
+      // rows 的金额已按 allocateDocDiscounts 分摊整单折扣，与 byType 的 totalAmount（已扣折扣）同口径。
+      scopeNote:
+        '口径说明：rows（按商品）仅含进销类单据（stockin/otherin/sret/stockinit/stockout/otherout/pin），byType（按类型）另含 transfer/adjust/stocktake/assembly，两者合计口径不同，不可直接勾稽；rows 的出库/入库金额已按 allocateDocDiscounts 分摊整单折扣，与 byType 的 totalAmount（已扣折扣）同口径。',
+    });
   });
 
   /**
-   * 库存预估：当前库存 + 加权成本 + 最近 N 天日均出库 → 可售天数 / 建议补货量
+   * 库存预估：当前库存 + 历史采购均价（估算） + 最近 N 天日均出库 → 可售天数 / 建议补货量
    * days: 统计窗口，默认 30 天
    */
   router.get('/report/stock-forecast', (req: Request, res: Response) => {
@@ -152,12 +208,15 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .all(teamId, start, end) as Array<{ productId: number; qty: number }>;
     const outMap = new Map<number, number>(outs.map((o) => [o.productId, o.qty]));
 
-    // 成本（与 aging.ts / report.ts 同口径：加 d.date <= 今天 上限，
+    // 成本（与 aging.ts / report.ts 同口径：历史采购均价（估算），零价入库不计入分母，
+    // 全零价商品 avgCost 为 NULL、调用方回落到 purchasePrice；加 d.date <= 今天 上限，
     // 未来业务日期的补录入库不参与当前成本估算）
     const end2 = end;
     const costs = db
       .prepare(
-        `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
+        `SELECT l.productId,
+                SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
+                  / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
            AND d.date <= ?

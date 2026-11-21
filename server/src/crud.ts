@@ -10,6 +10,75 @@ type Value = string | number | null;
 /** 列表分页保护：单页行数上限（防止恶意大分页拖垮内存） */
 export const CRUD_MAX_ROWS = 500;
 
+/**
+ * B-安13：档案字段上限（与导入侧共用同一份常量，见 docimport.ts / index.ts 的商品导入）。
+ * 阈值依据：仓库内无存量生产库文件（data/ 为空），演示/测试数据均为短名；
+ * name 100 / remark 500 远高于正常档案长度，正常业务不受影响。
+ */
+export const FIELD_LIMITS: Record<string, number> = {
+  name: 100,
+  barcode: 64,
+  spec: 200,
+  remark: 500,
+  address: 200,
+  mobile: 32,
+  unit: 50,
+  priceLevel: 20,
+  type: 20,
+};
+/** 价格类字段：整数分语义（与导入侧 9_999_999 分上限一致，约 10 万元） */
+export const PRICE_CENTS_MAX = 9_999_999;
+/** 数量类字段上限（与 docs.ts MAX_QTY 一致） */
+export const QTY_MAX = 9_999_999;
+/** 以“分”为单位存整数的字段：小数一律 Math.round 取整，拒绝 REAL 落库 */
+export const INT_CENTS_FIELDS = new Set(['salePrice', 'retailPrice', 'purchasePrice', 'wholePrice', 'balance']);
+/** 以 4 位小数存的数量字段 */
+export const QTY_FIELDS = new Set(['lowQty']);
+
+/** 校验 + 规整单个可写字段：返回 { value } 或 { error }（长度/整数分/数量上限） */
+export function checkField(field: string, v: unknown): { value: Value } | { error: string } {
+  if (typeof v === 'string') {
+    if (v === '') return { value: null }; // 空串按旧 normalize 口径置 NULL（显式传 null/'' 才清空）
+    const limit = FIELD_LIMITS[field];
+    if (limit !== undefined && v.length > limit) {
+      return { error: `「${field}」长度不能超过 ${limit} 个字符` };
+    }
+    if (INT_CENTS_FIELDS.has(field)) {
+      const s = v.trim();
+      if (s === '') return { value: null };
+      if (!/^-?\d+(\.\d+)?$/.test(s)) return { error: `「${field}」必须是数字（单位：分）` };
+      const n = Math.round(Number(s));
+      if (!Number.isFinite(n)) return { error: `「${field}」必须是数字（单位：分）` };
+      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX) return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
+      return { value: n };
+    }
+    if (QTY_FIELDS.has(field)) {
+      const s = v.trim();
+      if (s === '') return { value: null };
+      if (!/^-?\d+(\.\d+)?$/.test(s)) return { error: `「${field}」必须是数字` };
+      const n = Math.round(Number(s) * 10000) / 10000;
+      if (!Number.isFinite(n) || Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
+      return { value: n };
+    }
+    return { value: v };
+  }
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return { value: null };
+    if (INT_CENTS_FIELDS.has(field)) {
+      const n = Math.round(v);
+      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX) return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
+      return { value: n };
+    }
+    if (QTY_FIELDS.has(field)) {
+      const n = Math.round(v * 10000) / 10000;
+      if (Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
+      return { value: n };
+    }
+    return { value: v };
+  }
+  return { value: normalize(v) };
+}
+
 /** LIKE 通配符转义：% _ 与 ESCAPE 字符本身按字面匹配（关键词含 % 时不再全表模糊） */
 export function escapeLike(v: string): string {
   return v.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -71,7 +140,12 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       const err = cfg.validate(req.body as Record<string, unknown>);
       if (err) return res.status(400).json({ error: err });
     }
-    const values: Value[] = cfg.fields.map((f) => normalize(req.body[f]));
+    const values: Value[] = [];
+    for (const f of cfg.fields) {
+      const checked = checkField(f, req.body[f]);
+      if ('error' in checked) return res.status(400).json({ error: checked.error });
+      values.push(checked.value);
+    }
     let info: { lastInsertRowid: number | bigint };
     try {
       info = db
@@ -100,7 +174,12 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     // （前端目前总发全量字段所以未触发，但 API 是对外契约，不能埋这个雷）
     const present = updateFields.filter((f) => (req.body as Record<string, unknown>)[f] !== undefined);
     if (!present.length) return res.status(400).json({ error: '没有可更新的字段' });
-    const values: Value[] = present.map((f) => normalize(req.body[f]));
+    const values: Value[] = [];
+    for (const f of present) {
+      const checked = checkField(f, req.body[f]);
+      if ('error' in checked) return res.status(400).json({ error: checked.error });
+      values.push(checked.value);
+    }
     let info: { changes: number | bigint };
     try {
       info = db

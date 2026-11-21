@@ -78,6 +78,14 @@ export interface DiscountableLine {
   amount: number;
 }
 
+/** 对称舍入（round half away from zero）：-1.5 → -2，与 +1.5 → 2 对称；-0.5 → -1。
+ *  Math.round 是向 +∞ 取整，负数 -1.5 会得 -1，造成行级 1 分偏差。
+ *  与 docs.ts 的 lineAmount 同口径（B 组负责 docs.ts 侧，同样用对称舍入，
+ *  公式逐字相同：Math.sign(n) * Math.round(Math.abs(n))）。 */
+export function roundHalfAwayFromZero(n: number): number {
+  return Math.sign(n) * Math.round(Math.abs(n));
+}
+
 /**
  * 按行金额占比把整单折扣分摊到各 (docId, productId) 行，尾差归该单金额最大的行，
  * 保证单内 Σ分摊 = 整单折扣。返回 `docId:productId` → 扣折扣后的净额。
@@ -103,7 +111,8 @@ export function allocateDocDiscounts(lines: DiscountableLine[]): Map<string, num
     let allocated = 0;
     let maxLine = arr[0];
     for (const l of arr) {
-      const share = Math.round((discount * l.amount) / gross);
+      // 负数行用对称舍入：-1.5 → -2，与 +1.5 → 2 对称（Math.round(-1.5) 得 -1，行级差 1 分）
+      const share = roundHalfAwayFromZero((discount * l.amount) / gross);
       net.set(`${l.docId}:${l.productId}`, l.amount - share);
       allocated += share;
       if (l.amount > maxLine.amount) maxLine = l;
@@ -159,7 +168,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     return res.json({ from, to, days, totals });
   });
 
-  // 商品销售排行（含加权平均入库成本与毛利估算）
+  // 商品销售排行（含历史采购均价（估算）与毛利估算）
   // 口径说明：销售额按「明细行金额 - 分摊整单折扣」计，与按日/客户报表的 d.totalAmount（已扣折扣）一致；
   // 折扣按行金额占比分摊，单内尾差归该单金额最大的行，保证 Σ行分摊 = 整单折扣。
   router.get('/report/product', (req: Request, res: Response) => {
@@ -228,12 +237,19 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const rows = [...aggMap.entries()]
       .map(([pid, a]) => ({ productId: pid, ...prodMeta.get(pid)!, ...a }))
       .sort((x, y) => y.saleAmount - x.saleAmount || y.retAmount - x.retAmount);
-    // 加权平均入库成本：仅统计已审核采购入库单的入库流水，且限定入库日期 ≤ 报表 to
+    // 历史采购均价（估算）：仅统计已审核采购入库单的入库流水，且限定入库日期 ≤ 报表 to
     // （不加日期上限会把"报表期之后才入库"的采购价算进当期成本，毛利失真；
     //  作废采购入库的反冲流水 direction='out'，天然不影响；退货/盘盈也不计入）
+    // 注意：这不是真正的加权平均成本——全历史累计、无零库存重置、期初/其它入库/
+    // 盘盈/组装产出不计入（见 C-数1 的 FIFO/移动加权方案）；零价入库（unitCost<=0，
+    // 如赠品/价缺省）不计入分母，否则会把均价拖低。改口径后同期报表数字会变
+    // （零价入库不再拖低均价，均价与货值/毛利估算随之上升），属修正值。
+    // 全零价商品 avgCost 为 NULL，调用方回落到 purchasePrice。
     const costs = db
       .prepare(
-        `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
+        `SELECT l.productId,
+                SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
+                  / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
            AND d.date <= ?

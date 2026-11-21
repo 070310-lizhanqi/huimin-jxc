@@ -28,7 +28,7 @@ function check(name, cond, extra = '') {
   check('错误密码被拒', r.status === 401, `status=${r.status}`);
 
   // 3. 正确登录
-  r = await req('POST', '/auth/login', { username: 'admin', password: 'admin123456' });
+  r = await req('POST', '/auth/login', { username: 'admin', password: 'B2cost!9Xq' });
   check('正确密码登录成功', r.status === 200 && !!r.data?.token, `status=${r.status}`);
   const token = r.data?.token;
   const teamId = r.data?.user?.teamId;
@@ -76,11 +76,11 @@ function check(name, cond, extra = '') {
   // 12. 改密码
   r = await req('POST', '/auth/password', { oldPassword: 'wrong', newPassword: 'newpass123' }, token);
   check('改密码时原密码错误被拒', r.status === 400, `status=${r.status}`);
-  r = await req('POST', '/auth/password', { oldPassword: 'admin123456', newPassword: 'admin123456' }, token);
+  r = await req('POST', '/auth/password', { oldPassword: 'B2cost!9Xq', newPassword: 'B2cost!9Xq' }, token);
   check('改密码成功（同密码回写）', r.status === 200, `status=${r.status}`);
 
   // 13. 重复注册
-  r = await req('POST', '/auth/register', { username: 'admin2', password: 'admin123456' });
+  r = await req('POST', '/auth/register', { username: 'admin2', password: 'B2cost!9Xq' });
   check('已有账套时禁止再注册新团队', r.status === 400, `status=${r.status} ${r.data?.error || ''}`);
 
   const pass = results.filter((x) => x.ok).length;

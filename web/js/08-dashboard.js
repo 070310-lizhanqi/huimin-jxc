@@ -353,11 +353,55 @@ const DashboardPage = {
 
     async function reloadAll() {
       const mySeq = ++loadSeq;
-      try {
-        await Promise.all([loadDash(), loadSales()]);
-        await loadAllRanks();
-      } catch (e) {
-        if (mySeq === loadSeq) toast('工作台数据加载失败：' + e.message, 'error');
+      // 半刷新修复：与首屏 onMounted 同款 7+2 个请求——统计卡 / 销售概要 / 趋势图 /
+      // 最近单据 / 客户·供应商·库存账龄环图 / 客户·供应商欠款排行 top5，随后重绘对应图表与列表。
+      // 全部用 allSettled：单个区块失败只影响该区块，不再整体空白。
+      const settled = await Promise.allSettled([
+        api.get('/stats/dashboard', { teamId: store.teamId }),
+        api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
+        api.get('/stats/trend', { teamId: store.teamId }),
+        api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
+        api.get('/report/stock-aging', { teamId: store.teamId }),
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
+      ]);
+      if (mySeq !== loadSeq || disposed) return;
+      const val = (i) => (settled[i].status === 'fulfilled' ? settled[i].value : null);
+      const failed = settled.filter((r) => r.status === 'rejected').length;
+      if (failed) toast(`工作台有 ${failed} 个数据区块刷新失败`, 'warning');
+      const [s, sum, t, d, ar, ap, sa, arT, apT] = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(val);
+      if (s) stats.value = s;
+      if (sum) sales.value = sum;
+      if (t) trend.value = t;
+      if (d) recent.value = d;
+      if (ar) arAging.value = ar;
+      if (ap) apAging.value = ap;
+      if (sa) stockAging.value = sa;
+      if (arT) arTop.value = arT.rows || [];
+      if (apT) apTop.value = apT.rows || [];
+      await nextTick();
+      if (mySeq !== loadSeq || disposed) return;
+      // 重绘只对成功取到数据的区块进行；失败区块保持旧图，不白屏
+      if (t) { disposeChart(trendEl.value); renderTrend(); }
+      if (ar) { disposeChart(arEl.value); donut(arEl.value, ar.totals, '元', '应收未结'); }
+      if (ap) { disposeChart(apEl.value); donut(apEl.value, ap.totals, '元', '应付未结'); }
+      if (sa) { disposeChart(stockEl.value); donut(stockEl.value, sa.totals, '元', '库存货值'); }
+      if (arTop.value.length) { disposeChart(arTopEl.value); barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
+      if (apTop.value.length) { disposeChart(apTopEl.value); barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
+      // 三张销售排行卡仍走 loadAllRanks（内部已 dispose 后重绘）
+      await loadAllRanks();
+    }
+
+    /** 重绘前先 dispose 该容器上的旧实例并从 charts 数组移除，避免实例越积越多 */
+    function disposeChart(el) {
+      if (!el || typeof echarts === 'undefined') return;
+      const inst = echarts.getInstanceByDom(el);
+      if (inst) {
+        const i = charts.indexOf(inst);
+        if (i >= 0) charts.splice(i, 1);
+        inst.dispose();
       }
     }
 

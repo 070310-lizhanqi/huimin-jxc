@@ -2,7 +2,7 @@
 // 需要先登录：脚本启动时用 ORANGE_USER / ORANGE_PASS 换取令牌，后续所有请求自动携带
 const BASE = process.env.BASE || 'http://127.0.0.1:7741/api';
 const USER = process.env.ORANGE_USER || 'admin';
-const PASS = process.env.ORANGE_PASS || 'admin123456';
+const PASS = process.env.ORANGE_PASS || 'B2cost!9Xq';
 let TOKEN = '';
 let pass = 0, fail = 0;
 const fails = [];

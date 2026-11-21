@@ -16,13 +16,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
-import { localDate, validBizDate } from './db';
-import { loadNoMode, loadPrefix } from './settings';
+import { localDate, validBizDate, createWindowLimiter, tryCheckpoint } from './db';
+import { nextBillNo } from './bill-no';
+import { PRICE_CENTS_MAX, QTY_MAX } from './crud';
 import type { SheetData } from './xlsxlite';
 
-/** 与 docs.ts 的上限保持一致 */
-const MAX_QTY = 9_999_999;
-const MAX_PRICE_CENTS = 9_999_999;
+/** 与 docs.ts 的上限保持一致（与 crud.ts 共用同一份常量） */
+const MAX_QTY = QTY_MAX;
+const MAX_PRICE_CENTS = PRICE_CENTS_MAX;
 /** 单次导入行数上限（与商品导入一致的量级，防止误传大文件拖垮服务） */
 const MAX_ROWS = 2000;
 
@@ -163,9 +164,12 @@ function detectTypeByText(text: string): string | null {
   return null;
 }
 
-/** 数量解析：去千分位/单位残留，容错「1,234.5」「3件」；归一到 4 位小数与 docs.ts roundQty 同口径 */
+/** 数量解析：去千分位/单位残留，容错「1,234.5」「3件」；归一到 4 位小数与 docs.ts roundQty 同口径。
+ *  B-安16①：剥字符前先拒绝含 e/E 的串——`1e5` 若先剥掉 `e` 会变成 `15`，数量错 6000 多倍。 */
 function parseQty(raw: string): number | null {
-  const s = String(raw ?? '').replace(/[,\s，]/g, '').replace(/[^0-9.\-]/g, '');
+  const s0 = String(raw ?? '');
+  if (/[eE]/.test(s0)) return null;
+  const s = s0.replace(/[,\s，]/g, '').replace(/[^0-9.\-]/g, '');
   if (s === '' || s === '-' || s === '.') return null;
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
@@ -228,6 +232,10 @@ interface ParsedRow {
 }
 
 export function mountDocImport(router: Router, db: DatabaseSync): void {
+  /** B-安4③：单据导入按团队限速（每分钟 100 次），12MB 解析是高成本操作。阈值调参（2026-11-21，总协调人）：
+   *  全量回归一分钟内合法导入约 20 余次，10 次/分钟误伤既有测试（doc-import/round1/round2）；100 次留有余量，
+   *  仍可拦住失控循环。 */
+  const docImportLimit = createWindowLimiter(100, 60_000);
   // 原始字节体（xlsx/CSV）：json 解析器会跳过非 JSON Content-Type，这里用 raw 接住
   router.post(
     '/doc/import',
@@ -241,6 +249,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return res.status(400).json({ error: '请上传文件内容（xlsx 或 CSV）' });
       }
+      if (!docImportLimit(`team:${teamId}`)) {
+        return res.status(429).json({ error: '导入过于频繁，请稍后再试' });
+      }
 
       // ---------- 1) 解析文件 ----------
       let kind: 'xlsx' | 'csv';
@@ -250,7 +261,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         kind = parsed.kind;
         sheets = parsed.sheets;
       } catch (e) {
-        return res.status(400).json({ error: (e as Error).message });
+        // A-安4：解析失败不回吐原始文案（可能含解析器内部细节），只返回通用文案，详情写服务端日志
+        console.error('[docimport] 文件解析失败:', e);
+        return res.status(400).json({ error: '文件解析失败，请检查文件格式后重试' });
       }
       const sheet = sheets[0]; // 默认第一个工作表
       const rows = sheet.rows;
@@ -350,8 +363,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           continue;
         }
         const key = hasBillNoCol && pr.srcBillNo
-          ? `${pr.type}|${pr.srcBillNo}`
-          : `${pr.type}|${pr.date ?? ''}|${pr.partnerCus || pr.partnerVen}`;
+          ? JSON.stringify([pr.type, pr.srcBillNo])
+          : JSON.stringify([pr.type, pr.date ?? '', pr.partnerCus || pr.partnerVen]);
         if (!groups.has(key)) { groups.set(key, []); order.push(key); }
         groups.get(key)!.push(pr);
       }
@@ -374,6 +387,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       const bills: BillOut[] = [];
       const skipped: SkippedBill[] = [];
       const created: CreatedDoc[] = [];
+      // 本次落库已建单据引用的往来单位 id（供落库后孤儿核对用）
+      const createdPartnerIds = new Set<number>();
       // 自动建档的孤儿追踪：落库失败 ROLLBACK 后，事务外已插入的 customer/vendor/product 需要一并清理
       const pendingPartnerCreates: Array<{ table: string; id: number | null }> = [];
       const pendingProductCreates: number[] = [];
@@ -588,7 +603,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             const lineAmt = (qty: number, priceCents: number): number =>
               Math.round((Math.round((Number(qty) || 0) * 10000) * (Math.round(Number(priceCents) || 0))) / 10000);
             const totalAmount = b.items.reduce((s, i) => s + lineAmt(i.qty, i.price), 0);
-            const billNo = nextBillNoForImport(db, teamId, b.type);
+            const billNo = nextBillNo(db, teamId, b.type);
             const remarkParts = ['Excel导入'];
             if (ext.remarks) remarkParts.push(ext.remarks);
             const info = insDoc.run(
@@ -610,8 +625,37 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
               insItem.run(docId, it.productId, it.qty, it.price, lineAmt(it.qty, it.price), null);
             }
             created.push({ id: docId, billNo, type: b.type, srcBillNo: b.srcBillNo, itemCount: b.items.length });
+            if (b.partnerId != null) createdPartnerIds.add(b.partnerId);
           }
           db.exec('COMMIT');
+          // B-安16③：孤儿清理从“仅异常分支”改为“落库后按 created 清单核对”——
+          // 本次新建但未被任何已建单据引用的档案即删。引用判断按 doc/doc_item 的引用关系：
+          // 往来单位须出现在已建单据的 partnerId 里，商品须出现在已建单据的 doc_item 里；
+          // 被后续单据引用的合法新建档案保留。清理失败不影响本次导入结果。
+          try {
+            const usedProductIds = new Set<number>();
+            if (created.length) {
+              const placeholders = created.map(() => '?').join(',');
+              const used = db.prepare(
+                `SELECT DISTINCT productId FROM doc_item WHERE docId IN (${placeholders})`,
+              ).all(...created.map((c) => c.id)) as Array<{ productId: number }>;
+              for (const u of used) usedProductIds.add(u.productId);
+            }
+            for (const p of pendingPartnerCreates) {
+              if (p.id == null || createdPartnerIds.has(p.id)) continue;
+              try {
+                db.prepare(`DELETE FROM ${p.table} WHERE id = ? AND remark = 'Excel导入自动建档'`).run(p.id);
+              } catch { /* 清理失败不掩盖导入结果 */ }
+            }
+            for (const pid of pendingProductCreates) {
+              if (usedProductIds.has(pid)) continue;
+              try {
+                db.prepare(`DELETE FROM product WHERE id = ? AND remark = 'Excel导入自动建档'`).run(pid);
+              } catch { /* 同上 */ }
+            }
+          } catch { /* 核对本身失败时不影响导入结果 */ }
+          // B-安17 折中：导入是批量写操作，落库后显式检查点，把 WAL 落盘（见 db.ts 注释的实测数据）
+          tryCheckpoint(db);
         } catch (e) {
           db.exec('ROLLBACK');
           // 落库失败：事务外的自动建档已成孤儿，按「无单据引用」清理（doc 未生成，id 安全）
@@ -658,34 +702,3 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
   );
 }
 
-/** 生成系统单号（与 docs.ts nextBillNo 同规则；此处独立实现避免循环依赖） */
-function nextBillNoForImport(db: DatabaseSync, teamId: number, type: string): string {
-  const PREFIX: Record<string, string> = {
-    stockin: 'RK', stockout: 'CK', transfer: 'DB', adjust: 'TZ', stocktake: 'PD',
-    porder: 'CG', sorder: 'XS', pin: 'CT', sret: 'XT', otherin: 'QR', otherout: 'QC',
-    assembly: 'ZZ', stockinit: 'QCQ', quo: 'BJ', outapply: 'SQ', prodtask: 'SC',
-  };
-  // 与 docs.ts nextBillNo 一致：优先读 team 级单号配置（前缀 + 重置方式）
-  const custom = loadPrefix(db, teamId);
-  const prefix = custom[type] ?? PREFIX[type] ?? 'NO';
-  const mode = loadNoMode(db, teamId);
-  const full = localDate().replace(/-/g, '');
-  const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
-  const key = `${teamId}:${prefix}:${datePart}`;
-  // 单语句 upsert + RETURNING：与 docs.ts nextBillNo 一致，
-  // 避免两个并发 import 在「upsert + SELECT」两语句之间拿到错乱 seq。
-  // 语句按 key 缓存：一次导入几百单不再逐单重新编译 SQL
-  let stmt = seqStmtCache.get(key);
-  if (!stmt) {
-    stmt = db.prepare(
-      `INSERT INTO bill_seq (k, seq) VALUES (?, 1)
-       ON CONFLICT(k) DO UPDATE SET seq = seq + 1
-       RETURNING seq`,
-    );
-    seqStmtCache.set(key, stmt);
-  }
-  const row = stmt.get(key) as { seq: number };
-  return `${prefix}${datePart}${String(row.seq).padStart(4, '0')}`;
-}
-/** bill_seq upsert 语句缓存（key = teamId:prefix:datePart，数量有限可常驻） */
-const seqStmtCache = new Map<string, ReturnType<DatabaseSync['prepare']>>();

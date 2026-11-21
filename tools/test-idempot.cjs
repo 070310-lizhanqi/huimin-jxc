@@ -27,7 +27,7 @@ async function main() {
   const st = await call("GET", "/auth/status");
   const initialized = st.json && st.json.initialized;
   if (initialized) {
-    const login = await call("POST", "/auth/login", { username: "admin", password: "admin123456" });
+    const login = await call("POST", "/auth/login", { username: "admin", password: "B2cost!9Xq" });
     if (login.status !== 200 || !login.json.token) {
       console.error("已初始化但登录失败，无法继续：", login.text);
       process.exit(2);

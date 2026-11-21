@@ -210,34 +210,38 @@ const SettingsPage = {
     }
 
     async function savePrefix() {
+      if (!isAdmin.value) return toast('仅管理员可修改设置', 'error');
       saving.value = true;
       try {
         const r = await api.post('/setting/prefix', { teamId: store.teamId, prefix: { ...prefix } });
         Object.assign(prefix, r.prefix || {});
         toast('单据编号已保存');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
       finally { saving.value = false; }
     }
 
     async function saveNoMode() {
+      if (!isAdmin.value) return toast('仅管理员可修改设置', 'error');
       saving.value = true;
       try {
         await api.post('/setting/no-mode', { teamId: store.teamId, noMode: noMode.value });
         toast('编号重置方式已保存');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
       finally { saving.value = false; }
     }
 
     async function savePrint() {
+      if (!isAdmin.value) return toast('仅管理员可修改设置', 'error');
       saving.value = true;
       try {
         await api.post('/setting/print', { teamId: store.teamId, print: { ...print } });
         toast('打印抬头已保存');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
       finally { saving.value = false; }
     }
 
     async function reset(scope) {
+      if (!isAdmin.value) return toast('仅管理员可修改设置', 'error');
       // 一键重置所有设置是不可逆操作，必须二次确认（对齐恢复备份的交互等级）
       const label = scope === 'all' ? '所有设置（编号前缀 + 编号方式 + 打印抬头）' : scope === 'prefix' ? '所有单据编号前缀' : scope === 'noMode' ? '编号方式' : '打印抬头';
       if (!(await confirmBox(`确定要恢复${label}为默认值吗？此操作不可撤销。`, '恢复默认设置'))) return;
@@ -248,7 +252,7 @@ const SettingsPage = {
         noMode.value = r.noMode || 'day';
         Object.assign(print, r.print || {});
         toast('已恢复默认');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
     }
 
     /** 预览编号样例 */
@@ -300,7 +304,7 @@ const SettingsPage = {
 
     async function saveUser() {
       if (!userForm.username.trim()) { toast('请输入用户名', 'error'); return; }
-      if (userForm.password.length < 6) { toast('密码至少 6 位', 'error'); return; }
+      if (userForm.password.length < 8) { toast('密码至少 8 位', 'error'); return; }
       userBusy.value = true;
       try {
         await api.post('/auth/users', {
@@ -332,7 +336,7 @@ const SettingsPage = {
     }
 
     async function savePassword() {
-      if (pwdForm.newPassword.length < 6) { toast('新密码至少 6 位', 'error'); return; }
+      if (pwdForm.newPassword.length < 8) { toast('新密码至少 8 位', 'error'); return; }
       if (pwdForm.newPassword !== pwdForm.newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
       userBusy.value = true;
       try {
@@ -345,11 +349,18 @@ const SettingsPage = {
     }
 
     const isAdmin = computed(() => auth.user?.role === 'admin');
+    /** 后端 403（A/D 组并行加的 requireAdmin 守卫）转友好提示：只弹 toast，不让页面报错白屏 */
+    function forbiddenErr(e) {
+      const m = String((e && e.message) || '');
+      return /403|Forbidden|仅管理员|权限不足|没有权限/.test(m) ? '权限不足：仅管理员可执行此操作' : '';
+    }
     /** 系统所有者 = 首个账套（teamId 1）；全局注册配置只有它可管理，与服务端 OWNER_TEAM 对应 */
     const isOwner = computed(() => auth.user?.teamId === 1);
 
     /* ---- 开放注册（邀请码）管理 ---- */
-    const regConf = reactive({ enabled: false, inviteCode: '' });
+    /* B-安14：后端 GET 不再回显邀请码明文，只返回 enabled 与是否已设置。
+       前端只存「是否已设置」状态，输入框永远不回填原码；留空 = 保持原码不变。 */
+    const regConf = reactive({ enabled: false, inviteCode: '', hasInviteCode: false });
     const regLoading = ref(false);
     const regBusy = ref(false);
 
@@ -359,21 +370,35 @@ const SettingsPage = {
       try {
         const r = await api.get('/auth/register-conf');
         regConf.enabled = !!r.enabled;
-        regConf.inviteCode = r.inviteCode || '';
+        // 兼容旧后端回显：只取「是否已设置」，绝不把回显的明文填进输入框
+        regConf.hasInviteCode = r.hasInviteCode ?? !!r.inviteCode;
+        regConf.inviteCode = '';
       } catch (e) { toast(e.message, 'error'); }
       finally { regLoading.value = false; }
     }
 
     async function saveRegConf() {
-      if (regConf.enabled && !/^[A-Za-z0-9-]{6,32}$/.test(regConf.inviteCode.trim())) {
-        toast('邀请码需 6-32 位（字母/数字/短横线）', 'error');
-        return;
+      const code = regConf.inviteCode.trim();
+      if (regConf.enabled) {
+        if (code) {
+          if (!/^[A-Za-z0-9-]{6,32}$/.test(code)) {
+            toast('邀请码需 6-32 位（字母/数字/短横线）', 'error');
+            return;
+          }
+        } else if (!regConf.hasInviteCode) {
+          toast('请设置邀请码（6-32 位，字母/数字/短横线）', 'error');
+          return;
+        }
+        // code 为空且已设置 → 不传 inviteCode，保持原码不变
       }
       regBusy.value = true;
       try {
-        const r = await api.post('/auth/register-conf', { enabled: regConf.enabled, inviteCode: regConf.inviteCode.trim() });
-        regConf.enabled = r.enabled;
-        regConf.inviteCode = r.inviteCode || '';
+        const body = { enabled: regConf.enabled };
+        if (code) body.inviteCode = code;
+        const r = await api.post('/auth/register-conf', body);
+        regConf.enabled = !!r.enabled;
+        regConf.hasInviteCode = r.hasInviteCode ?? (regConf.enabled ? (code ? true : regConf.hasInviteCode) : false);
+        regConf.inviteCode = '';
         toast(regConf.enabled ? '已开放注册，请把邀请码发给需要开账套的人' : '已关闭注册');
       } catch (e) { toast(e.message, 'error'); }
       finally { regBusy.value = false; }
@@ -514,7 +539,7 @@ const SettingsPage = {
         <span v-if="isAdmin" class="tb" :class="{ on: tab === 'backup' }" @click="tab = 'backup'; loadBackups()">数据备份</span>
       </div>
       <div class="hd-right">
-        <button class="btn" @click="reset('all')">恢复默认</button>
+        <button v-if="isAdmin" class="btn" @click="reset('all')">恢复默认</button>
       </div>
     </div>
 
@@ -523,7 +548,7 @@ const SettingsPage = {
       <div class="card-title" style="margin-bottom:10px">单据编号规则</div>
       <div class="filterbar" style="border:none;padding:0 0 8px">
         <span class="muted" style="font-size:12.5px">流水号重置：</span>
-        <el-select v-model="noMode" style="width:150px" @change="saveNoMode">
+        <el-select v-model="noMode" style="width:150px" :disabled="!isAdmin" @change="saveNoMode">
           <el-option value="day" label="按日重置"/>
           <el-option value="month" label="按月重置"/>
           <el-option value="none" label="永不清零"/>
@@ -536,7 +561,7 @@ const SettingsPage = {
         <tbody>
           <tr v-for="r in rows" :key="r.type">
             <td>{{ r.label }}</td>
-            <td><input class="finp" v-model="prefix[r.type]" maxlength="4" style="width:100%;text-transform:uppercase" :placeholder="defaults[r.type]"/></td>
+            <td><input class="finp" v-model="prefix[r.type]" maxlength="4" style="width:100%;text-transform:uppercase" :placeholder="defaults[r.type]" :disabled="!isAdmin"/></td>
             <td class="muted">{{ defaults[r.type] }}</td>
             <td class="muted" style="font-family:Consolas,monospace">{{ sample(r.type) }}</td>
           </tr>
@@ -544,9 +569,9 @@ const SettingsPage = {
         </tbody>
       </table>
       <div class="de-add" style="margin-top:12px">
-        <span class="muted" style="font-size:12.5px">前缀支持 1-4 位字母或数字；留空则用默认值。</span>
+        <span class="muted" style="font-size:12.5px">前缀支持 1-4 位字母或数字；留空则用默认值。<template v-if="!isAdmin">仅管理员可修改设置。</template></span>
         <span class="fb-gap"></span>
-        <button class="btn primary" :disabled="saving" @click="savePrefix">{{ saving ? '保存中…' : '保存编号规则' }}</button>
+        <button class="btn primary" :disabled="saving || !isAdmin" @click="savePrefix">{{ saving ? '保存中…' : '保存编号规则' }}</button>
       </div>
     </div>
 
@@ -554,16 +579,16 @@ const SettingsPage = {
     <div v-else-if="tab === 'print'" class="card">
       <div class="card-title" style="margin-bottom:10px">打印抬头（显示在单据打印页顶部）</div>
       <div class="de-grid">
-        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市展惠商贸有限公司" maxlength="60"/></div></div>
-        <div class="fi"><label>联系电话</label><div class="fc"><input v-model="print.phone" placeholder="如：0755-12345678" maxlength="40"/></div></div>
-        <div class="fi span-all"><label>公司地址</label><div class="fc"><input v-model="print.address" placeholder="如：深圳市南山区科技园" maxlength="120"/></div></div>
-        <div class="fi span-all"><label>页脚备注</label><div class="fc"><input v-model="print.footer" placeholder="如：本单为业务往来凭证，如有疑问请及时联系。" maxlength="200"/></div></div>
-        <div class="fi"><label>显示 Logo</label><div class="fc"><el-switch v-model="print.showLogo"/></div></div>
+        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市展惠商贸有限公司" maxlength="60" :disabled="!isAdmin"/></div></div>
+        <div class="fi"><label>联系电话</label><div class="fc"><input v-model="print.phone" placeholder="如：0755-12345678" maxlength="40" :disabled="!isAdmin"/></div></div>
+        <div class="fi span-all"><label>公司地址</label><div class="fc"><input v-model="print.address" placeholder="如：深圳市南山区科技园" maxlength="120" :disabled="!isAdmin"/></div></div>
+        <div class="fi span-all"><label>页脚备注</label><div class="fc"><input v-model="print.footer" placeholder="如：本单为业务往来凭证，如有疑问请及时联系。" maxlength="200" :disabled="!isAdmin"/></div></div>
+        <div class="fi"><label>显示 Logo</label><div class="fc"><el-switch v-model="print.showLogo" :disabled="!isAdmin"/></div></div>
       </div>
       <div class="de-add" style="margin-top:12px">
-        <span class="muted" style="font-size:12.5px">打印页会读取这些信息；未填写则不显示。</span>
+        <span class="muted" style="font-size:12.5px">打印页会读取这些信息；未填写则不显示。<template v-if="!isAdmin">仅管理员可修改设置。</template></span>
         <span class="fb-gap"></span>
-        <button class="btn primary" :disabled="saving" @click="savePrint">{{ saving ? '保存中…' : '保存打印抬头' }}</button>
+        <button class="btn primary" :disabled="saving || !isAdmin" @click="savePrint">{{ saving ? '保存中…' : '保存打印抬头' }}</button>
       </div>
 
       <!-- 打印预览 -->
@@ -634,11 +659,12 @@ const SettingsPage = {
           <label style="font-weight:500">邀请码</label>
           <div style="display:flex;gap:8px;max-width:420px">
             <input v-model="regConf.inviteCode" class="finp" style="flex:1;text-transform:none"
-                   placeholder="6-32 位（字母/数字/短横线）" maxlength="32" :disabled="!regConf.enabled"/>
+                   :placeholder="regConf.hasInviteCode ? '已设置，留空保持不变，输入新码可更换' : '6-32 位（字母/数字/短横线）'" maxlength="32" :disabled="!regConf.enabled"/>
             <button class="btn primary" :disabled="regBusy || !regConf.enabled" @click="saveRegConf">{{ regBusy ? '保存中…' : '保存' }}</button>
           </div>
         </div>
         <div class="muted" style="font-size:12px;margin-top:6px">
+          邀请码状态：<b>{{ regConf.hasInviteCode ? '已设置' : '未设置' }}</b>；出于安全考虑，页面不再显示原邀请码。
           关闭注册会立即生效并清除已保存的邀请码；再次开启需重新设置邀请码。仅系统所有者（首个账套）可管理此项。
         </div>
       </template>
@@ -684,7 +710,7 @@ const SettingsPage = {
     <el-dialog v-model="userDialog" title="添加用户" width="420px" append-to-body>
       <div class="de-grid" style="grid-template-columns:1fr">
         <div class="fi"><label>用户名</label><div class="fc"><input v-model="userForm.username" placeholder="至少 2 个字符" maxlength="30" autocomplete="off"/></div></div>
-        <div class="fi"><label>初始密码</label><div class="fc"><input v-model="userForm.password" type="password" placeholder="至少 6 位" maxlength="40" autocomplete="new-password"/></div></div>
+        <div class="fi"><label>初始密码</label><div class="fc"><input v-model="userForm.password" type="password" placeholder="至少 8 位" maxlength="40" autocomplete="new-password"/></div></div>
         <div class="fi"><label>角色</label><div class="fc">
           <el-select v-model="userForm.role" style="width:100%">
             <el-option value="clerk" label="员工（仅业务操作）"/>
@@ -702,7 +728,7 @@ const SettingsPage = {
     <el-dialog v-model="pwdDialog" title="修改我的密码" width="420px" append-to-body>
       <div class="de-grid" style="grid-template-columns:1fr">
         <div class="fi"><label>原密码</label><div class="fc"><input v-model="pwdForm.oldPassword" type="password" maxlength="40"/></div></div>
-        <div class="fi"><label>新密码</label><div class="fc"><input v-model="pwdForm.newPassword" type="password" placeholder="至少 6 位" maxlength="40"/></div></div>
+        <div class="fi"><label>新密码</label><div class="fc"><input v-model="pwdForm.newPassword" type="password" placeholder="至少 8 位" maxlength="40"/></div></div>
         <div class="fi"><label>确认新密码</label><div class="fc"><input v-model="pwdForm.newPassword2" type="password" maxlength="40"/></div></div>
       </div>
       <template #footer>

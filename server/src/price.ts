@@ -100,6 +100,9 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
   });
 }
 
+/** 写价格记忆的单据类型（B-数2 重算时类型范围必须与此对齐） */
+const PRICE_MEMORY_TYPES = ['stockout', 'sret', 'sorder', 'quo'];
+
 /** 审核单据时调用：把这张单的每一行价格记入客户价格记忆 */
 export function rememberPrices(
   db: DatabaseSync,
@@ -107,7 +110,7 @@ export function rememberPrices(
   docId: number,
 ): void {
   if (doc.partnerType !== 'cus' || !doc.partnerId) return;
-  if (!['stockout', 'sret', 'sorder', 'quo'].includes(doc.type)) return;
+  if (!PRICE_MEMORY_TYPES.includes(doc.type)) return;
   const items = db
     .prepare(`SELECT productId, price FROM doc_item WHERE docId = ? AND price > 0`)
     .all(docId) as Array<{ productId: number; price: number }>;
@@ -120,5 +123,59 @@ export function rememberPrices(
   );
   for (const it of items) {
     up.run(doc.teamId, doc.partnerId, it.productId, Math.round(it.price), doc.date);
+  }
+}
+
+/**
+ * 作废回滚价格记忆（B-数2）：按剩余已审核单重算该客户该商品的最新价。
+ * 调用方（/doc/void）在写锁事务内、状态改为 void 之前调用，本函数按 docId 排除被作废单。
+ * 口径与 rememberPrices 一致：只看 partnerType='cus'、类型属于 PRICE_MEMORY_TYPES、
+ * price > 0 的明细行；最新价按业务日期倒序、再按单据 id 倒序取（同日后审核的覆盖先审核的，
+ * 与 lastDate >= 守卫的“同日可覆盖”语义一致）；无剩余已审核单则删除记忆行。
+ * times 口径：剩余已审核单中该商品 price > 0 的明细行数，与 rememberPrices 每次审核按行 +1
+ * 的口径一致。已知微小偏差：后补一张更早日期的单，审核时会被 lastDate >= 守卫拦下未计次，
+ * 重算会把它计入，times 可能比“实际计次”多——价格与 lastDate 本身不受影响。
+ */
+export function recomputePriceMemory(
+  db: DatabaseSync,
+  doc: { teamId: number; type: string; partnerType: string | null; partnerId: number | null; date: string },
+  docId: number,
+): void {
+  if (doc.partnerType !== 'cus' || !doc.partnerId) return;
+  if (!PRICE_MEMORY_TYPES.includes(doc.type)) return;
+  const products = db
+    .prepare(`SELECT DISTINCT productId FROM doc_item WHERE docId = ? AND price > 0`)
+    .all(docId) as Array<{ productId: number }>;
+  const typePlaceholders = PRICE_MEMORY_TYPES.map(() => '?').join(',');
+  const latestStmt = db.prepare(
+    `SELECT i.price, d.date FROM doc_item i JOIN doc d ON d.id = i.docId
+     WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN (${typePlaceholders})
+       AND d.partnerType = 'cus' AND d.partnerId = ? AND i.productId = ? AND i.price > 0 AND d.id <> ?
+     ORDER BY d.date DESC, d.id DESC LIMIT 1`,
+  );
+  const countStmt = db.prepare(
+    `SELECT COUNT(*) AS c FROM doc_item i JOIN doc d ON d.id = i.docId
+     WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN (${typePlaceholders})
+       AND d.partnerType = 'cus' AND d.partnerId = ? AND i.productId = ? AND i.price > 0 AND d.id <> ?`,
+  );
+  const upsert = db.prepare(
+    `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (teamId, partnerId, productId)
+     DO UPDATE SET price = excluded.price, lastDate = excluded.lastDate, times = excluded.times`,
+  );
+  const del = db.prepare(`DELETE FROM price_memory WHERE teamId = ? AND partnerId = ? AND productId = ?`);
+  for (const { productId } of products) {
+    const latest = latestStmt.get(
+      doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId,
+    ) as { price: number; date: string } | undefined;
+    if (!latest) {
+      del.run(doc.teamId, doc.partnerId, productId);
+      continue;
+    }
+    const times = (
+      countStmt.get(doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId) as { c: number }
+    ).c;
+    upsert.run(doc.teamId, doc.partnerId, productId, Math.round(latest.price), latest.date, times);
   }
 }

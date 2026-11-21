@@ -21,7 +21,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(800);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     await page.evaluate(() => { setTimeout(() => { throw new Error('E2E未捕获错误标记'); }, 0); });
@@ -42,7 +42,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(800);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     // 先跳到某业务页，便于验证回跳
@@ -82,7 +82,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     // 预置回跳地址，模拟「被踢出后回来」
     await page.evaluate(() => sessionStorage.setItem('oc_return_hash', '#/aging?mode=ar'));
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2200);
     ok(page.url().includes('aging'), '登录后回跳失效前页面（而非工作台）', page.url());
@@ -97,7 +97,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(900);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     await page.evaluate(() => { location.hash = '#/aging?mode=ar'; });
@@ -111,7 +111,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     ok(rk === null, '主动退出不保留回跳地址', String(rk));
     // 再登录应回工作台
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2200);
     ok(page.url().includes('dashboard'), '主动退出后登录回工作台', page.url());

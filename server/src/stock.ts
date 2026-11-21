@@ -5,6 +5,18 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate } from './db';
 
+/** 历史采购均价（估算）标量子查询（与 report.ts / dashboard.ts / aging.ts 同口径，B-数4 修后）：
+ *  仅统计已审核采购入库单、入库日期 ≤ 今天的流水；零价入库（unitCost<=0，如赠品/价缺省）
+ *  不计入分母；全零价商品返回 NULL，调用方用 COALESCE 回落到 purchasePrice。
+ *  注意：这是按商品全局取价，未分仓库/批次，多仓不同采购价时仍失真——彻底修需按仓/批取价，见 C-数1。
+ *  另：聚合均价不再取单条“最近价”，旧 ORDER BY l.id（插入顺序，补录早日期入库单会成
+ *  “最近价”）的问题随之消除——均价与行选取顺序无关，不再需要 ORDER BY d.date DESC, l.id DESC。 */
+const HIST_AVG_COST_SQL = `(SELECT SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
+     / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0)
+   FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
+   WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
+     AND d.type = 'stockin' AND d.status = 'audit' AND d.date <= date('now', 'localtime'))`;
+
 export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 实时库存（可按仓库/商品/关键词过滤，聚合同商品多仓位批次）
   router.get('/stock/list', (req: Request, res: Response) => {
@@ -33,12 +45,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT s.productId, p.name AS prodName, p.spec, p.unit, p.lowQty, s.warehouseId, w.name AS warehouseName,
                 s.reservoirId, s.batchNo, SUM(s.qty) AS qty,
-                COALESCE((
-                  SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-                  WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
-                    AND d.type = 'stockin' AND d.status = 'audit'
-                  ORDER BY l.id DESC LIMIT 1
-                ), 0) AS estUnitCost
+                COALESCE(${HIST_AVG_COST_SQL}, p.purchasePrice) AS estUnitCost
          FROM stock s
          JOIN product p ON p.id = s.productId
          LEFT JOIN warehouse w ON w.id = s.warehouseId
@@ -60,17 +67,14 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
          FROM stock WHERE teamId = ? AND qty > 0`,
       )
       .get(teamId) as { totalQty: number; skuCount: number };
-    // 库存成本：按最近一次「采购入库」流水单价估价（与报表 avgCost 口径一致）。
+    // 库存成本：历史采购均价（估算）× 库存量，与报表 avgCost 同口径（B-数8）。
     // 注意不能 LEFT JOIN 全部入库流水——那会让每条库存行 × 每条流水相乘，货值虚增；
     // 也不能只看 direction='in'——销售退货(sret)的 unitCost 是售价，会污染货值
     const stockValue = (
       db
         .prepare(
-          `SELECT COALESCE(SUM(s.qty * COALESCE((
-               SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-               WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
-               ORDER BY l.id DESC LIMIT 1
-             ), 0)), 0) AS v
+          `SELECT COALESCE(SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},
+               (SELECT p.purchasePrice FROM product p WHERE p.id = s.productId), 0)), 0) AS v
            FROM stock s
            WHERE s.teamId = ? AND s.qty > 0`,
         )
@@ -208,7 +212,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     return res.json({ rows: list, total, page, rowsPerPage: rows });
   });
 
-  // 汇总仪表盘：SKU 数、库存总量、库存货值（按最近入库成本估）
+  // 汇总仪表盘：SKU 数、库存总量、库存货值（历史采购均价（估算），与报表同口径，B-数8）
   router.get('/stock/summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
@@ -220,7 +224,8 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       .get(teamId) as { q: number | null };
     const value = db
       .prepare(
-        `SELECT SUM(s.qty * COALESCE((SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId WHERE l.teamId=s.teamId AND l.productId=s.productId AND l.direction='in' AND d.type='stockin' AND d.status='audit' ORDER BY l.id DESC LIMIT 1), 0)) AS v
+        `SELECT SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},
+               (SELECT p.purchasePrice FROM product p WHERE p.id = s.productId), 0)) AS v
          FROM stock s WHERE s.teamId=? AND s.qty != 0`,
       )
       .get(teamId) as { v: number | null };

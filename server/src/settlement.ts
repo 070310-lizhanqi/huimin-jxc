@@ -5,7 +5,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
-import { localDate, validBizDate } from './db';
+import { localDate, tryCheckpoint, validBizDate } from './db';
 
 type Value = string | number | null;
 
@@ -314,6 +314,8 @@ function dbtransaction(db: DatabaseSync, fn: () => void): void {
   try {
     fn();
     db.exec('COMMIT');
+    // B-安17 折中：收付款 COMMIT 后显式检查点（尽力而为，tryCheckpoint 忙时返回 false 不抛错）
+    tryCheckpoint(db);
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;

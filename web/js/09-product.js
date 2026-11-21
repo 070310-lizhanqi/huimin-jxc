@@ -21,6 +21,8 @@ const ProductPage = {
     onMounted(load);
     const busy = ref(false);
     const busyDel = ref(0);
+    /** A-安3：商品批量导入仅管理员可用（后端 /product/import 同批加 requireAdmin 守卫） */
+    const isAdmin = computed(() => auth.user?.role === 'admin');
 
     function openNew() {
       editor.id = null;
@@ -107,6 +109,7 @@ const ProductPage = {
       ], IMP_COLS.map((label) => ({ key: IMP_MAP[label], label })));
     }
     async function doImport() {
+      if (!isAdmin.value) return toast('仅管理员可批量导入商品', 'error');
       if (imp.busy) return;
       const rows = impRowsAll.value.map(({ _line, _err, ...r }) => r);
       if (!rows.length) return toast('请先粘贴数据', 'error');
@@ -116,7 +119,7 @@ const ProductPage = {
         imp.result = r;
         if (r.success > 0) { toast(`成功导入 ${r.success} 个商品`); await loadBase(); load(); }
         if (!r.errors.length) imp.open = false;
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(/403|Forbidden|仅管理员|权限不足/.test(e.message || '') ? '权限不足：仅管理员可批量导入商品' : e.message, 'error'); }
       finally { imp.busy = false; }
     }
         /** 商品单位候选：优先取单位档案，退化为内置常用单位 */
@@ -126,7 +129,7 @@ const ProductPage = {
       return Array.from(new Set([...fromStore, ...builtin]));
     });
 
-    return { kw, list, loading, editor, load, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, impRowsAll, doImport, unitOpts, IMP_PREVIEW_MAX, downloadImpTemplate };
+    return { kw, list, loading, editor, load, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, impRowsAll, doImport, unitOpts, IMP_PREVIEW_MAX, downloadImpTemplate, isAdmin };
   },
   template: `
   <div>
@@ -141,7 +144,7 @@ const ProductPage = {
           { key: 'retailPrice', label: '零售价(元)' }, { key: 'wholePrice', label: '批发价(元)' },
           { key: 'lowQty', label: '安全库存' }, { key: 'remark', label: '备注' },
         ])"><el-icon><Download/></el-icon> 导出</button>
-        <button class="btn" @click="imp.open = true; imp.result = null"><el-icon><Upload/></el-icon> 批量导入</button>
+        <button class="btn" v-if="isAdmin" @click="imp.open = true; imp.result = null"><el-icon><Upload/></el-icon> 批量导入</button>
         <button class="btn primary" @click="openNew">+ 新增商品</button>
       </div>
       <div class="filterbar">

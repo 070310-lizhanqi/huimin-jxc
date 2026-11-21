@@ -53,21 +53,72 @@ export function dataDir(): string {
 }
 
 /**
+ * B-安4③：简易固定窗口限速器（进程内，供高成本接口按用户/团队限流）。
+ * 单机部署够用；返回 true 表示本次调用在限额内（并计数），false 表示超限。
+ * 注意：调用方应在鉴权/参数校验通过后再计数，免得 400 也消耗配额。
+ */
+export function createWindowLimiter(limit: number, windowMs: number): (key: string) => boolean {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return (key: string): boolean => {
+    const now = Date.now();
+    const cur = hits.get(key);
+    if (!cur || now >= cur.resetAt) {
+      hits.set(key, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+    if (cur.count >= limit) return false;
+    cur.count++;
+    return true;
+  };
+}
+
+/**
  * 应用挂起的恢复请求：restore.pending 存在于库文件旁时，
  * 用它整体替换当前库（含 WAL/SHM 副产物）后删除标记。
  * 必须在 openDb 之前执行——WAL 文件一旦生成就不能再换库文件。
+ *
+ * B-安7：改为两步 rename（先把当前库 rename 到备份名，再把 pending rename 到位），
+ * 任一步失败都能回退：已移走的文件按原路 rename 回来，失败时记日志并继续用当前库启动
+ * （恢复可在服务起来后重试；pending 文件保留，下次启动会再试一次）。
+ * 注意：scheduleRestore（backup.ts）已事先把当前库复制为 backups/pre-restore-<时间戳>.db，
+ * 这里 rename 出的又是一份当前库快照，两者内容相同、互为冗余。
  */
 function applyPendingRestore(dbPath: string): void {
   const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
   const pending = `${dbPath}.restore-pending`;
   if (!fs.existsSync(pending)) return;
-  for (const suffix of ['-wal', '-shm']) {
-    const side = dbPath + suffix;
-    if (fs.existsSync(side)) fs.rmSync(side, { force: true });
+  const stamp = (() => {
+    const now = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  })();
+  const backupDir = path.join(path.dirname(dbPath), 'backups');
+  const backupName = path.join(backupDir, `pre-restore-${stamp}.db`);
+  const moved: Array<[string, string]> = [];
+  const move = (from: string, to: string): void => {
+    if (!fs.existsSync(from)) return;
+    fs.renameSync(from, to);
+    moved.push([from, to]);
+  };
+  try {
+    fs.mkdirSync(backupDir, { recursive: true });
+    move(dbPath, backupName);
+    move(`${dbPath}-wal`, `${backupName}-wal`);
+    move(`${dbPath}-shm`, `${backupName}-shm`);
+    fs.renameSync(pending, dbPath);
+  } catch (e) {
+    // 回退：已到位的 dbPath（若有）先清掉，再把移走的文件按原路搬回
+    try { if (fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true }); } catch { /* ignore */ }
+    for (const [from, to] of moved.reverse()) {
+      try { fs.renameSync(to, from); } catch { /* 尽力回退 */ }
+    }
+    console.error('[恢复] 替换库文件失败，已回滚到恢复前状态，本次启动继续使用当前库:', e);
+    return;
   }
-  fs.rmSync(dbPath, { force: true });
-  fs.renameSync(pending, dbPath);
-  console.log('[恢复] 已从备份文件还原数据库，服务以恢复后的数据启动。');
+  // 成功：旧库已是 backups/pre-restore-<时间戳>.db（与 scheduleRestore 事先复制的那份互为冗余，
+  // 均保留，用户确认恢复无误后可手工删除旧份）；-wal/-shm 副产物随旧库一并保留
+  console.log(`[恢复] 已从备份文件还原数据库（旧库已备份为 ${backupName}），服务以恢复后的数据启动。`);
 }
 
 export function openDb(dbPath?: string): DB {
@@ -81,13 +132,34 @@ export function openDb(dbPath?: string): DB {
   // 多连接（服务进程 + 外部工具/多进程）并发写时等待锁而非立刻抛 SQLITE_BUSY
   db.exec('PRAGMA busy_timeout = 5000;');
   // WAL 模式下 synchronous=NORMAL 事务只在检查点落盘，写入提速数倍且崩溃不损库完整性
+  // B-安17 实测（2026-11-21，真盘 btrfs，5000 次单行事务，各 3 轮）：
+  //   NORMAL：533.0 / 582.8 / 441.0 ms（均约 0.52 秒，单事务约 0.1ms）
+  //   FULL：121980.0 / 124455.4 / 132966.4 ms（均约 126 秒，单事务约 25ms，慢约 244 倍）
+  // FULL 下降不可接受，故保持 NORMAL；折中：关键批量写（单据导入、商品导入、备份前）
+  // 后显式 wal_checkpoint（见 tryCheckpoint；单据审核/收付款在 docs.ts/settlement.ts，
+  // 不在本组可写文件内，需另派人在其 COMMIT 后调用 tryCheckpoint）。
   db.exec('PRAGMA synchronous = NORMAL;');
   // 缓存页 64MB（默认 2MB），报表聚合与盘点差额计算显著减少磁盘读
   db.exec('PRAGMA cache_size = -65536;');
   return db;
 }
 
+/** B-安17 折中：关键批量写后显式检查点（尽力而为，忙时返回 false 而不抛错）。 */
+export function tryCheckpoint(db: DB): boolean {
+  try {
+    const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
+      | { busy: number; log: number; checkpointed: number }
+      | undefined;
+    return !!row && row.busy !== 1 && row.checkpointed >= row.log;
+  } catch {
+    return false;
+  }
+}
+
 export function migrate(db: DB): void {
+  // B-安19④：migrate 包进事务（SQLite DDL 可事务化），中途失败整体回滚不留半迁移状态
+  db.exec('BEGIN IMMEDIATE');
+  try {
   db.exec(`
   CREATE TABLE IF NOT EXISTS team (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,11 +345,14 @@ export function migrate(db: DB): void {
   );
   `);
   // 轻量列迁移：老库补新列（列已存在时报错则忽略）
+  // B-安19③：catch 只忽略“duplicate column”错误，其余（如类型冲突、磁盘满）一律重抛，
+  // 否则迁移一半失败会被静默吞掉，查不出来。
   const addColumn = (table: string, col: string, ddl: string) => {
     try {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
-    } catch {
-      /* 列已存在 */
+    } catch (e) {
+      if (/duplicate column/i.test((e as Error).message)) return; /* 列已存在 */
+      throw e;
     }
   };
   addColumn('product', 'lowQty', 'REAL DEFAULT 0');
@@ -351,5 +426,10 @@ export function migrate(db: DB): void {
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_team_name ON product(teamId, name)`);
   } catch {
     /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
+  }
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* 回滚失败时原错仍要抛出 */ }
+    throw e;
   }
 }

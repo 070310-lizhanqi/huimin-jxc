@@ -33,7 +33,7 @@ const LoginPage = {
       if (!form.username.trim()) { err.value = '请输入用户名'; return; }
       if (!form.password) { err.value = '请输入密码'; return; }
       if (mode.value === 'register') {
-        if (form.password.length < 6) { err.value = '密码至少 6 位'; return; }
+        if (form.password.length < 8) { err.value = '密码至少 8 位'; return; }
         if (form.password !== form.password2) { err.value = '两次输入的密码不一致'; return; }
         if (initialized.value && !form.inviteCode.trim()) { err.value = '请输入管理员提供的邀请码'; return; }
       }
@@ -89,7 +89,7 @@ const LoginPage = {
           <el-input v-model="form.teamName" size="large" placeholder="如：鲜果批发部" maxlength="30" clearable/>
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="form.password" type="password" size="large" placeholder="至少 6 位" show-password autocomplete="current-password" @keyup.enter="submit"/>
+          <el-input v-model="form.password" type="password" size="large" :placeholder="mode === 'register' ? '至少 8 位' : '请输入密码'" show-password autocomplete="current-password" @keyup.enter="submit"/>
         </el-form-item>
         <el-form-item v-if="mode === 'register' && initialized" label="邀请码">
           <el-input v-model="form.inviteCode" size="large" placeholder="请向已有账套的管理员索取" clearable @keyup.enter="submit"/>

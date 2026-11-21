@@ -5,7 +5,7 @@
  * - 订单：已审核销售订单（type='sorder'）张数与金额
  * - 出库：已审核销售出库（type='stockout'）张数与金额（扣除销售退货 type='sret'）
  * - 收款：收款单（settlement type='receipt'）金额合计
- * - 毛利：销售出库净额 - 加权平均入库成本 × 净数量（与 /report/product 同口径）
+ * - 毛利：销售出库净额 - 历史采购均价（估算） × 净数量（与 /report/product 同口径）
  * - range: today / month / year，默认 month
  */
 import type { DatabaseSync } from 'node:sqlite';
@@ -76,7 +76,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       )
       .get(teamId, from, to) as { amt: number; cnt: number };
 
-    // 毛利：商品维度净额 - 加权成本 × 净数量（只算 stockout/sret）
+    // 毛利：商品维度净额 - 历史采购均价（估算） × 净数量（只算 stockout/sret）
     // 明细取 (docId, productId) 级并带整单折扣：净额按行金额占比分摊折扣
     // （与 /report/product 完全同口径——否则带折扣的销售在两页算出两个毛利）
     const profitRows = db
@@ -96,9 +96,14 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       qty: number;
       amount: number;
     }>;
+    // 历史采购均价（估算），与 /report/product 同口径：零价入库（unitCost<=0）
+    // 不计入分母，全零价商品 avgCost 为 NULL、调用方回落到 purchasePrice。
+    // 不是真正的加权平均成本（全历史累计、无零库存重置，见 C-数1）。
     const costs = db
       .prepare(
-        `SELECT l.productId, SUM(l.qty * l.unitCost) * 1.0 / SUM(l.qty) AS avgCost
+        `SELECT l.productId,
+                SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
+                  / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0) AS avgCost
          FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
          WHERE l.teamId = ? AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
            AND d.date <= ?

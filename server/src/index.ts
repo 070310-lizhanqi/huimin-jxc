@@ -3,8 +3,8 @@
  * 端口 7741，REST 风格 /api/<资源>
  */
 import express from 'express';
-import { openDb, migrate } from './db';
-import { mountCrud } from './crud';
+import { openDb, migrate, tryCheckpoint, createWindowLimiter } from './db';
+import { mountCrud, PRICE_CENTS_MAX, QTY_MAX } from './crud';
 import { mountDocs } from './docs';
 import { mountStockQueries } from './stock';
 import { mountSettlements } from './settlement';
@@ -349,7 +349,16 @@ mountSettings(api, db);
 mountBackup(api, db);
 
 // 商品批量导入：部分成功模式（错误行跳过并返回行号错误清单）
+/** B-安4③：商品导入按团队限速（每分钟 100 次），1000 行建档是高成本操作。阈值调参（2026-11-21，总协调人）：
+ *  与单据导入同口径：全量回归一分钟内合法导入约 20 余次，10 次/分钟误伤既有测试；100 次留有余量。 */
+const productImportLimit = createWindowLimiter(100, 60_000);
 api.post('/product/import', (req, res) => {
+  // A-安3：批量导入商品仅 admin（与 backup.ts 的 requireAdmin 同款；
+  // settings 侧是 A 组的事；E 组在并行做前端店员门控，随同一批快照发布，不存在 403 窗口）
+  if (!req.auth || req.auth.role !== 'admin') return res.status(403).json({ error: '仅管理员可批量导入商品' });
+  if (!productImportLimit(`team:${req.auth.teamId}`)) {
+    return res.status(429).json({ error: '导入过于频繁，请稍后再试' });
+  }
   const teamId = Number(req.body.teamId);
   if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
   const rows = req.body.rows as Array<Record<string, unknown>>;
@@ -361,7 +370,7 @@ api.post('/product/import', (req, res) => {
     if (s === '') return 0;
     if (!/^\d+(\.\d+)?$/.test(s)) return null;
     const n = Math.round(parseFloat(s) * 100);
-    if (!Number.isFinite(n) || n < 0 || n > 9_999_999) return null;
+    if (!Number.isFinite(n) || n < 0 || n > PRICE_CENTS_MAX) return null;
     return n;
   };
   const errors: Array<{ row: number; msg: string }> = [];
@@ -414,7 +423,7 @@ api.post('/product/import', (req, res) => {
       if (lowRaw !== '') {
         const n = Number(lowRaw);
         // 与单据侧 MAX_QTY 同上限：安全库存是数量不是价格，量级失控同样是录错
-        if (!Number.isFinite(n) || n < 0 || n > 9_999_999) {
+        if (!Number.isFinite(n) || n < 0 || n > QTY_MAX) {
           errors.push({ row: rowNo, msg: '安全库存格式不正确' });
           continue;
         }
@@ -437,6 +446,8 @@ api.post('/product/import', (req, res) => {
       success++;
     }
     db.exec('COMMIT');
+    // B-安17 折中：批量导入落库后显式检查点，把 WAL 落盘
+    tryCheckpoint(db);
   } catch (e) {
     db.exec('ROLLBACK');
     // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名/磁盘路径），只写服务端日志
@@ -623,6 +634,26 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
     fs.mkdirSync(runtimeDir, { recursive: true });
     fs.writeFileSync(path.join(runtimeDir, 'server.pid'), String(process.pid));
   } catch { /* 无权限或目录不可写时忽略，不影响服务本身 */ }
+  // B-安18：优雅停机——停止接受新连接，等在途请求完成（10 秒超时兜底，不能无限等），
+  // 再 wal_checkpoint(TRUNCATE) 后 db.close() 退出。
+  let shuttingDown = false;
+  const gracefulShutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[停机] 收到 ${signal}，开始优雅停机……`);
+    try {
+      await Promise.race([
+        new Promise<void>((resolve) => server.close(() => resolve())),
+        new Promise<void>((resolve) => setTimeout(resolve, 10000)),
+      ]);
+    } catch { /* 关闭失败仍继续停机 */ }
+    tryCheckpoint(db);
+    try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
+    console.log('[停机] 数据库已关闭，进程退出。');
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
   // keep a reference so the server handle is not GC'd / lint-dead
   void server;
 })();

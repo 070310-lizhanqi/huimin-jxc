@@ -25,7 +25,7 @@ function ok(cond, name, detail) {
 }
 
 (async () => {
-  const r0 = await j('POST', '/auth/login', { username: 'admin', password: 'admin123456' });
+  const r0 = await j('POST', '/auth/login', { username: 'admin', password: 'B2cost!9Xq' });
   token = r0.body.token; teamId = r0.body.team.id;
   ok(!!token, '登录成功');
 
