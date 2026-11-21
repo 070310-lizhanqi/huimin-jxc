@@ -17,7 +17,7 @@ import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
 import { localDate, validBizDate, createWindowLimiter, tryCheckpoint } from './db';
-import { nextBillNo } from './bill-no';
+import { nextBillNo, loadBillNoConfig } from './bill-no';
 import { PRICE_CENTS_MAX, QTY_MAX } from './crud';
 import type { SheetData } from './xlsxlite';
 
@@ -257,10 +257,15 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       let kind: 'xlsx' | 'csv';
       let sheets: SheetData[];
       try {
-        const parsed = readSpreadsheet(body);
+        // B-安9：只解析第一表（docimport 只用 sheets[0]），数据行超 2000 时解析层提前停
+        const parsed = readSpreadsheet(body, { maxRows: MAX_ROWS, firstSheetOnly: true });
         kind = parsed.kind;
         sheets = parsed.sheets;
       } catch (e) {
+        // 行数超限是解析层提前抛出的可预期错误，返回与解析后检查同一口径的友好文案
+        if (e instanceof Error && e.message.startsWith('行数超出上限')) {
+          return res.status(400).json({ error: `单次最多导入 ${MAX_ROWS} 行` });
+        }
         // A-安4：解析失败不回吐原始文案（可能含解析器内部细节），只返回通用文案，详情写服务端日志
         console.error('[docimport] 文件解析失败:', e);
         return res.status(400).json({ error: '文件解析失败，请检查文件格式后重试' });
@@ -375,10 +380,26 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
       >;
       const prodByName = new Map(prods.map((p) => [p.name, p]));
       const prodByBarcode = new Map(prods.filter((p) => p.barcode).map((p) => [p.barcode as string, p]));
+      // B-安10①：分组循环内逐次 db.prepare 的语句全部提到循环外预编译一次。
+      // getPartner 原每次调用都编译一条 SELECT，分组数一多即重复编译数百次；
+      // 幂等检查与自动建档的 INSERT 同样按分组重复编译，一并提到外面。
+      const getCusStmt = db.prepare(`SELECT id FROM customer WHERE teamId = ? AND name = ?`);
+      const getVenStmt = db.prepare(`SELECT id FROM vendor WHERE teamId = ? AND name = ?`);
       const getPartner = (ptype: 'cus' | 'ven', name: string) =>
-        db
-          .prepare(`SELECT id FROM ${ptype === 'cus' ? 'customer' : 'vendor'} WHERE teamId = ? AND name = ?`)
-          .get(teamId, name) as { id: number } | undefined;
+        (ptype === 'cus' ? getCusStmt : getVenStmt).get(teamId, name) as { id: number } | undefined;
+      const existsDocStmt = db.prepare(
+        `SELECT id FROM doc WHERE teamId = ? AND type = ? AND srcBillNo = ? LIMIT 1`,
+      );
+      const insCusStmt = db.prepare(
+        `INSERT INTO customer (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`,
+      );
+      const insVenStmt = db.prepare(
+        `INSERT INTO vendor (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`,
+      );
+      const insProdStmt = db.prepare(
+        `INSERT INTO product (teamId, name, barcode, unit, salePrice, purchasePrice, remark)
+         VALUES (?, ?, ?, ?, ?, ?, 'Excel导入自动建档')`,
+      );
       const warehouses = db.prepare(`SELECT id, name FROM warehouse WHERE teamId = ? ORDER BY id`).all(teamId) as Array<
         { id: number; name: string }
       >;
@@ -407,9 +428,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
 
         // 幂等：同 srcBillNo + type 已存在 → 跳过整组
         if (first.srcBillNo) {
-          const exists = db
-            .prepare(`SELECT id FROM doc WHERE teamId = ? AND type = ? AND srcBillNo = ? LIMIT 1`)
-            .get(teamId, first.type, first.srcBillNo);
+          const exists = existsDocStmt.get(teamId, first.type, first.srcBillNo);
           if (exists) {
             skipped.push({ srcBillNo: srcLabel, type: first.type, reason: '该外部单号已导入过' });
             continue;
@@ -455,17 +474,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           if (hit) partnerId = hit.id;
           else if (autoCreate && !dryRun) {
             if (isCus) {
-              partnerId = Number(
-                db
-                  .prepare(`INSERT INTO customer (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`)
-                  .run(teamId, partnerName).lastInsertRowid,
-              );
+              partnerId = Number(insCusStmt.run(teamId, partnerName).lastInsertRowid);
             } else {
-              partnerId = Number(
-                db
-                  .prepare(`INSERT INTO vendor (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`)
-                  .run(teamId, partnerName).lastInsertRowid,
-              );
+              partnerId = Number(insVenStmt.run(teamId, partnerName).lastInsertRowid);
             }
             partnerNewlyCreated = true;
             warnings.push(`往来单位「${partnerName}」不存在，已自动建档`);
@@ -505,11 +516,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           if (!prod) {
             if (autoCreate && !dryRun) {
               productId = Number(
-                db
-                  .prepare(
-                    `INSERT INTO product (teamId, name, barcode, unit, salePrice, purchasePrice, remark)
-                     VALUES (?, ?, ?, ?, ?, ?, 'Excel导入自动建档')`,
-                  )
+                insProdStmt
                   .run(
                     teamId,
                     pr.productName,
@@ -584,6 +591,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
 
       // ---------- 6) 落库（非 dryRun） ----------
       if (!dryRun) {
+        // B-安10②：单号配置（prefix/noMode）在导入开始时一次读出，按单据复用；
+        // 原每生成一个单号都调一次 nextBillNo、其内重复查两次 setting 表
+        const billNoCfg = loadBillNoConfig(db, teamId);
         const insDoc = db.prepare(
           `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, srcBillNo)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, NULL, ?)`,
@@ -603,7 +613,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             const lineAmt = (qty: number, priceCents: number): number =>
               Math.round((Math.round((Number(qty) || 0) * 10000) * (Math.round(Number(priceCents) || 0))) / 10000);
             const totalAmount = b.items.reduce((s, i) => s + lineAmt(i.qty, i.price), 0);
-            const billNo = nextBillNo(db, teamId, b.type);
+            const billNo = nextBillNo(db, teamId, b.type, billNoCfg);
             const remarkParts = ['Excel导入'];
             if (ext.remarks) remarkParts.push(ext.remarks);
             const info = insDoc.run(

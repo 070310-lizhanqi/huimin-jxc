@@ -427,6 +427,25 @@ export function migrate(db: DB): void {
   } catch {
     /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
   }
+  // B-安11：档案表 teamId 索引。crud.ts 的 SELECT * FROM <表> WHERE teamId=?
+  // 与 docimport.ts 的往来单位按名查询此前全是全表扫描；product 已有
+  // idx_product_team_name (teamId, name) 覆盖 teamId 前缀，不再补；
+  // barcode 的 LIKE %…% 本来就走不了索引，不在此列。IF NOT EXISTS 幂等，
+  // 老库启动时自动建索引。customer/vendor 另补 (teamId, name) 供按名点查。
+  // 注：此处用普通索引而非唯一索引——存量档案可能已有同名行，唯一索引会在
+  // 老库上创建失败；判重仍由业务层预检负责。
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_customer_team ON customer(teamId);
+    CREATE INDEX IF NOT EXISTS idx_customer_team_name ON customer(teamId, name);
+    CREATE INDEX IF NOT EXISTS idx_vendor_team ON vendor(teamId);
+    CREATE INDEX IF NOT EXISTS idx_vendor_team_name ON vendor(teamId, name);
+    CREATE INDEX IF NOT EXISTS idx_clerk_team ON clerk(teamId);
+    CREATE INDEX IF NOT EXISTS idx_account_team ON account(teamId);
+    CREATE INDEX IF NOT EXISTS idx_warehouse_team ON warehouse(teamId);
+    CREATE INDEX IF NOT EXISTS idx_reservoir_team ON reservoir(teamId);
+    CREATE INDEX IF NOT EXISTS idx_unit_team ON unit(teamId);
+    CREATE INDEX IF NOT EXISTS idx_cat_team ON cat(teamId);
+  `);
     db.exec('COMMIT');
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch { /* 回滚失败时原错仍要抛出 */ }

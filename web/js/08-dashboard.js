@@ -348,7 +348,8 @@ const DashboardPage = {
 
     /** 仪表盘统计卡：与 range 无关，手动刷新时才重新拉 */
     async function loadDash() {
-      stats.value = await api.get('/stats/dashboard', { teamId: store.teamId });
+      // B-前1：手动刷新强制拉新（绕过进行中的去重请求）
+      stats.value = await fetchDashboardStats(true);
     }
 
     async function reloadAll() {
@@ -357,7 +358,8 @@ const DashboardPage = {
       // 最近单据 / 客户·供应商·库存账龄环图 / 客户·供应商欠款排行 top5，随后重绘对应图表与列表。
       // 全部用 allSettled：单个区块失败只影响该区块，不再整体空白。
       const settled = await Promise.allSettled([
-        api.get('/stats/dashboard', { teamId: store.teamId }),
+        // B-前1：5 分钟自动刷新 / 手动刷新强制拉新（绕过首屏缓存）
+        fetchDashboardStats(true),
         api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
         api.get('/stats/trend', { teamId: store.teamId }),
         api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
@@ -417,7 +419,9 @@ const DashboardPage = {
     onMounted(async () => {
       // 7 个首屏请求各自独立：一个接口失败只影响它对应区块，不再整体空白
       const settled = await Promise.allSettled([
-        api.get('/stats/dashboard', { teamId: store.teamId }),
+        // B-前1：首屏复用 pickTeam 时 refreshLowStock 已拉（进行中的）
+        // /stats/dashboard，不再单独发一次
+        fetchDashboardStats(),
         api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
         api.get('/stats/trend', { teamId: store.teamId }),
         api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),

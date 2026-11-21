@@ -68,7 +68,10 @@ const DocEditor = {
     async function loadStock(warehouseId) {
       const my = ++stockSeq;
       if (!warehouseId) { if (my === stockSeq) stockMap.value = {}; return; }
-      const rows2 = await api.get('/stock/list', { teamId: store.teamId, warehouseId, ifShowZero: '' });
+      // B-前3：只取 productId,qty 两列的轻量接口（旧 /stock/list 全量行只为建这个 Map，
+      // 一次换仓就拉几千行）；口径与旧的本地 SUM 一致（同仓所有库存行按商品汇总）。
+      // 请求序守卫（stockSeq）不动：快速连切仓库时慢响应仍不得覆盖新结果。
+      const rows2 = await api.get('/stock/qty-by-product', { teamId: store.teamId, warehouseId });
       if (my !== stockSeq) return;
       const m = {};
       for (const r of rows2) m[r.productId] = (m[r.productId] || 0) + r.qty;

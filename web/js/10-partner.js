@@ -7,7 +7,7 @@ const PartnerPage = {
     const tab = ref(lockTab === 'ven' ? 'ven' : 'cus');
     watch(() => route.q.tab, (t) => { if (t === 'cus' || t === 'ven') { tab.value = t; kw.value = ''; } });
     const kw = ref('');
-    const editor = reactive({ open: false, id: null, form: {} });
+    /* editor/busy/busyDel 由下方的 useCrudEditor（B-前6）提供 */
 
     const list = computed(() => {
       const src = tab.value === 'cus' ? store.customers : store.vendors;
@@ -16,47 +16,41 @@ const PartnerPage = {
       return k ? src.filter(x => String(x.name || '').includes(k) || String(x.mobile || '').includes(k)) : src;
     });
 
+    /** B-前6：CRUD 骨架走 useCrudEditor；名称校验留在本页 validate */
+    const crud = useCrudEditor({
+      validate(f) {
+        if (!String(f.name || '').trim()) return '请输入名称';
+        return null;
+      },
+      url: (id) => {
+        const table = tab.value === 'cus' ? 'customer' : 'vendor';
+        return id ? `/${table}/${id}` : `/${table}`;
+      },
+      confirmDelete: (p) => `删除「${p.name}」？被单据或收付款引用的将被拒绝。`,
+      deleteRequest: (p) => api.del(`/${tab.value === 'cus' ? 'customer' : 'vendor'}/${p.id}`, { teamId: store.teamId }),
+      afterSave: async () => {
+        // B-前1：只刷新被改的往来单位集合（旧 loadBase 重拉 9 个档案 + 打印设置 = 10 个请求）
+        await refreshBase([tab.value === 'cus' ? 'customers' : 'vendors']);
+      },
+      afterDelete: async () => {
+        await refreshBase([tab.value === 'cus' ? 'customers' : 'vendors']);
+      },
+    });
+    const editor = crud.editor;
+    const busy = crud.busy;
+    const busyDel = crud.busyDel;
     function openNew() {
-      editor.id = null;
-      editor.form = tab.value === 'cus'
+      crud.openNew(tab.value === 'cus'
         ? { name: '', mobile: '', address: '', remark: '', priceLevel: 'salePrice' }
-        : { name: '', mobile: '', address: '', remark: '' };
-      editor.open = true;
+        : { name: '', mobile: '', address: '', remark: '' });
     }
     function openEdit(p) {
-      editor.id = p.id;
-      editor.form = tab.value === 'cus'
-        ? { name: p.name, mobile: p.mobile || '', address: p.address || '', remark: p.remark || '', priceLevel: p.priceLevel || 'salePrice' }
-        : { name: p.name, mobile: p.mobile || '', address: p.address || '', remark: p.remark || '' };
-      editor.open = true;
+      crud.openEdit(p, (row) => (tab.value === 'cus'
+        ? { name: row.name, mobile: row.mobile || '', address: row.address || '', remark: row.remark || '', priceLevel: row.priceLevel || 'salePrice' }
+        : { name: row.name, mobile: row.mobile || '', address: row.address || '', remark: row.remark || '' }));
     }
-    const busy = ref(false);
-    const busyDel = ref(0);
-    async function save() {
-      // 防双击：CRUD 无去重，重复提交会建出重复档案
-      if (busy.value) return;
-      if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
-      const table = tab.value === 'cus' ? 'customer' : 'vendor';
-      const body = { teamId: store.teamId, ...editor.form };
-      busy.value = true;
-      try {
-        if (editor.id) await api.put(`/${table}/${editor.id}`, body);
-        else await api.post(`/${table}`, body);
-        editor.open = false;
-        toast('已保存');
-        await loadBase();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busy.value = false; }
-    }
-    async function del(p) {
-      if (busyDel.value) return;
-      if (!(await confirmBox(`删除「${p.name}」？被单据或收付款引用的将被拒绝。`))) return;
-      const table = tab.value === 'cus' ? 'customer' : 'vendor';
-      busyDel.value = p.id;
-      try { await api.del(`/${table}/${p.id}`, { teamId: store.teamId }); toast('已删除'); await loadBase(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyDel.value = 0; }
-    }
+    const save = crud.save;
+    const del = crud.del;
     const LEVEL = { salePrice: '标准售价', wholePrice: '批发价', retailPrice: '零售价' };
     /* 「查询」按钮已删：列表是 kw 前端即时过滤，点查询只会全量重拉 9 张档案表 */
     // 往来单位导出（此前只有商品/库存页有导出，客户供应商名单没法带走）

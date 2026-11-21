@@ -148,6 +148,75 @@ export const DOC_META: Record<string, { label: string; kind: 'order' | 'stock' |
 
 class StockError extends Error {}
 
+/** B-前4 批量导出上限：一次最多返回 20000 行（旧前端串行 50 页 × 200 行 = 10000 行的两倍），
+ *  超出时返回 400 请调用方缩小筛选范围，避免一次导出把内存与响应拖垮。 */
+const MAX_EXPORT_ROWS = 20000;
+/** 单据状态中文（与前端 STATUS_TEXT 同口径，导出 CSV 用） */
+const DOC_STATUS_TEXT: Record<string, string> = { draft: '草稿', pending: '待审核', audit: '已审核', void: '已作废' };
+/** CSV 单元格转义（与前端 exportCsv 同口径：公式注入前置 \t，含逗号/引号/换行加引号） */
+function csvCell(v: unknown): string {
+  const s = v == null ? '' : String(v);
+  const guarded = /^[=+\-@\t\r]/.test(s) ? '\t' + s : s;
+  return /[",\n\t]/.test(guarded) ? '"' + guarded.replace(/"/g, '""') + '"' : guarded;
+}
+/** 分 → 元字符串（两位小数），null/'' → ''（与前端 moneyRow 同口径） */
+function centsToYuan(v: unknown): string {
+  if (v == null || v === '') return '';
+  return (Number(v) / 100).toFixed(2);
+}
+
+/**
+ * 单据列表筛选条件（/doc/list 与 /doc/export 共用，改一处两处生效）：
+ * type/types/status/partnerId/日期区间/关键词。teamId 由 requireAuth 覆盖为令牌团队，
+ * 因此导出与列表走同一套团队隔离与 clerk 可见范围（clerk 与 admin 同权，无额外门控）。
+ */
+function docListFilter(req: Request, teamId: number): { conds: string[]; args: Value[]; statusArgIndex: number } {
+  const conds: string[] = ['d.teamId = ?'];
+  const args: Value[] = [teamId];
+  /** status 条件在 args 中的下标；没传 status 时为 -1（状态统计要从参数里剔掉它） */
+  let statusArgIndex = -1;
+  if (req.query.type) {
+    conds.push('d.type = ?');
+    args.push(String(req.query.type));
+  }
+  // 多类型：一个页签含多个单据类型时用（如 采购订单+采购入库）
+  if (req.query.types) {
+    const ts = String(req.query.types)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (ts.length) {
+      conds.push(`d.type IN (${ts.map(() => '?').join(',')})`);
+      args.push(...ts);
+    }
+  }
+  if (req.query.status) {
+    statusArgIndex = args.length;
+    conds.push('d.status = ?');
+    args.push(String(req.query.status));
+  }
+  if (req.query.partnerId) {
+    conds.push('d.partnerId = ?');
+    args.push(Number(req.query.partnerId));
+  }
+  if (req.query.from) {
+    conds.push('d.date >= ?');
+    args.push(String(req.query.from));
+  }
+  if (req.query.to) {
+    conds.push('d.date <= ?');
+    args.push(String(req.query.to));
+  }
+  if (req.query.kw) {
+    // 单号 / 备注 模糊匹配（备注可能为 NULL，用 IFNULL 兜底）；
+    // LIKE 通配符按字面处理：用户搜 "100%折扣" 不该变成前缀通配
+    conds.push("(d.billNo LIKE ? ESCAPE '\\' OR IFNULL(d.remark, '') LIKE ? ESCAPE '\\')");
+    const k = `%${escapeLike(String(req.query.kw))}%`;
+    args.push(k, k);
+  }
+  return { conds, args, statusArgIndex };
+}
+
 /** 单项金额上限（分）：qty ≤ 9,999,999 且 price ≤ 9,999,999 分（≈10 万元），单行 ≤ ~10^13 分。
  *  超过将导致 JS Number 精度丢失 / SQLite INTEGER 溢出，validate 阶段直接拒绝。 */
 const MAX_QTY = 9_999_999;
@@ -213,49 +282,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.get('/doc/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    const conds: string[] = ['d.teamId = ?'];
-    const args: Value[] = [teamId];
-    /** status 条件在 args 中的下标；没传 status 时为 -1（状态统计要从参数里剔掉它） */
-    let statusArgIndex = -1;
-    if (req.query.type) {
-      conds.push('d.type = ?');
-      args.push(String(req.query.type));
-    }
-    // 多类型：一个页签含多个单据类型时用（如 采购订单+采购入库）
-    if (req.query.types) {
-      const ts = String(req.query.types)
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (ts.length) {
-        conds.push(`d.type IN (${ts.map(() => '?').join(',')})`);
-        args.push(...ts);
-      }
-    }
-    if (req.query.status) {
-      statusArgIndex = args.length;
-      conds.push('d.status = ?');
-      args.push(String(req.query.status));
-    }
-    if (req.query.partnerId) {
-      conds.push('d.partnerId = ?');
-      args.push(Number(req.query.partnerId));
-    }
-    if (req.query.from) {
-      conds.push('d.date >= ?');
-      args.push(String(req.query.from));
-    }
-    if (req.query.to) {
-      conds.push('d.date <= ?');
-      args.push(String(req.query.to));
-    }
-    if (req.query.kw) {
-      // 单号 / 备注 模糊匹配（备注可能为 NULL，用 IFNULL 兜底）；
-      // LIKE 通配符按字面处理：用户搜 "100%折扣" 不该变成前缀通配
-      conds.push("(d.billNo LIKE ? ESCAPE '\\' OR IFNULL(d.remark, '') LIKE ? ESCAPE '\\')");
-      const k = `%${escapeLike(String(req.query.kw))}%`;
-      args.push(k, k);
-    }
+    const { conds, args, statusArgIndex } = docListFilter(req, teamId);
     const page = Math.max(1, Number(req.query.page ?? 1) || 1);
     // 行数上限 200：恶意超大分页会把全表拖进内存（DoS 面）
     const rows = Math.min(200, Math.max(1, Number(req.query.rows ?? 20) || 20));
@@ -291,6 +318,111 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const statusCount: Record<string, number> = { draft: 0, pending: 0, audit: 0, void: 0 };
     for (const r of statusStats) statusCount[r.s] = r.c;
     return res.json({ total: total.c, rows: list, page, pageSize: rows, statusCount });
+  });
+
+  // B-前4 单据批量导出：一次返回当前筛选的全部单据 CSV（替代前端 50 页串行拉取）。
+  // 筛选与权限复用 docListFilter（与 /doc/list 同条件、同团队隔离）；超过上限返回 400。
+  router.get('/doc/export', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const { conds, args } = docListFilter(req, teamId);
+    const where = conds.join(' AND ');
+    const total = db
+      .prepare(`SELECT COUNT(*) AS c FROM doc d WHERE ${where}`)
+      .get(...args) as { c: number };
+    if (total.c > MAX_EXPORT_ROWS) {
+      return res.status(400).json({ error: `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出` });
+    }
+    const rows = db
+      .prepare(
+        `SELECT d.billNo, d.date, d.totalQty, d.totalAmount, d.status, d.remark,
+           CASE WHEN d.partnerType = 'cus' THEN (SELECT name FROM customer WHERE id = d.partnerId)
+                WHEN d.partnerType = 'ven' THEN (SELECT name FROM vendor WHERE id = d.partnerId)
+                ELSE '' END AS partnerName,
+           (SELECT name FROM warehouse WHERE id = d.warehouseId) AS warehouseName
+         FROM doc d WHERE ${where} ORDER BY d.id DESC LIMIT ?`,
+      )
+      .all(...args, MAX_EXPORT_ROWS) as Array<{
+        billNo: string; date: string; totalQty: number; totalAmount: number;
+        status: string; remark: string | null; partnerName: string | null; warehouseName: string | null;
+      }>;
+    const filename = `单据导出_${localDate().replace(/-/g, '')}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('X-Export-Total', String(total.c));
+    res.write('\ufeff' + ['单号', '日期', '往来单位', '仓库', '合计数量', '合计金额(元)', '状态', '备注'].map(csvCell).join(',') + '\r\n');
+    for (const r of rows) {
+      res.write(
+        [r.billNo, (r.date || '').slice(0, 10), r.partnerName || '', r.warehouseName || '', r.totalQty,
+          centsToYuan(r.totalAmount), DOC_STATUS_TEXT[r.status] || r.status, r.remark || '']
+          .map(csvCell).join(',') + '\r\n',
+      );
+    }
+    return res.end();
+  });
+
+  // B-前4 库存流水批量导出：与 /stock/ledger 同筛选（productId/warehouseId/日期区间）。
+  // 挂在 docs.ts 而不改 stock.ts（stock.ts 是第三批第二波 W3 的文件，不碰）。
+  router.get('/stock/ledger/export', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const conds: string[] = ['l.teamId = ?'];
+    const args: Array<string | number> = [teamId];
+    const productId = Number(req.query.productId);
+    const warehouseId = Number(req.query.warehouseId);
+    if (productId) {
+      conds.push('l.productId = ?');
+      args.push(productId);
+    }
+    if (warehouseId) {
+      conds.push('l.warehouseId = ?');
+      args.push(warehouseId);
+    }
+    // 流水按 createdAt 存本地时间字符串（YYYY-MM-DD HH:mm:ss），日期区间直接比前缀（与 /stock/ledger 同口径）
+    const from = typeof req.query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : '';
+    const to = typeof req.query.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : '';
+    if (from) {
+      conds.push('substr(l.createdAt,1,10) >= ?');
+      args.push(from);
+    }
+    if (to) {
+      conds.push('substr(l.createdAt,1,10) <= ?');
+      args.push(to);
+    }
+    const where = conds.join(' AND ');
+    const total = db
+      .prepare(`SELECT COUNT(*) AS c FROM stock_ledger l WHERE ${where}`)
+      .get(...args) as { c: number };
+    if (total.c > MAX_EXPORT_ROWS) {
+      return res.status(400).json({ error: `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出` });
+    }
+    const rows = db
+      .prepare(
+        `SELECT l.createdAt, l.direction, l.qty, l.unitCost, l.batchNo, l.refDocId,
+           (SELECT name FROM product WHERE id = l.productId) AS prodName,
+           (SELECT name FROM warehouse WHERE id = l.warehouseId) AS whName,
+           (SELECT billNo FROM doc WHERE id = l.refDocId) AS billNo
+         FROM stock_ledger l WHERE ${where} ORDER BY l.id DESC LIMIT ?`,
+      )
+      .all(...args, MAX_EXPORT_ROWS) as Array<{
+        createdAt: string; direction: string; qty: number; unitCost: number | null;
+        batchNo: string | null; refDocId: number; prodName: string | null;
+        whName: string | null; billNo: string | null;
+      }>;
+    const filename = `库存流水导出_${localDate().replace(/-/g, '')}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('X-Export-Total', String(total.c));
+    res.write('\ufeff' + ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'].map(csvCell).join(',') + '\r\n');
+    for (const r of rows) {
+      res.write(
+        [r.createdAt, r.prodName || '', r.whName || '', r.batchNo || '',
+          r.direction === 'in' ? '入库' : '出库', r.qty, centsToYuan(r.unitCost),
+          r.billNo || ('#' + r.refDocId)]
+          .map(csvCell).join(',') + '\r\n',
+      );
+    }
+    return res.end();
   });
 
   // 待审核工作台：列出所有待审核单据（按提交时间升序，先提交先处理）

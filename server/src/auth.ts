@@ -19,6 +19,28 @@ const TOKEN_TTL = 7 * 24 * 3600;
 /** 签名密钥：优先环境变量，否则用固定本地密钥（单机部署可接受） */
 const SECRET = process.env.ORANGE_JWT_SECRET ?? 'huimin-clone-local-secret-v1';
 
+/** 浏览器会话 Cookie 名：与旧 localStorage 键同名，便于对照 */
+const COOKIE_NAME = 'oc_token';
+/**
+ * B-前5：令牌改由 httpOnly Cookie 下发，浏览器不再把 token 存 localStorage
+ * （任意 XSS 可直接读走 localStorage 里的令牌）。属性口径：
+ * - HttpOnly：JS（含 XSS 注入脚本）读不到；
+ * - Path=/：全站接口都带；
+ * - SameSite=Lax：跨站写请求不带，防 CSRF（配合 index.ts 已有的 Host 白名单）；
+ * - Max-Age=TOKEN_TTL（7 天，与令牌有效期一致）；
+ * - 不加 Secure：本地部署是明文 HTTP，加了浏览器不会存；
+ * - 不设 Domain：默认仅当前 host。
+ * 登录/注册 JSON 仍返回 token（API 客户端与既有 Bearer 测试用），前端忽略 body 里的 token。
+ * 不加 Access-Control-Allow-Credentials：应用是同源部署，浏览器不需要跨域带凭据。
+ */
+function setAuthCookie(res: Response, token: string): void {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_TTL}`);
+}
+/** 登出时清掉 Cookie：空值 + Max-Age=0 */
+function clearAuthCookie(res: Response): void {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+
 export interface AuthUser {
   userId: number;
   teamId: number;
@@ -184,10 +206,21 @@ function revokeToken(payload: { userId: number; exp?: number; jti?: string }): v
 
 /* ---------------- 中间件 ---------------- */
 
-/** 从请求中取令牌（Authorization: Bearer xxx）。
+/** 从请求中取令牌：优先 httpOnly Cookie（浏览器登录态），再读 Authorization: Bearer。
+ *  Bearer 保留作后备，供 API 客户端与既有测试脚本用。
  *  不支持 ?token= query：令牌会泄漏进访问日志/浏览器历史/Referer。
- *  下载类请求请前端用 fetch 携带 Bearer 头再转 blob。 */
+ *  下载/上传类请求前端直接用 fetch，不再手动拼 Bearer 头（同源 cookie 自动带上）。 */
 function readToken(req: Request): string | null {
+  const cookie = req.headers.cookie;
+  if (cookie) {
+    for (const part of cookie.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq > 0 && part.slice(0, eq).trim() === COOKIE_NAME) {
+        const v = part.slice(eq + 1).trim();
+        if (v) return v;
+      }
+    }
+  }
   const h = req.headers.authorization;
   if (h && h.startsWith('Bearer ')) return h.slice(7).trim() || null;
   return null;
@@ -647,7 +680,10 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const user: AuthUser = { userId, teamId, role: 'admin', name: username, ver: 0 };
     // 注册成功清空失败计数：避免正常用户首次注册时因前面试错被误锁
     clearFails(failKey);
-    return res.json({ ok: true, token: issueToken(user), user, teamId, teamName: teamNameOut });
+    // B-前5：注册也经 Set-Cookie 下发令牌（前端注册后直接进系统，不再读 body token）
+    const token = issueToken(user);
+    setAuthCookie(res, token);
+    return res.json({ ok: true, token, user, teamId, teamName: teamNameOut });
   }));
 
   /** 登录 */
@@ -688,13 +724,16 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     // 登录成功清空失败计数：解锁此前的试错，下次登录不受影响
     clearFails(failKey);
     clearUserFails(username);
-    return res.json({ ok: true, token: issueToken(user), user, team });
+    // B-前5：登录经 Set-Cookie 下发令牌；JSON 里仍返回 token（API 客户端与测试用）
+    const token = issueToken(user);
+    setAuthCookie(res, token);
+    return res.json({ ok: true, token, user, team });
   }));
 
   /** 退出登录：吊销当前令牌（此前只是客户端删 token，令牌在过期前仍可继续调用接口） */
   router.post('/auth/logout', requireAuth, (req, res) => {
-    const h = req.headers.authorization;
-    const token = h && h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    // B-前5：令牌可能来自 Cookie（浏览器）或 Bearer（API 客户端），统一用 readToken 取
+    const token = readToken(req) ?? '';
     const dot = token.lastIndexOf('.');
     if (dot > 0) {
       try {
@@ -703,6 +742,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         if (payload.userId && payload.exp) revokeToken(payload as { userId: number; exp: number; jti?: string });
       } catch { /* 令牌格式异常时无需吊销 */ }
     }
+    // B-前5：登出同时清掉浏览器里的 Cookie（Max-Age=0）
+    clearAuthCookie(res);
     return res.json({ ok: true });
   });
 
@@ -746,7 +787,11 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const renewed: AuthUser = { userId: u.userId, teamId: u.teamId, role: u.role, name: u.name, ver: fresh?.tokenVer ?? row.tokenVer + 1 };
     // 改密成功清零失败计数
     clearPwdChangeFails(u.userId);
-    return res.json({ ok: true, token: issueToken(renewed) });
+    // B-前5：改密会吊销旧令牌（tokenVer+1），重签的新令牌经 Set-Cookie 下发，
+    // 否则浏览器里旧 cookie 失效后下一次请求即 401 被踢回登录页
+    const renewedToken = issueToken(renewed);
+    setAuthCookie(res, renewedToken);
+    return res.json({ ok: true, token: renewedToken });
   }));
 
   /**

@@ -38,7 +38,8 @@ const DocImport = {
         const qs = new URLSearchParams({ dryRun: dryRun ? '1' : '0', autoCreate: imp.autoCreate ? '1' : '0' });
         const r = await fetch('/api/doc/import?' + qs, {
           method: 'POST',
-          headers: { authorization: 'Bearer ' + auth.token, 'content-type': 'application/octet-stream' },
+          // B-前5：同源 fetch 默认带 httpOnly Cookie，不再手动拼 Bearer 头
+          headers: { 'content-type': 'application/octet-stream' },
           body: buf,
         });
         const data = await r.json().catch(() => ({}));

@@ -49,7 +49,8 @@ const LoginPage = {
               ...(initialized.value ? { inviteCode: form.inviteCode.trim() } : {}),
             };
         const r = await api.post(path, body);
-        setToken(r.token);
+        // B-前5：令牌由服务端经 Set-Cookie 下发，body 里的 token 前端直接忽略
+        // （只供 API 客户端用）；登录态改以 auth.user 为准，不再读 localStorage。
         auth.user = r.user;
         auth.team = r.team || { id: r.teamId, name: r.teamName };
         // 登录成功才记住用户名；注册模式不记（新账号下一次用不用还不确定）
@@ -153,13 +154,9 @@ const App = {
     }
 
     async function boot() {
-      if (!auth.token) {
-        auth.ready = true;
-        booting.value = false;
-        ready.value = false;
-        if (location.hash !== '#/login') location.hash = '#/login';
-        return;
-      }
+      // B-前5：登录态存在 httpOnly Cookie 里，JS 读不到，无法像以前那样先看
+      // localStorage 再决定是否调 /auth/me；直接问服务端：有 cookie 即登录，
+      // 无 cookie/失效即 401，由 req() 里的 handle401 统一清态并回登录页。
       try {
         const me = await api.get('/auth/me');
         auth.user = me.user;
@@ -168,11 +165,12 @@ const App = {
         switchTo.value = store.teamId;
         ready.value = true;
       } catch (e) {
-        // 令牌失效已在 req 中清理并跳登录
-        if (auth.token) toast('登录状态校验失败：' + e.message, 'error');
+        // 401 已在 req() 里由 handle401 处理（清态 + 回登录页），这里不再 toast，
+        // 否则每次未登录打开页面都会弹一次；非 401（如网络抖动/500）才提示，
+        // 并回登录页可重试，不让页面永久卡「加载中…」
+        const msg = String((e && e.message) || '');
+        if (!msg.includes('未登录') && !msg.includes('登录凭证已变更')) toast('登录状态校验失败：' + msg, 'error');
         ready.value = false;
-        // 校验失败（非 401，如网络抖动/500）时不让页面永久卡「加载中…」，回登录页可重试
-        setToken('');
         auth.user = null; auth.team = null;
         if (location.hash !== '#/login') location.hash = '#/login';
       } finally {
@@ -183,9 +181,9 @@ const App = {
 
     onMounted(boot);
 
-    // 登录页登录成功后触发重新引导
-    watch(() => auth.token, (t, old) => {
-      if (t && !old) { ready.value = false; boot(); }
+    // 登录页登录成功后触发重新引导（登录态信号：auth.user）
+    watch(() => auth.user, (u, old) => {
+      if (u && !old) { ready.value = false; boot(); }
     });
 
     /* 当前页面标识（含 query 里的 type） */
@@ -280,8 +278,8 @@ const App = {
       cmdOpen, cmdKw, cmdList, cmdGo, goLowStock };
   },
   template: `
-  <login-page v-if="auth.ready && !auth.token"/>
-  <div class="shell" v-else-if="auth.token">
+  <login-page v-if="auth.ready && !auth.user"/>
+  <div class="shell" v-else-if="auth.user">
     <header class="topnav">
       <span class="nav-ind" :style="navInd"></span>
       <div class="brand" @click="nav('#/dashboard')">
@@ -330,7 +328,7 @@ const App = {
   <div v-else class="login-wrap"><div class="muted" style="color:#fff">正在进入…</div></div>
   <!-- Ctrl+K 快速跳转面板（放在分支链之后：v-else 必须紧跟 shell 的 v-else-if，
        插在中间会让 login-wrap 错误绑定到面板的 v-if，登录态下页面底部多出 100vh 空白块） -->
-  <div class="modal-mask" v-if="cmdOpen && auth.token" @click.self="cmdOpen = false" style="align-items:flex-start;padding-top:12vh">
+  <div class="modal-mask" v-if="cmdOpen && auth.user" @click.self="cmdOpen = false" style="align-items:flex-start;padding-top:12vh">
     <div class="modal narrow" style="align-self:center;margin:0 auto">
       <div style="padding:12px 14px;border-bottom:1px solid var(--border-light)">
         <input v-model="cmdKw" placeholder="输入页面名称，回车跳转第一项（Esc 关闭）" autofocus

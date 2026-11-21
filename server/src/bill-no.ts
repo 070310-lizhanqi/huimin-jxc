@@ -6,14 +6,27 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { localDate } from './db';
 import { BILL_NO_PREFIXES, loadNoMode, loadPrefix } from './settings';
+import type { NoMode } from './settings';
+
+/** 单号生成所需的 team 级配置（B-安10②）：导入开始时一次读出，按单据复用，
+ *  避免每生成一个单号都重复查两次 setting 表。 */
+export interface BillNoConfig {
+  prefix: Record<string, string>;
+  noMode: NoMode;
+}
+
+export function loadBillNoConfig(db: DatabaseSync, teamId: number): BillNoConfig {
+  return { prefix: loadPrefix(db, teamId), noMode: loadNoMode(db, teamId) };
+}
 
 /** 单号 upsert 语句缓存：按 db 实例缓存（多库测试进程下各库独立编译） */
 const stmtCache = new WeakMap<DatabaseSync, import('node:sqlite').StatementSync>();
 
-export function nextBillNo(db: DatabaseSync, teamId: number, type: string): string {
-  // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）
-  const prefix = loadPrefix(db, teamId)[type] ?? BILL_NO_PREFIXES[type] ?? 'NO';
-  const mode = loadNoMode(db, teamId);
+export function nextBillNo(db: DatabaseSync, teamId: number, type: string, cfg?: BillNoConfig): string {
+  // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）；
+  // 调用方已一次读出配置时直接复用，不再逐单查库
+  const prefix = cfg ? (cfg.prefix[type] ?? BILL_NO_PREFIXES[type] ?? 'NO') : (loadPrefix(db, teamId)[type] ?? BILL_NO_PREFIXES[type] ?? 'NO');
+  const mode = cfg ? cfg.noMode : loadNoMode(db, teamId);
   const full = localDate().replace(/-/g, '');
   const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;
   // 独立序号表：删除草稿后序号不复用，保证 billNo 永不重复

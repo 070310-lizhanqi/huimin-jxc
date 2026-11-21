@@ -108,29 +108,46 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const kw = String(req.query.kw ?? '').trim();
     const page = Math.max(1, Number(req.query.page ?? 1) || 1);
-    // 行数保护：0~500，缺省全量（小账套档案量不大，兼容旧客户端不带分页）
+    /**
+     * B-前2 分页：只有显式传 page 才返回分页对象 { rows, total, page, rowsPerPage }。
+     * 只传 rows 时沿用旧行为（返回数组、LIMIT rows）：test-backup-db-batch2 / test-gzip-batch3
+     * 用 rows=500 取全量数组，改形状会直接 break 它们；旧客户端不带 page 也不受影响。
+     * 分页时 rows 缺省 50、钳制 1~CRUD_MAX_ROWS。
+     */
+    const paged = req.query.page !== undefined;
     const rawRows = Number(req.query.rows ?? 0);
-    const rows = Math.min(CRUD_MAX_ROWS, Math.max(0, Number.isFinite(rawRows) ? Math.floor(rawRows) : 0));
-    let sql = `SELECT * FROM ${cfg.table} WHERE teamId = ?`;
-    const args: Value[] = [teamId];
+    const rows = paged
+      ? Math.min(CRUD_MAX_ROWS, Math.max(1, Number.isFinite(rawRows) && rawRows > 0 ? Math.floor(rawRows) : 50))
+      : Math.min(CRUD_MAX_ROWS, Math.max(0, Number.isFinite(rawRows) ? Math.floor(rawRows) : 0));
+    let where = `teamId = ?`;
+    const whereArgs: Value[] = [teamId];
     if (kw) {
       // 名称 + 附加字段（条码/规格）模糊匹配；通配符按字面处理
       const like = `%${escapeLike(kw)}%`;
       const fields = ['name', ...(cfg.kwFields ?? [])];
-      sql += ` AND (${fields.map((f) => `IFNULL(${f}, '') LIKE ? ESCAPE '\\'`).join(' OR ')})`;
-      for (let i = 0; i < fields.length; i++) args.push(like);
+      where += ` AND (${fields.map((f) => `IFNULL(${f}, '') LIKE ? ESCAPE '\\'`).join(' OR ')})`;
+      for (let i = 0; i < fields.length; i++) whereArgs.push(like);
     }
-    sql += ` ORDER BY ${cfg.orderBy ?? 'id'}`;
+    const sql = `SELECT * FROM ${cfg.table} WHERE ${where} ORDER BY ${cfg.orderBy ?? 'id'}`;
+    if (paged) {
+      const total = (
+        db.prepare(`SELECT COUNT(*) AS c FROM ${cfg.table} WHERE ${where}`).get(...whereArgs) as { c: number }
+      ).c;
+      const list = db.prepare(`${sql} LIMIT ? OFFSET ?`).all(...whereArgs, rows, (page - 1) * rows);
+      return res.json({ rows: list, total, page, rowsPerPage: rows });
+    }
+    const args: Value[] = [...whereArgs];
+    let listSql = sql;
     if (rows > 0) {
-      sql += ` LIMIT ? OFFSET ?`;
+      listSql += ` LIMIT ? OFFSET ?`;
       args.push(rows, (page - 1) * rows);
     } else {
       // 全量兜底上限：极端情况下（误把档案当导入用）也不会一次性吐几十万行。
       // 用占位符而非字符串插值：与上方分页写法一致，防止维护者照搬 ${} 模式引入注入。
-      sql += ` LIMIT ?`;
+      listSql += ` LIMIT ?`;
       args.push(CRUD_MAX_ROWS);
     }
-    return res.json(db.prepare(sql).all(...args));
+    return res.json(db.prepare(listSql).all(...args));
   });
 
   router.post(`/${cfg.table}`, (req: Request, res: Response) => {

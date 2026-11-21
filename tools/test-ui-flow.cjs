@@ -67,7 +67,10 @@ function query(sql, ...args) {
   ok(page.url().includes('#/dashboard'), '登录进入工作台', page.url());
 
   // 通过 API 建档案（档案 CRUD 已被 API 测试覆盖，这里只作为 UI 业务流的前置数据）
-  const token = await page.evaluate(() => localStorage.getItem('oc_token'));
+  // B-前5：令牌在 httpOnly Cookie 里，JS 读不到 localStorage；经 Playwright 的
+  // context.cookies() 取（它能返回 HttpOnly Cookie），再以 Bearer 调 API。
+  const cookies = await page.context().cookies();
+  const token = (cookies.find((c) => c.name === 'oc_token') || {}).value || '';
   const jreq = async (method, p, b) => {
     const r = await fetch(BASE + 'api' + p, {
       method,

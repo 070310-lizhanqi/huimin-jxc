@@ -4,6 +4,8 @@
 const BasePage = {
   setup() {
     const BASE_TABS = ['warehouse', 'reservoir', 'cat', 'unit', 'clerk', 'account'];
+    /** 档案接口名 → store 集合名（B-前1 局部刷新用） */
+    const BASE_KEY = { warehouse: 'warehouses', reservoir: 'reservoirs', cat: 'cats', unit: 'units', clerk: 'clerks', account: 'accounts' };
     const baseTabParam = route.q.tab;
     const tab = ref(BASE_TABS.includes(baseTabParam) ? baseTabParam : 'warehouse');
     // 页内切换回写路由：F5 / 分享链接不丢当前页签（?tab=account 深链本来就支持）
@@ -20,7 +22,7 @@ const BasePage = {
       { key: 'clerk', label: '业务员' },
       { key: 'account', label: '资金账户' },
     ];
-    const editor = reactive({ open: false, kind: '', id: null, form: {} });
+    /* editor/busy/busyDel 由下方的 useCrudEditor（B-前6）提供；editor.kind 由 openNew/openEdit 另行设置 */
 
     const list = computed(() => {
       switch (tab.value) {
@@ -34,55 +36,57 @@ const BasePage = {
       }
     });
 
+    /** B-前6：CRUD 骨架走 useCrudEditor；特殊校验（名称必填、库位必挂仓库、账户余额可负）留在本页 */
+    const crud = useCrudEditor({
+      validate(f) {
+        if (!String(f.name || '').trim()) return '请输入名称';
+        // 库位必须挂仓库：空 warehouseId 会在列表显示 #null 且开单页无法按仓库过滤定位
+        if (editor.kind === 'reservoir' && !f.warehouseId) return '请选择所属仓库';
+        return null;
+      },
+      buildBody(f) {
+        const body = { teamId: store.teamId, ...f };
+        // 账户余额可为负（透支）：只做 toCents 转换，不做禁负校验
+        if (editor.kind === 'account') body.balance = toCents(body.balance);
+        return body;
+      },
+      url: (id) => {
+        const k = editor.kind;
+        return id ? `/${k}/${id}` : `/${k}`;
+      },
+      confirmDelete: (row) => `删除「${row.name}」？被引用的记录将被拒绝。`,
+      deleteRequest: (row) => api.del(`/${tab.value}/${row.id}`, { teamId: store.teamId }),
+      afterSave: async () => {
+        // B-前1：只刷新被改的那一个档案集合（旧 loadBase 重拉 9 个档案 + 打印设置 = 10 个请求）
+        await refreshBase([BASE_KEY[editor.kind]]);
+      },
+      afterDelete: async () => {
+        await refreshBase([BASE_KEY[tab.value]]);
+      },
+    });
+    const editor = crud.editor;
+    const busy = crud.busy;
+    const busyDel = crud.busyDel;
     function openNew() {
       const k = tab.value;
-      editor.kind = k; editor.id = null;
-      editor.form = k === 'reservoir' ? { warehouseId: null, name: '' }
+      editor.kind = k;
+      crud.openNew(k === 'reservoir' ? { warehouseId: null, name: '' }
         : k === 'cat' ? { parentId: null, name: '' }
         : k === 'clerk' ? { name: '', mobile: '' }
         : k === 'account' ? { name: '', type: 'cash', balance: 0 }
-        : { name: '', remark: '' };
-      editor.open = true;
+        : { name: '', remark: '' });
     }
     function openEdit(row) {
       const k = tab.value;
-      editor.kind = k; editor.id = row.id;
-      editor.form = k === 'reservoir' ? { warehouseId: row.warehouseId, name: row.name }
-        : k === 'cat' ? { parentId: row.parentId, name: row.name }
-        : k === 'clerk' ? { name: row.name, mobile: row.mobile || '' }
-        : k === 'account' ? { name: row.name, type: row.type || 'cash', balance: (row.balance || 0) / 100 }
-        : { name: row.name, remark: row.remark || '' };
-      editor.open = true;
+      editor.kind = k;
+      crud.openEdit(row, (r) => (k === 'reservoir' ? { warehouseId: r.warehouseId, name: r.name }
+        : k === 'cat' ? { parentId: r.parentId, name: r.name }
+        : k === 'clerk' ? { name: r.name, mobile: r.mobile || '' }
+        : k === 'account' ? { name: r.name, type: r.type || 'cash', balance: (r.balance || 0) / 100 }
+        : { name: r.name, remark: r.remark || '' }));
     }
-    async function save() {
-      const k = editor.kind;
-      if (!String(editor.form.name || '').trim()) return toast('请输入名称', 'error');
-      // 库位必须挂仓库：空 warehouseId 会在列表显示 #null 且开单页无法按仓库过滤定位
-      if (k === 'reservoir' && !editor.form.warehouseId) return toast('请选择所属仓库', 'error');
-      const body = { teamId: store.teamId, ...editor.form };
-      if (k === 'account') body.balance = toCents(body.balance);
-      // 防双击：保存请求未返回前按钮禁用（product/partner 页已有同款 busy 模式）
-      if (busy.value) return;
-      busy.value = true;
-      try {
-        if (editor.id) await api.put(`/${k}/${editor.id}`, body);
-        else await api.post(`/${k}`, body);
-        editor.open = false;
-        toast('已保存');
-        await loadBase();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busy.value = false; }
-    }
-    async function del(row) {
-      if (busyDel.value === row.id) return;
-      if (!(await confirmBox(`删除「${row.name}」？被引用的记录将被拒绝。`))) return;
-      busyDel.value = row.id;
-      try { await api.del(`/${tab.value}/${row.id}`, { teamId: store.teamId }); toast('已删除'); await loadBase(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyDel.value = null; }
-    }
-    const busy = ref(false);
-    const busyDel = ref(null);
+    const save = crud.save;
+    const del = crud.del;
     /** 分类下拉排除自己与自己的子孙（选子孙为父级会成环，服务端也会拒绝） */
     const catOptions = computed(() => {
       if (editor.kind !== 'cat' || !editor.id) return store.cats;

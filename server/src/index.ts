@@ -128,6 +128,12 @@ const GZIP_MAX_BUFFER = 32 * 1024 * 1024;
 const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
 // 下载/导出路由显式跳过压缩：备份文件已是 SQLite 二进制，压缩无收益且放大内存
 const GZIP_SKIP_PATH = /^\/api\/backup\/download/;
+// B-安12：/vendor/* 压缩结果内存缓存。vendor 文件内容恒定（immutable: true 已声明），
+// 同一文件重复压缩是纯浪费；缓存键为请求路径，附带原文体积做一致性校验。
+// 上限 16MB（全部 vendor 约 2.7MB，gzip 后约 0.8MB，留足余量）；超限后不再新增缓存项。
+const VENDOR_GZIP_CACHE = new Map<string, { body: Buffer; origSize: number }>();
+let vendorGzipCacheBytes = 0;
+const VENDOR_GZIP_CACHE_MAX = 16 * 1024 * 1024;
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const accept = String(req.headers['accept-encoding'] ?? '');
   if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
@@ -139,6 +145,11 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     next();
     return;
   }
+  // B-安12：先把请求路径/方法快照下来。挂载点后的中间件（如 app.use('/vendor', …)）
+  // 会改写 req.url，res.end 执行时 req.path 已不含挂载前缀（实测 /vendor/echarts.min.js
+  // 会变成 /echarts.min.js），缓存键必须用进入中间件时的原始路径，否则永远命中不了。
+  const reqPath = req.path;
+  const reqMethod = req.method;
   // 包装 write/end：缓冲完整体再统一 gzip（静态文件与 JSON 均为一次性写出，内存可控）
   const chunks: Buffer[] = [];
   let size = 0;
@@ -194,14 +205,45 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     const type = String(res.getHeader('content-type') ?? '').split(';')[0];
     // 决策：类型可压 + 体积达标 + 未手动指定 Content-Encoding
     if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
+      // B-安12：vendor 静态文件先查压缩缓存（内容恒定，命中即零压缩成本）
+      if (reqMethod === 'GET' && reqPath.startsWith('/vendor/')) {
+        const hit = VENDOR_GZIP_CACHE.get(reqPath);
+        if (hit && hit.origSize === size) {
+          usingGzip = true;
+          origSetHeader('content-encoding', 'gzip');
+          origSetHeader('content-length', String(hit.body.length));
+          origSetHeader('vary', 'Accept-Encoding');
+          origWrite(hit.body);
+          return origEnd();
+        }
+      }
       usingGzip = true;
-      const body = zlib.gzipSync(Buffer.concat(chunks), { level: 6 });
+      const body = Buffer.concat(chunks);
       chunks.length = 0;
-      origSetHeader('content-encoding', 'gzip');
-      origSetHeader('content-length', String(body.length));
-      origSetHeader('vary', 'Accept-Encoding');
-      origWrite(body);
-      return origEnd();
+      // B-安12：gzipSync 会阻塞事件循环（1MB 的 echarts 约 47ms，期间登录等小请求都被拖住），
+      // 改为异步 zlib.gzip（走 libuv 线程池），压缩完成后再写出；失败则回落为明文。
+      zlib.gzip(body, { level: 6 }, (err, gzipped) => {
+        if (err || !gzipped) {
+          console.error('[gzip] 压缩失败，回落明文:', err);
+          usingGzip = false;
+          origWrite(body);
+          origEnd();
+          return;
+        }
+        // 压缩成功：vendor 文件记入缓存（总量封顶，超限不再新增）
+        if (reqMethod === 'GET' && reqPath.startsWith('/vendor/') && gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+          if (!VENDOR_GZIP_CACHE.has(reqPath) && vendorGzipCacheBytes + gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+            VENDOR_GZIP_CACHE.set(reqPath, { body: gzipped, origSize: size });
+            vendorGzipCacheBytes += gzipped.length;
+          }
+        }
+        origSetHeader('content-encoding', 'gzip');
+        origSetHeader('content-length', String(gzipped.length));
+        origSetHeader('vary', 'Accept-Encoding');
+        origWrite(gzipped);
+        origEnd();
+      });
+      return res;
     }
     for (const c of chunks) origWrite(c);
     return origEnd();
@@ -244,10 +286,12 @@ mountCrud(api, db, {
       const editId = Number(body.id);
       if (editId) {
         // 自引用与间接环检测：从父级沿链上溯，遇到自己即成环
+        // B-安10④：语句提到循环外预编译一次（原每跳一次 db.prepare，最深 100 跳即 100 次编译）
+        const parentStmt = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`);
         let cur = parentId;
         for (let hop = 0; hop < 100; hop++) {
           if (cur === editId) return '父分类不能是自己或自己的子分类';
-          const row = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`).get(cur, teamId) as
+          const row = parentStmt.get(cur, teamId) as
             | { parentId: number | null }
             | undefined;
           if (!row || !row.parentId) break;
@@ -375,9 +419,19 @@ api.post('/product/import', (req, res) => {
   };
   const errors: Array<{ row: number; msg: string }> = [];
   let success = 0;
+  // B-安10③：一次全量读 + 内存 Map，循环内零查询。原每行两次查询（getProd + getCat），
+  // 1000 行即 2000 次；并发冲突由 product(teamId, name) 唯一索引兜底，记为行错误。
+  const prodNames = new Set<string>(
+    (db.prepare(`SELECT name FROM product WHERE teamId = ?`).all(teamId) as Array<{ name: string }>).map((p) => p.name),
+  );
+  const catByName = new Map<string, number>(
+    (db.prepare(`SELECT id, name FROM cat WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>).map(
+      (c) => [c.name, c.id] as [string, number],
+    ),
+  );
+  // 仅内存未命中时用：复核一次库（可能是并发导入刚建的分类），再决定是否新建
   const getCat = db.prepare(`SELECT id FROM cat WHERE teamId = ? AND name = ?`);
   const insCat = db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, ?)`);
-  const getProd = db.prepare(`SELECT id FROM product WHERE teamId = ? AND name = ?`);
   const ins = db.prepare(
     `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -393,16 +447,26 @@ api.post('/product/import', (req, res) => {
         errors.push({ row: rowNo, msg: '名称不能为空' });
         continue;
       }
-      if (getProd.get(teamId, name)) {
+      if (prodNames.has(name)) {
         errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
         continue;
       }
-      // 分类名：不存在则自动创建
+      // 分类名：不存在则自动创建（先查内存 Map，未命中再复核一次库）
       let catId: number | null = null;
       const catName = String(r.catName ?? '').trim();
       if (catName) {
-        const hit = getCat.get(teamId, catName) as { id: number } | undefined;
-        catId = hit ? hit.id : Number(insCat.run(teamId, catName).lastInsertRowid);
+        const cached = catByName.get(catName);
+        if (cached !== undefined) {
+          catId = cached;
+        } else {
+          const hit = getCat.get(teamId, catName) as { id: number } | undefined;
+          if (hit) {
+            catId = hit.id;
+          } else {
+            catId = Number(insCat.run(teamId, catName).lastInsertRowid);
+          }
+          catByName.set(catName, catId);
+        }
       }
       const prices: number[] = [];
       let bad = '';
@@ -429,20 +493,33 @@ api.post('/product/import', (req, res) => {
         }
         lowQty = n;
       }
-      ins.run(
-        teamId,
-        catId,
-        name,
-        String(r.barcode ?? '').trim() || null,
-        String(r.unit ?? '').trim() || '件',
-        String(r.spec ?? '').trim() || null,
-        prices[1],
-        prices[2],
-        prices[0],
-        prices[3],
-        lowQty,
-        String(r.remark ?? '').trim() || null,
-      );
+      try {
+        ins.run(
+          teamId,
+          catId,
+          name,
+          String(r.barcode ?? '').trim() || null,
+          String(r.unit ?? '').trim() || '件',
+          String(r.spec ?? '').trim() || null,
+          prices[1],
+          prices[2],
+          prices[0],
+          prices[3],
+          lowQty,
+          String(r.remark ?? '').trim() || null,
+        );
+      } catch (e) {
+        // B-安10③ 唯一索引兜底：内存判重用的是导入开始时的快照，并发导入已建同名商品时
+        // INSERT 撞 product(teamId, name) 唯一索引，记为行错误继续下一行，不整批 500。
+        // 约束冲突只中止当前语句、不中止事务，循环可继续。
+        if (String((e as Error)?.message ?? '').includes('UNIQUE constraint failed')) {
+          prodNames.add(name); // 后续同名行直接走内存判重
+          errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
+          continue;
+        }
+        throw e;
+      }
+      prodNames.add(name);
       success++;
     }
     db.exec('COMMIT');
