@@ -448,8 +448,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     }
     let docId = 0;
     let billNo = '';
-    // BEGIN 放 try 外：BEGIN 本身失败时 ROLLBACK 会二次抛错掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 单号、单据头、明细同事务：任一步失败整体回滚，不留半张单
       billNo = nextBillNo(db, input.teamId, input.type);
@@ -543,8 +548,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     let billNo = '';
     let partial = false;
     let converted: Array<{ productId: number; qty: number }> = [];
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 履约数量跟踪：统计该订单已转出的子单（含草稿/待审/已审，作废不计）按商品汇总的数量，
       // 只允许转出「剩余未履约数量」，全部转完则拦截，杜绝同一订单重复超额转单。
@@ -654,8 +664,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     let newId = 0;
     let billNo = '';
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       billNo = nextBillNo(db, teamId, doc.type);
       const totalQty = (
@@ -668,11 +683,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           a: number;
         }
       ).a;
-      // 与 create 同口径：totalAmount = 明细毛额 − 整单折扣。
-      // 明细 amount 是行毛额，直接当 totalAmount 会让复制单的应收虚增一个折扣额，
-      // 审核时按 totalAmount 抬往来余额即错账
+      // 与 create 同口径：totalAmount = 明细毛额 − 整单折扣，不钳制为 0。
+      // 生产组装负数耗用行可使合计为负，钳制会让头（0）与明细（负）对不上；
+      // discount 上一行已保证 grossAmount<=0 时为 0，负合计不会被折扣再放大。
       const discount = Math.max(0, Math.min(Math.round(Number(doc.discount ?? 0)), grossAmount));
-      const totalAmount = Math.max(0, grossAmount - discount);
+      const totalAmount = grossAmount - discount;
       const info = db
         .prepare(
           `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, refOrderId,
@@ -753,8 +768,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       const settleErr = checkSettle(totalAmount, paidAmount, deposit);
       if (settleErr) return res.status(400).json({ error: settleErr });
     }
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 锁内复核状态：预检与取锁之间单据可能已被并发审核/作废，
       // 覆盖已过账单据会导致明细与库存流水错位
@@ -839,8 +859,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!ids.length) return res.status(400).json({ error: 'ids 不能为空' });
     let done = 0;
     const skipped: number[] = [];
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 预编译到循环外：批量接口一次可能提交上百张草稿
       // UPDATE 带 teamId：即便 sel 预检已限定，UPDATE 本身也限定本团队，杜绝跨团队 id 撞号污染
@@ -889,9 +914,14 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (doc.status !== 'draft' && doc.status !== 'pending') {
       return res.status(400).json({ error: '仅草稿或待审核单据可审核' });
     }
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
     // BEGIN IMMEDIATE：立即取得写锁，避免两个审核事务在「预检-过账」之间交叉导致超卖
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 写锁内重读整行并复核状态：预检在锁外，期间草稿可能被并发编辑（paidAmount/partnerId/
       // refOrderId 都可变）——若沿用锁外快照，postStock 用新值而 settleOnAudit 用旧值，
@@ -969,20 +999,37 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'audit') return res.status(400).json({ error: '仅已审核单据可作废' });
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
     try {
-      // 写锁内二次校验状态：预检在锁外，并发作废可能已抢先提交，防重复冲回
-      const freshVoid = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
-        | { status: string }
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
+    try {
+      // 写锁内重读整行（与审核的 freshDoc 同款）：预检在锁外，期间单据字段
+      // （paidAmount/deposit/partnerId/accountId）可能被并发改动；沿用锁外快照，
+      // reverseSettleOnVoid 会按旧值错账户/错金额反冲。此后一律使用锁内最新行。
+      const freshDoc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
+        | {
+            id: number;
+            status: string;
+            type: string;
+            partnerType: string | null;
+            partnerId: number | null;
+            paidAmount: number | null;
+            deposit: number | null;
+            accountId: number | null;
+          }
         | undefined;
-      if (!freshVoid || freshVoid.status !== 'audit') {
+      if (!freshDoc || freshDoc.status !== 'audit') {
         throw new Error('单据状态已变化，请刷新后重试');
       }
-      if (COST_TYPES.has(doc.type)) postStock(db, id, true);
+      const docLocked = freshDoc;
+      if (COST_TYPES.has(docLocked.type)) postStock(db, id, true);
       // 冲回审核时 settleOnAudit 生成的结算记录与账户/往来余额变动，
       // 否则作废带收款的单据后：收款记录仍在、账户余额虚高、往来余额翻转为预收。
-      reverseSettleOnVoid(db, teamId, doc);
+      reverseSettleOnVoid(db, teamId, docLocked);
       // 作废留痕：谁在何时因何作废（原因可空，但操作人与时间必记）
       // voidAt 与 submitAt/auditAt 同口径用 localtime：toISOString 是 UTC，
       // 前端直接展示会让中国用户看到比实际早 8 小时的作废时间
@@ -1008,8 +1055,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       .get(id, teamId) as { status: string } | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
     if (doc.status !== 'draft') return res.status(400).json({ error: '仅草稿可删除' });
-    // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-    db.exec('BEGIN IMMEDIATE');
+    // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
+    // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return res.status(503).json({ error: '系统繁忙，请重试' });
+    }
     try {
       // 锁内复核状态：预检后单据可能已被并发审核（过账）——过账单删除会使库存流水悬挂
       const fresh = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
@@ -1621,7 +1673,12 @@ function settleOnAudit(
  *  2. 往来余额按 paid + deposit 反向加回；
  *  3. 资金账户按 paid 反向扣回。
  *  注：按 settlement 表实际落账金额/账户反冲，而不是信 doc 表快照——
- *  审核后若结算记录被改（isAuto=0 的手工单不会被误删，isAuto=1 的虽不能改但防御万一）。 */
+ *  审核后若结算记录被改（isAuto=0 的手工单不会被误删，isAuto=1 的虽不能改但防御万一）。
+ *  B-数1：后续手工结算（isAuto=0 且 refDocId=本单）优先拦截——在任何删除/反冲
+ *  之前抛错，列出记录，要求先删/改手工结算；不做级联删除。拦截放在 paid+dep
+ *  早退之前：开单即收 0 元、之后手工收款的单也会留下孤儿手工记录。
+ *  A-数1：按 autos 汇总每个账户的 receipt 回扣额，余额不足即拒绝作废，
+ *  与手工删除收款（settlement.ts）同文案口径，报错里指引先调账。 */
 function reverseSettleOnVoid(
   db: DatabaseSync,
   teamId: number,
@@ -1635,6 +1692,18 @@ function reverseSettleOnVoid(
     accountId: number | null;
   },
 ): void {
+  // B-数1：后续手工结算直接拒绝作废（在同一事务内，抛错即整体回滚，无任何删除/反冲发生）
+  const manuals = db
+    .prepare(
+      `SELECT id, type, amount, date FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=0 ORDER BY id`,
+    )
+    .all(teamId, doc.id) as Array<{ id: number; type: string; amount: number; date: string }>;
+  if (manuals.length) {
+    const list = manuals
+      .map((m) => `#${m.id}${m.type === 'receipt' ? '收款' : '付款'}${(m.amount / 100).toFixed(2)}元（${m.date}）`)
+      .join('、');
+    throw new StockError(`单据存在后续手工收付款记录，无法作废，请先删除或修改以下手工结算记录：${list}`);
+  }
   const paid = Math.max(0, Number(doc.paidAmount ?? 0));
   const dep = Math.max(0, Number(doc.deposit ?? 0));
   if (paid + dep <= 0) return;
@@ -1649,6 +1718,23 @@ function reverseSettleOnVoid(
   const autos = db
     .prepare(`SELECT id, accountId, amount, type FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=1`)
     .all(teamId, doc.id) as Array<{ id: number; accountId: number | null; amount: number; type: string }>;
+  // A-数1：按账户汇总自动收款的回扣额，余额不足拒绝作废（付款方向反冲是加钱，无需校验）
+  const receiptBack = new Map<number, number>();
+  for (const s of autos) {
+    if (s.type === 'receipt' && s.accountId) {
+      receiptBack.set(s.accountId, (receiptBack.get(s.accountId) ?? 0) + s.amount);
+    }
+  }
+  for (const [accountId, need] of receiptBack) {
+    const acc = db.prepare(`SELECT balance FROM account WHERE id=? AND teamId=?`).get(accountId, teamId) as
+      | { balance: number }
+      | undefined;
+    if (acc && acc.balance < need) {
+      throw new StockError(
+        `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(need / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
+      );
+    }
+  }
   // 按 isAuto 服务端标识删除（客户端无法伪造；remark 仅作人类可读备注）
   db.prepare(`DELETE FROM settlement WHERE teamId=? AND refDocId=? AND isAuto=1`).run(
     teamId,
@@ -1663,8 +1749,18 @@ function reverseSettleOnVoid(
     db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, s.accountId, teamId);
   }
   // 防御：若没有任何自动结算记录（异常情况，如用户先手工删除）但 doc.paidAmount>0，
-  // 仍按 doc 快照回冲账户避免余额虚增
+  // 仍按 doc 快照回冲账户避免余额虚增；收款方向同样先校验余额，不足即拒绝
   if (!autos.length && doc.accountId && paid > 0) {
+    if (moneyType === 'receipt') {
+      const acc = db.prepare(`SELECT balance FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as
+        | { balance: number }
+        | undefined;
+      if (acc && acc.balance < paid) {
+        throw new StockError(
+          `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(paid / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
+        );
+      }
+    }
     const inc = moneyType === 'receipt' ? -paid : paid;
     db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
   }

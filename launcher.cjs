@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 惠民云进销存 —— 应用启动器（安装版/便携版共用）。
+ * 展惠进销存 —— 应用启动器（安装版/便携版共用）。
  *
  * 职责：
  * 1) 计算数据目录（%APPDATA%\orange-jxc，便携模式为安装目录\data）并注入 ORANGE_DATA_DIR
@@ -20,6 +20,13 @@ const APP_ROOT = __dirname;                       // launcher 位于安装根目
 const SERVER_ENTRY = path.join(APP_ROOT, 'dist', 'server', 'index.js');
 const PORTABLE_FLAG = path.join(APP_ROOT, 'portable.flag');
 const PREFERRED_PORT = Number(process.env.ORANGE_PORT || 7741);
+// A-安9：端口非法时启动行为未定义，启动即显性失败（合法范围 1-65535）。
+if (!Number.isInteger(PREFERRED_PORT) || PREFERRED_PORT < 1 || PREFERRED_PORT > 65535) {
+  console.error(`[启动器] 端口号非法：${process.env.ORANGE_PORT ?? 7741}，合法范围 1-65535。请设置 ORANGE_PORT 为 1-65535 之间的整数后重试。`);
+  process.exit(1);
+}
+// A-安10：sleep 需在 migrateLegacyDataDir（异步）之前定义，供其中的 await sleep(300) 使用。
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 数据目录 ----------
 /**
@@ -57,7 +64,7 @@ function dataDir() {
  *   null      → 用新目录继续（迁移成功，或本来就没什么可迁的）
  *   旧目录路径 → 迁移失败，调用方应回退到旧目录继续（数据还在那，不会丢）
  */
-function migrateLegacyDataDir(target) {
+async function migrateLegacyDataDir(target) {
   const legacy = path.join(appDataDir(), LEGACY_DATA_DIR_NAME);
   if (legacy === target) return null;
   if (!fs.existsSync(legacy)) return null;
@@ -130,9 +137,8 @@ function migrateLegacyDataDir(target) {
         fs.rmSync(legacy, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
         removed = !fs.existsSync(legacy);
       } catch {
-        // 句柄未释放，稍等再试
-        const until = Date.now() + 300;
-        while (Date.now() < until) { /* 短暂等待 */ }
+        // 句柄未释放，稍等再试（A-安10：原 300ms 忙等待阻塞事件循环，改用 await sleep）
+        await sleep(300);
       }
     }
     if (!removed) {
@@ -149,29 +155,42 @@ function migrateLegacyDataDir(target) {
 }
 
 let DATA = dataDir();
-fs.mkdirSync(DATA, { recursive: true });
-// 迁移只在「默认安装目录」场景发生：用户显式指定 ORANGE_DATA_DIR 或便携模式时不插手
-if (!process.env.ORANGE_DATA_DIR && !fs.existsSync(PORTABLE_FLAG)) {
-  const fellBack = migrateLegacyDataDir(DATA);
-  // 迁移失败 → 回退继续用旧目录启动（数据还在那，不会丢）
-  if (fellBack && fellBack !== DATA) {
-    DATA = fellBack;
-    fs.mkdirSync(DATA, { recursive: true });
-  }
+// 以下路径依赖 DATA（迁移失败可能回退到旧目录），由 initDataDir() 在迁移完成后统一赋值。
+// migrateLegacyDataDir 是异步函数（内含 await sleep(300)），CJS 顶层无法 await，
+// 故数据目录初始化放到 initDataDir()，在 main() 之前 await 执行；各函数只在 main 流程内使用这些路径。
+let LAUNCHER_PID = '';
+let PORT_FILE = '';
+let LOG_FILE = '';
+let PID_FILE = '';
+function initDataPaths() {
+  LAUNCHER_PID = path.join(DATA, 'launcher.pid');
+  PORT_FILE = path.join(DATA, 'port.txt');
+  LOG_FILE = path.join(DATA, 'server.log');
+  PID_FILE = path.join(DATA, 'server.pid');
+  LOG_FILE_PATH = LOG_FILE;
 }
-const LAUNCHER_PID = path.join(DATA, 'launcher.pid');
-const PORT_FILE = path.join(DATA, 'port.txt');
-const LOG_FILE = path.join(DATA, 'server.log');
-const PID_FILE = path.join(DATA, 'server.pid');
+async function initDataDir() {
+  fs.mkdirSync(DATA, { recursive: true });
+  // 迁移只在「默认安装目录」场景发生：用户显式指定 ORANGE_DATA_DIR 或便携模式时不插手
+  if (!process.env.ORANGE_DATA_DIR && !fs.existsSync(PORTABLE_FLAG)) {
+    const fellBack = await migrateLegacyDataDir(DATA);
+    // 迁移失败 → 回退继续用旧目录启动（数据还在那，不会丢）
+    if (fellBack && fellBack !== DATA) {
+      DATA = fellBack;
+      fs.mkdirSync(DATA, { recursive: true });
+    }
+  }
+  initDataPaths();
+}
 
 // ---------- 工具 ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// sleep 已移到文件顶部定义（原定义在数据目录初始化之后，迁移函数执行时引用会触发 TDZ，故提前）。
 /**
  * 日志输出：安装版由原生启动器以「无控制台 + 脱离会话」方式拉起，
  * 此时 stdout/stderr 句柄指向 NUL，console.log 虽不报错但内容会丢；
  * 这里统一写进 server.log，既不依赖控制台，也留得下排障痕迹。
  */
-const LOG_FILE_PATH = path.join(DATA, 'server.log');
+let LOG_FILE_PATH = '';
 function logLine(msg) {
   try {
     fs.appendFileSync(LOG_FILE_PATH, `[${new Date().toISOString()}] ${msg}\n`);
@@ -234,7 +253,14 @@ function acquireLauncherLock() {
       try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
     }
   }
-  return true;
+  // A-安10：循环耗尽仍未确认持锁（并发实例同时清残留/重建锁文件的极小概率竞态）：
+  // 以锁文件内容为准复核，与服务端 server.lock（index.ts acquireLock）同款——
+  // 锁文件内容等于本 pid 才算持锁，否则返回 false，避免两个启动器同时认为自己持锁。
+  let locked = false;
+  try {
+    locked = Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid;
+  } catch { /* 锁文件读不到：视为未持锁 */ }
+  return locked;
 }
 /** 退出时清锁（kill 等异常退出留残留，由存活复核兜底） */
 function releaseLauncherLock() {
@@ -344,7 +370,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  logLine('异常退出：' + (e && e.stack ? e.stack : e));
-  process.exit(1);
-});
+// 先完成数据目录初始化（含异步旧目录迁移），再进 main()；任一步失败都显性退出。
+initDataDir()
+  .then(() => main())
+  .catch((e) => {
+    try { logLine('异常退出：' + (e && e.stack ? e.stack : e)); } catch { /* ignore */ }
+    console.error('启动器异常退出：' + (e && e.stack ? e.stack : e));
+    process.exit(1);
+  });

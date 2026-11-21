@@ -146,7 +146,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         }
       });
     } catch (e) {
-      return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
+      const busy = e instanceof Error && e.message === BUSY_MSG;
+      return res.status(busy ? 503 : 400).json({ error: e instanceof Error ? e.message : '保存失败' });
     }
     rememberSettle(dedupKey, createdId);
     return res.json({ ok: true, id: createdId });
@@ -234,7 +235,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         }
       });
     } catch (e) {
-      return res.status(400).json({ error: e instanceof Error ? e.message : '保存失败' });
+      const busy = e instanceof Error && e.message === BUSY_MSG;
+      return res.status(busy ? 503 : 400).json({ error: e instanceof Error ? e.message : '保存失败' });
     }
     return res.json({ ok: true });
   });
@@ -280,7 +282,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         db.prepare(`DELETE FROM settlement WHERE id = ? AND teamId = ?`).run(id, teamId);
       });
     } catch (e) {
-      return res.status(400).json({ error: e instanceof Error ? e.message : '删除失败' });
+      const busy = e instanceof Error && e.message === BUSY_MSG;
+      return res.status(busy ? 503 : 400).json({ error: e instanceof Error ? e.message : '删除失败' });
     }
     return res.json({ ok: true });
   });
@@ -295,10 +298,19 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
   });
 }
 
+/** 事务内“系统繁忙”标记：dbtransaction 的 BEGIN 失败时抛此文案的错误，
+ *  调用方据此返回 503（而不是把 SQLITE_BUSY 当业务错误报 400）。 */
+const BUSY_MSG = '系统繁忙，请重试';
+
 function dbtransaction(db: DatabaseSync, fn: () => void): void {
-  // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
+  // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接抛“系统繁忙”，
+  // 不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
   // BEGIN IMMEDIATE：写事务立刻取写锁，避免 deferred BEGIN 下并发事务升级写锁时 SQLITE_BUSY
-  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec('BEGIN IMMEDIATE');
+  } catch {
+    throw new Error(BUSY_MSG);
+  }
   try {
     fn();
     db.exec('COMMIT');

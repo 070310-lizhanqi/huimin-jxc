@@ -31,13 +31,62 @@ if (!process.env.ORANGE_JWT_SECRET) {
   console.warn('[安全提示] 未设置 ORANGE_JWT_SECRET，将使用内置本地密钥（仅限本机自用；请勿将服务直接暴露到公网）。');
 }
 
+// A-安2 启动守卫：绑定到非本机地址（ORANGE_BIND=0.0.0.0 或其它非 loopback 地址）时，
+// 内置默认密钥是公开源码里的固定值，任何人都能伪造 admin 令牌，因此必须显式设置强随机密钥才允许启动。
+// 注意：此处只做启动守卫，不改 auth.ts 里的默认值字符串，也不实现持久化密钥方案（见 B-安1）。
+{
+  const bind = String(process.env.ORANGE_BIND ?? '').trim().toLowerCase();
+  const isLoopbackBind = bind === '' || bind === 'localhost' || bind === '::1' || bind === '[::1]'
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bind);
+  const secret = process.env.ORANGE_JWT_SECRET;
+  if (!isLoopbackBind && (!secret || secret === 'huimin-clone-local-secret-v1')) {
+    console.error(`[启动失败] 绑定地址为非本机（ORANGE_BIND=${process.env.ORANGE_BIND}），但未设置有效的 ORANGE_JWT_SECRET。`);
+    console.error('内置默认密钥是公开源码中的固定值，暴露到非本机后任何人都能伪造管理员令牌，拒绝启动。');
+    console.error('请先设置一个 32 位以上的强随机密钥再启动：');
+    console.error('  PowerShell：$env:ORANGE_JWT_SECRET="<32 位以上随机字符串>"');
+    console.error('  Linux/macOS：export ORANGE_JWT_SECRET="<32 位以上随机字符串>"');
+    console.error('设置后旧令牌自动失效，已登录用户需重新登录。');
+    process.exit(1);
+  }
+}
+
 const PORT = Number(process.env.PORT ?? 7741);
+// A-安9：PORT 非法（非整数、<1 或 >65535，如 PORT=abc → NaN、PORT=99999）时直接报错退出，
+// 避免 listen 行为未定义。合法范围：1-65535。
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`[启动失败] PORT 非法：${String(process.env.PORT ?? 7741)}（解析后为 ${String(PORT)}），合法范围为 1-65535 的整数。`);
+  console.error('请设置合法端口再启动，例如：PORT=7741（或不设置，使用默认 7741）。');
+  process.exit(1);
+}
 const db = openDb();
 migrate(db);
 
 const app = express();
 app.set('x-powered-by', false);
 app.use(express.json({ limit: '2mb' }));
+
+// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
+// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
+// A-安5：Host 检查必须在 CORS 之前——CORS 中间件对 OPTIONS 预检直接返回 204，
+// 若 Host 检查在其后，任意 Host 的预检都能绕过白名单拿到 204。
+const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+for (const h of String(process.env.ORANGE_ALLOW_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
+  ALLOW_HOSTS.add(h);
+}
+const hostAllowed = (hostHeader: string): boolean => {
+  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
+  if (ALLOW_HOSTS.has(h)) return true;
+  // 本机任意回环地址（如 127.0.0.5）也算可信
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+};
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const host = String(req.headers.host ?? '');
+  if (host && !hostAllowed(host)) {
+    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
+    return;
+  }
+  next();
+});
 
 // CORS：仅允许同源与本地开发端口（白名单按实际端口动态生成，改 PORT 部署不失效）
 const ALLOW_ORIGINS = new Set(
@@ -157,27 +206,6 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     for (const c of chunks) origWrite(c);
     return origEnd();
   };
-  next();
-});
-
-// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
-// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
-const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
-for (const h of String(process.env.ORANGE_ALLOW_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
-  ALLOW_HOSTS.add(h);
-}
-const hostAllowed = (hostHeader: string): boolean => {
-  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
-  if (ALLOW_HOSTS.has(h)) return true;
-  // 本机任意回环地址（如 127.0.0.5）也算可信
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-};
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const host = String(req.headers.host ?? '');
-  if (host && !hostAllowed(host)) {
-    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
-    return;
-  }
   next();
 });
 
@@ -411,7 +439,9 @@ api.post('/product/import', (req, res) => {
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
-    return res.status(500).json({ error: `导入失败：${(e as Error).message}` });
+    // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名/磁盘路径），只写服务端日志
+    console.error('[product-import] 导入失败:', e);
+    return res.status(500).json({ error: '导入失败，请稍后重试' });
   }
   return res.json({ success, errors, total: rows.length });
 });
@@ -471,7 +501,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
     return;
   }
   console.error('[api-error]', err);
-  res.status(500).json({ error: err.message || '服务器内部错误' });
+  // A-安4：固定返回通用文案，不回吐 err.message（可能含 SQLite 表名/唯一索引名/磁盘路径）；
+  // err.message + stack 只写服务端日志（上一行 console.error 已输出完整错误对象）。
+  res.status(500).json({ error: '服务器内部错误' });
 });
 
 // ---------- 启动监听：本机回环 + 端口自适应 + 单实例文件锁 ----------
@@ -573,14 +605,14 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
 
 (async () => {
   if (!acquireLock()) {
-    console.log('[单实例] 已有一个惠民云进销存实例在运行（锁文件指向存活进程），本次启动退出。');
+    console.log('[单实例] 已有一个展惠进销存实例在运行（锁文件指向存活进程），本次启动退出。');
     process.exit(0);
   }
   const firstPort = PORT;
   const { server, port } = await listenOn(firstPort, 20);
   writePortFile(port);
   const actualPort = port;
-  console.log(`huimin-clone server listening on http://127.0.0.1:${actualPort}`);
+  console.log(`zhanhui-jxc server listening on http://127.0.0.1:${actualPort}`);
   if (actualPort !== firstPort) {
     console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${actualPort}（port.txt 已更新）。`);
   }

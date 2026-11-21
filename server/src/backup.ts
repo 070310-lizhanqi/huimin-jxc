@@ -247,7 +247,9 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${KEEP_BACKUPS} 份）的旧备份`);
       return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)), pruned: removed.length });
     } catch (e) {
-      return res.status(500).json({ error: `备份失败：${(e as Error).message}` });
+      // A-安4：不把 err.message 回吐给客户端，只写服务端日志
+      console.error('[backup] 创建备份失败:', e);
+      return res.status(500).json({ error: '备份失败，请稍后重试' });
     }
   });
 
@@ -285,7 +287,9 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     try {
       assertSQLiteFile(full);
     } catch (e) {
-      return res.status(400).json({ error: `恢复已取消：${(e as Error).message}` });
+      // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
+      console.error('[backup] 恢复前校验备份文件失败:', e);
+      return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
     }
     // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
     const password = String(req.body.password ?? '');
@@ -300,7 +304,9 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       scheduleRestore(full);
       return res.json({ ok: true, message: '恢复已排队：服务即将重启，重启后数据回到所选备份时点。' });
     } catch (e) {
-      return res.status(500).json({ error: `恢复失败：${(e as Error).message}` });
+      // A-安4：不把 err.message 回吐给客户端，只写服务端日志
+      console.error('[backup] 恢复排队失败:', e);
+      return res.status(500).json({ error: '恢复失败，请稍后重试' });
     }
   }));
 

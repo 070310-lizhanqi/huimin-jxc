@@ -1,6 +1,6 @@
 'use strict';
 /* web/js/08-dashboard.js —— 由 app.js 拆分（lines 368-938） */
-/* ================= 工作台（对齐惠民云 6 格图表墙） ================= */
+/* ================= 工作台（对齐原产品 6 格图表墙） ================= */
 const DashboardPage = {
   components: { DocViewer },
   setup() {
@@ -24,7 +24,7 @@ const DashboardPage = {
     const charts = [];
 
     /**
-     * 三张独立排行卡（对齐真实惠民云工作台）：
+     * 三张独立排行卡（对齐原产品工作台）：
      * 销售订单排行 / 销售出库排行 / 销售收款排行，各自独立切维度与时间范围
      */
     const DIM_ALL = [
@@ -42,7 +42,7 @@ const DashboardPage = {
     const rankData = reactive({ order: [], out: [], receipt: [] });
     const rankBy = reactive({ order: 'cus', out: 'cus', receipt: 'cus' });
     const rankRefs = reactive({});
-    /** 常用功能快捷入口（对齐惠民云工作台，可在页面上增删，存 localStorage） */
+    /** 常用功能快捷入口（对齐原产品工作台，可在页面上增删，存 localStorage） */
     const QUICK_DEFAULT = [
       { label: '销售出库', icon: 'Sell', to: '#/doc/sale?type=stockout&new=1' },
       { label: '采购入库', icon: 'ShoppingCart', to: '#/doc/purchase?type=stockin&new=1' },
@@ -97,7 +97,7 @@ const DashboardPage = {
       quickEdit.value = false;
     }
 
-    /** 四项 KPI（对齐惠民云「新增销售数据」） */
+    /** 四项 KPI（对齐原产品「新增销售数据」） */
     const kpis = computed(() => {
       const s = sales.value;
       if (!s) return [];
@@ -144,8 +144,10 @@ const DashboardPage = {
      * 中心金额用各档位净值之和（与下方「未结合计」一致）；环图面积用绝对值占比，
      * 否则负档位（退货冲减后的负数）会在饼图里消失导致视觉与数字不符。
      */
-    function donut(el, totals, unit, centerLabel) {
+    async function donut(el, totals, unit, centerLabel) {
       if (!el) return null;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const raw = BUCKET_KEYS.map((k) => Number(totals?.[k] ?? 0));
       const sumAbs = raw.reduce((a, v) => a + Math.abs(v), 0);
@@ -219,8 +221,10 @@ const DashboardPage = {
      * 横向条形排行图。
      * 负值（退货冲减后往来余额为负）用红色反向条 + 负号标签，避免出现「一根灰短条」的观感。
      */
-    function barRank(el, rows, unit) {
+    async function barRank(el, rows, unit) {
       if (!el) return null;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const data = (rows || []).slice().reverse();
       c.setOption({
@@ -262,8 +266,10 @@ const DashboardPage = {
       return c;
     }
 
-    function renderTrend() {
+    async function renderTrend() {
       if (!trendEl.value) return;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      if (!trendEl.value || !document.body.contains(trendEl.value)) return;
       const byDay = {};
       for (const r of trend.value) byDay[r.day] = r;
       const days = [];
@@ -424,13 +430,13 @@ const DashboardPage = {
   },
   template: `
   <div>
-    <!-- 团队标题条（对齐惠民云：白卡左上角团队名） -->
+    <!-- 团队标题条（对齐原产品：白卡左上角团队名） -->
     <div class="team-bar">
       <span class="team-name">{{ store.team?.name || '当前账套' }}</span>
       <span class="team-sub">欢迎回来，祝您生意兴隆</span>
     </div>
 
-    <!-- 常用功能（对齐惠民云工作台：右侧 添加/移除） -->
+    <!-- 常用功能（对齐原产品工作台：右侧 添加/移除） -->
     <div class="chart-card" style="margin-bottom:14px">
       <div class="ct">
         常用功能
@@ -455,7 +461,7 @@ const DashboardPage = {
     <!-- 新手引导 -->
     <div v-if="showGuide" class="card" style="margin-bottom:14px;padding:18px 20px;border-left:4px solid var(--brand);position:relative">
       <span class="x" title="不再显示" style="position:absolute;top:10px;right:14px;cursor:pointer;color:var(--muted);font-size:16px" @click="dismissGuide">×</span>
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用惠民云进销存 —— 3 步开账</div>
+      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用展惠进销存 —— 3 步开账</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:var(--text)">
         <div style="flex:1;min-width:200px">
           <div style="font-weight:600;margin-bottom:4px;color:var(--brand)">① 第 1 步 · 建档</div>
@@ -565,7 +571,7 @@ const DashboardPage = {
       </div>
     </div>
 
-    <!-- 第 3 行：三张独立销售排行卡（对齐惠民云：订单/出库/收款各一格） -->
+    <!-- 第 3 行：三张独立销售排行卡（对齐原产品：订单/出库/收款各一格） -->
     <div class="dash-row">
       <div class="chart-card" v-for="rk in RANK_CARDS" :key="rk.k">
         <div class="ct">

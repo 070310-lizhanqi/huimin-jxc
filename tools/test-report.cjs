@@ -76,7 +76,7 @@ async function j(method, path, body) {
   ok(!r.body.rows.find((x) => x.productId === p2Id), '未销售商品不在报表');
 
   // 作废一笔入库后成本应回退：再入库 5×600 → 平均 (5000+3000)/20=400；作废 → 回到 333.33
-  const d3 = await j('POST', '/doc/create', { teamId, type: 'stockin', warehouseId: 1, items: [{ productId: p1Id, qty: 5, price: 600 }] });
+  const d3 = await j('POST', '/doc/create', { teamId, type: 'stockin', warehouseId: 1, date: '2026-10-24', items: [{ productId: p1Id, qty: 5, price: 600 }] });
   await j('POST', '/doc/audit', { teamId, id: d3.body.id });
   r = await j('GET', `/report/product?teamId=${teamId}&from=2026-10-01&to=2026-10-31`);
   ok(r.body.rows.find((x) => x.productId === p1Id).avgCost === 400, '作废前 avgCost=400');

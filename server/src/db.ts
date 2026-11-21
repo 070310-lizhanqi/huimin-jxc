@@ -165,7 +165,7 @@ export function migrate(db: DB): void {
     type TEXT NOT NULL DEFAULT 'cash',
     balance INTEGER DEFAULT 0
   );
-  -- 商品单位档案（对齐惠民云「资料 - 商品单位」，建档案后开单可下拉选择）
+  -- 商品单位档案（对齐原产品「资料 - 商品单位」，建档案后开单可下拉选择）
   CREATE TABLE IF NOT EXISTS unit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     teamId INTEGER NOT NULL,
@@ -288,7 +288,7 @@ export function migrate(db: DB): void {
   addColumn('doc', 'submitAt', 'TEXT');
   addColumn('doc', 'auditBy', 'TEXT');
   addColumn('doc', 'rejectReason', 'TEXT');
-  // 单据扩展字段（对齐惠民云开单页）：收件人信息 / 整单折扣 / 本次收款 / 收款账户 / 抵扣订金
+  // 单据扩展字段（对齐原产品开单页）：收件人信息 / 整单折扣 / 本次收款 / 收款账户 / 抵扣订金
   addColumn('doc', 'receiverName', 'TEXT');
   addColumn('doc', 'receiverMobile', 'TEXT');
   addColumn('doc', 'receiverAddress', 'TEXT');

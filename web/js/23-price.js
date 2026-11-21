@@ -387,16 +387,30 @@ const SettingsPage = {
     /** 恢复重连轮询的句柄（setup 顶层持有，卸载时统一清理） */
     const restorePollTimers = [];
     let restorePollStopped = false;
+    /** 轮询耗尽后置 true，模板显示「再次尝试」按钮（A-前12） */
+    const restoreFailed = ref(false);
     /** 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态 */
     const pollRestore = (retries) => {
       if (restorePollStopped) return;
       api.get('/auth/status')
         .then(() => { if (!restorePollStopped) location.reload(); })
         .catch(() => {
-          if (restorePollStopped || retries <= 0) return;
+          if (restorePollStopped) return;
+          if (retries <= 0) {
+            // 30 次 × 2 秒 = 60 秒仍未恢复：明确提示去向，不再静默停住
+            restoreFailed.value = true;
+            toast('服务 60 秒未恢复，请手动刷新或检查服务日志', 'error');
+            return;
+          }
           restorePollTimers.push(setTimeout(() => pollRestore(retries - 1), 2000));
         });
     };
+    /** 轮询耗尽后用户点的「再次尝试」：清掉失败态，再跑一轮 30 次 × 2 秒 */
+    function retryRestore() {
+      if (restorePollStopped) return;
+      restoreFailed.value = false;
+      pollRestore(30);
+    }
     onBeforeUnmount(() => {
       restorePollStopped = true;
       for (const t of restorePollTimers) clearTimeout(t);
@@ -451,6 +465,7 @@ const SettingsPage = {
         password = (r.value || '').trim();
       } catch { return; }
       if (!password) return toast('未输入密码，已取消恢复', 'warning');
+      restoreFailed.value = false;
       backupBusy.value = true;
       try {
         await api.post('/backup/restore', { file: row.file, password });
@@ -484,6 +499,7 @@ const SettingsPage = {
       pwdDialog, pwdForm, loadUsers, openUserDialog, saveUser, removeUser, openPwdDialog, savePassword,
       regConf, regLoading, regBusy, loadRegConf, saveRegConf,
       backups, backupDir, backupLoading, backupBusy, loadBackups, createBackup, downloadBackup, restoreBackup, deleteBackup,
+      restoreFailed, retryRestore,
       fmtSize, fmtBackupName,
     };
   },
@@ -538,7 +554,7 @@ const SettingsPage = {
     <div v-else-if="tab === 'print'" class="card">
       <div class="card-title" style="margin-bottom:10px">打印抬头（显示在单据打印页顶部）</div>
       <div class="de-grid">
-        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市惠民商贸有限公司" maxlength="60"/></div></div>
+        <div class="fi"><label>公司名称</label><div class="fc"><input v-model="print.company" placeholder="如：深圳市展惠商贸有限公司" maxlength="60"/></div></div>
         <div class="fi"><label>联系电话</label><div class="fc"><input v-model="print.phone" placeholder="如：0755-12345678" maxlength="40"/></div></div>
         <div class="fi span-all"><label>公司地址</label><div class="fc"><input v-model="print.address" placeholder="如：深圳市南山区科技园" maxlength="120"/></div></div>
         <div class="fi span-all"><label>页脚备注</label><div class="fc"><input v-model="print.footer" placeholder="如：本单为业务往来凭证，如有疑问请及时联系。" maxlength="200"/></div></div>
@@ -639,6 +655,7 @@ const SettingsPage = {
         <button class="btn primary" :disabled="backupBusy" @click="createBackup">{{ backupBusy ? '处理中…' : '⬇ 立即备份' }}</button>
         <button class="btn" @click="loadBackups">刷新</button>
         <span class="muted" style="font-size:12.5px">恢复会让服务重启一次（约几秒），重启完成前请勿操作。</span>
+        <button v-if="restoreFailed" class="btn" @click="retryRestore">再次尝试</button>
       </div>
       <table class="tbl">
         <thead><tr><th>备份时间</th><th style="width:110px" class="r">大小</th><th style="width:250px">操作</th></tr></thead>

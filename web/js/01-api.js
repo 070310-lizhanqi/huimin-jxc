@@ -94,13 +94,32 @@ const api = {
   del: (p, params) => req('DELETE', p, undefined, params),
   /** 带鉴权的文件下载：fetch 取 blob 后触发浏览器另存（令牌不能走 URL，会进日志/历史） */
   download: async (path, fallbackName) => {
-    const r = await fetch('/api' + path, { headers: auth.token ? { authorization: 'Bearer ' + auth.token } : {} });
+    // 超时中止（与 req() 同款）：备份文件大，超时放宽到 120 秒；超时/断网抛与 req() 相同的中文错误
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 120000);
+    let r;
+    try {
+      r = await fetch('/api' + path, { headers: auth.token ? { authorization: 'Bearer ' + auth.token } : {}, signal: ctl.signal });
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
+      throw new Error('网络异常，请检查服务是否可用');
+    }
     if (!r.ok) {
+      clearTimeout(timer);
       let data = null;
       try { data = await r.json(); } catch { /* non-json */ }
       throw new Error((data && data.error) || `HTTP ${r.status}`);
     }
-    const blob = await r.blob();
+    let blob;
+    try {
+      blob = await r.blob();
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
+      throw new Error('网络异常，请检查服务是否可用');
+    }
+    clearTimeout(timer);
     const cd = r.headers.get('content-disposition') || '';
     const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
     const name = m ? decodeURIComponent(m[1].replace(/"/g, '')) : fallbackName;

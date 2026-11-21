@@ -72,8 +72,10 @@ const AgingPage = {
     });
     function toggleSort() { sortDir.value = sortDir.value === 'desc' ? 'asc' : sortDir.value === 'asc' ? '' : 'desc'; }
 
-    function renderChart() {
+    async function renderChart() {
       if (!chartEl.value) return;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      if (!chartEl.value || !document.body.contains(chartEl.value)) return;
       // 切模式不销毁容器，但保险起见复用 getInstanceByDom 查重
       const existing = echarts.getInstanceByDom(chartEl.value);
       if (existing && existing !== chart) existing.dispose();

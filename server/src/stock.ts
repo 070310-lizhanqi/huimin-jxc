@@ -153,6 +153,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
          FROM doc
          WHERE teamId = ? AND status = 'audit'
            AND date >= date('now', '-14 day', 'localtime')
+           AND date <= date('now', 'localtime')
            AND type IN ('stockin','stockout','pin','sret')
          GROUP BY day ORDER BY day`,
       )

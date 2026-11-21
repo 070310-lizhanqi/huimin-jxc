@@ -626,7 +626,9 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
               db.prepare(`DELETE FROM product WHERE id = ? AND remark = 'Excel导入自动建档'`).run(pid);
             } catch { /* 同上 */ }
           }
-          return res.status(500).json({ error: `导入失败：${(e as Error).message}` });
+          // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名），只写服务端日志
+          console.error('[docimport] 导入落库失败:', e);
+          return res.status(500).json({ error: '导入失败，请稍后重试' });
         }
       }
 

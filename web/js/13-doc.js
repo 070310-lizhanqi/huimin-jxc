@@ -20,7 +20,7 @@ const DocPage = {
     const total = ref(0);
     /** 各状态单据数（服务端按当前筛选统计，不受状态页签与分页影响），用于状态页签徽标 */
     const statusCount = ref({ draft: 0, pending: 0, audit: 0, void: 0 });
-    // 筛选条：日期区间 + 往来单位（对齐惠民云列表页密集筛选条）
+    // 筛选条：日期区间 + 往来单位（对齐原产品列表页密集筛选条）
     const filterFrom = ref('');
     const filterTo = ref('');
     const filterPartner = ref(null);
@@ -30,7 +30,7 @@ const DocPage = {
     const editorEditId = ref(0);
     const impOpen = ref(false);
     const busyId = ref(null);
-    /** 列表/明细分页签（真实惠民云有这个二级切换，明细=展开商品行） */
+    /** 列表/明细分页签（原产品有这个二级切换，明细=展开商品行） */
     const viewTab = ref('list');
     /** 复选框选中的单据 id（批量操作/批量提交用） */
     const selected = ref([]);
@@ -174,14 +174,22 @@ const DocPage = {
       const failed = [];
       let done = 0;
       try {
-        for (const d of pool) {
-          try {
-            await api.post('/doc/audit', { teamId: store.teamId, id: d.id, auditBy: store.team?.name || '管理员' });
-            done += 1;
-          } catch (e) {
-            failed.push(`${d.billNo}：${e.message}`);
+        // 并发上限 4 的 worker 池：逐张串行 20 张要 20 个往返，并行后约 1/4 时间；
+        // 每张失败只记入 failed（带单号），其余继续跑完，结束后汇总上报
+        const CONCURRENCY = 4;
+        let next = 0;
+        async function worker() {
+          while (next < pool.length) {
+            const d = pool[next++];
+            try {
+              await api.post('/doc/audit', { teamId: store.teamId, id: d.id, auditBy: store.team?.name || '管理员' });
+              done += 1;
+            } catch (e) {
+              failed.push(`${d.billNo}：${e.message}`);
+            }
           }
         }
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, () => worker()));
         if (failed.length) toast(`已审核 ${done} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${failed.length > 3 ? ' …' : ''}`, 'warning');
         else toast(`已审核 ${done} 张`);
         load();
@@ -547,7 +555,7 @@ const DocPage = {
     </div>
   </div>
 
-  <!-- ===== 整页开单态（对齐惠民云）：独立子组件，自持编辑状态 ===== -->
+  <!-- ===== 整页开单态（对齐原产品）：独立子组件，自持编辑状态 ===== -->
   <doc-editor v-else :type="activeType" :doc-id="editorEditId" @close="closeEditor"/>
 
   <!-- ===== Excel/CSV 智能导入弹窗：独立子组件 ===== -->

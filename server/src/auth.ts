@@ -55,6 +55,14 @@ export async function verifyPassword(plain: string, stored: string | null): Prom
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * A-安6 登录时序侧信道用的固定假哈希：用户名不存在时也对它跑一次 verifyPassword，
+ * 再返回 401，使“用户不存在”与“密码错误”的耗时不可区分。
+ * 格式须能通过 verifyPassword 的解析：`scrypt$<32 位 hex 盐>$<64 位 hex 哈希>`。
+ * 全零值仅作耗时填充，从不对应任何真实用户的 stored 密码。
+ */
+const DUMMY_HASH = 'scrypt$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000';
+
 /* ---------------- 令牌签发与校验 ---------------- */
 
 const b64url = (buf: Buffer): string =>
@@ -380,7 +388,14 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
     }
     const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
-    if (!row || !(await verifyPassword(password, row.password))) {
+    // A-安6：用户名不存在时也对固定假哈希跑一次 verifyPassword 再返回 401，
+    // 否则“不存在（直接 401）”与“存在（跑一次 scrypt）”的耗时可区分用户是否存在。
+    if (!row) {
+      await verifyPassword(password, DUMMY_HASH);
+      recordFail(failKey);
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    if (!(await verifyPassword(password, row.password))) {
       recordFail(failKey);
       return res.status(401).json({ error: '用户名或密码错误' });
     }
