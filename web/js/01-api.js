@@ -123,6 +123,12 @@ const api = {
     const cd = r.headers.get('content-disposition') || '';
     const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
     const name = m ? decodeURIComponent(m[1].replace(/"/g, '')) : fallbackName;
+    // Electron 桌面版：把文件名先告诉主进程——blob: 链接下载时主进程的
+    // will-download 拿不到 <a download> 的名字（item.getFilename() 只会给 "download"），
+    // 保存对话框需要这个名字做默认值。浏览器里没有 window.zhanhui，这行是空操作。
+    if (window.zhanhui && typeof window.zhanhui.setDownloadFilename === 'function') {
+      try { window.zhanhui.setDownloadFilename(name); } catch { /* ignore */ }
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

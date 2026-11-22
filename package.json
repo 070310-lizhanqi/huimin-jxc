@@ -1,10 +1,11 @@
 {
   "name": "zhanhui-jxc",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "展惠进销存系统：面向小微批发 / 零售的商品、采购、销售、库存与往来账管理（独立原创实现）",
   "license": "MIT",
   "type": "commonjs",
+  "main": "electron/main.js",
   "engines": {
     "node": ">=22.5"
   },
@@ -14,17 +15,67 @@
     "dev:server": "ts-node server/src/index.ts",
     "serve": "node dist/server/index.js",
     "test": "node tools/run-tests.cjs",
-    "dist:win": "node tools/dist-win.cjs"
+    "dist:electron": "electron-builder --win --publish never",
+    "dev:electron": "electron .",
+    "pack": "electron-builder --dir"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/express-serve-static-core": "^4.19.9",
     "@types/node": "^22.0.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.0",
     "playwright": "^1.64.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "express": "^4.19.0"
+  },
+  "build": {
+    "afterPack": "tools/after-pack-locales.cjs",
+    "appId": "com.zhanhui.jxc",
+    "productName": "展惠进销存",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**",
+      "web/**",
+      "electron/**",
+      "assets/**",
+      "package.json",
+      "LICENSE",
+      "NOTICE.md"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "dist/**",
+      "web/**",
+      "node_modules/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon-app.ico",
+      "artifactName": "展惠进销存-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "perMachine": false
+    },
+    "publish": [
+      {
+        "owner": "070310-lizhanqi",
+        "provider": "github",
+        "repo": "huimin-jxc"
+      }
+    ],
+    "releaseInfo": {
+      "releaseName": "展惠进销存 v0.5.3"
+    }
   }
 }
