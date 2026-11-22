@@ -10,22 +10,22 @@
 
 ## 截图演示
 
-![工作台](docs/screenshots/01-dashboard.png)
+![工作台](docs/01-dashboard.png)
 *工作台：库存 / 资金总览、低库存预警、近 14 天出入库趋势*
 
-![销售出库单](docs/screenshots/02-doc-sales.png)
+![销售出库单](docs/02-doc-sales.png)
 *销售出库单列表：多张已审核出库单、收款状态与本页合计*
 
-![库存查询](docs/screenshots/03-stock.png)
+![库存查询](docs/03-stock.png)
 *库存查询：按仓库 + 商品查看库存，低库存标红*
 
-![收付款](docs/screenshots/04-settlement.png)
+![收付款](docs/04-settlement.png)
 *收付款：应收 / 应付合计、登记收款付款、往来余额*
 
-![销售统计报表](docs/screenshots/05-report.png)
+![销售统计报表](docs/05-report.png)
 *销售统计报表：按日期统计金额、数量、单数与毛利估算*
 
-![客户欠款账龄](docs/screenshots/06-aging.png)
+![客户欠款账龄](docs/06-aging.png)
 *客户欠款账龄：按账龄区间分桶，定位拖久的欠款*
 
 ---

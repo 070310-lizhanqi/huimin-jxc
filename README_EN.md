@@ -10,22 +10,22 @@ An inventory and sales management system for small wholesale / retail businesses
 
 ## Screenshots
 
-![Dashboard](docs/screenshots/01-dashboard.png)
+![Dashboard](docs/01-dashboard.png)
 *Dashboard: stock / cash overview, low-stock alerts, 14-day in/out trend*
 
-![Sales shipping document](docs/screenshots/02-doc-sales.png)
+![Sales shipping document](docs/02-doc-sales.png)
 *Sales shipment list: audited shipping documents, receipt status and page totals*
 
-![Stock lookup](docs/screenshots/03-stock.png)
+![Stock lookup](docs/03-stock.png)
 *Stock lookup: stock by warehouse + product, low stock highlighted in red*
 
-![Receipts and payments](docs/screenshots/04-settlement.png)
+![Receipts and payments](docs/04-settlement.png)
 *Receipts and payments: receivable / payable totals, record receipts and payments, partner balances*
 
-![Sales statistics report](docs/screenshots/05-report.png)
+![Sales statistics report](docs/05-report.png)
 *Sales statistics report: amounts, quantities, order counts and gross-profit estimates by date range*
 
-![Customer aging](docs/screenshots/06-aging.png)
+![Customer aging](docs/06-aging.png)
 *Customer aging: receivables bucketed by age, so overdue balances stand out*
 
 ---
