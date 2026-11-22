@@ -73,6 +73,9 @@
         "provider": "github",
         "repo": "huimin-jxc"
       }
-    ]
+    ],
+    "releaseInfo": {
+      "releaseName": "展惠进销存 v0.5.3"
+    }
   }
 }
