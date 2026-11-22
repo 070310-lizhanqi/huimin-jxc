@@ -319,6 +319,10 @@ const DashboardPage = {
       await nextTick();
       const el = document.getElementById('rank-' + kind);
       if (el) {
+        // 先等 echarts 脚本下完再用它：三个排行卡是 Promise.all 并行加载，
+        // 首次打开时数据可能先于 vendor 脚本回来，直接 getInstanceByDom 会报
+        // ReferenceError（与 donut/renderTrend/renderAging 同一写法）
+        try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
         // dispose 后从 charts 数组移除旧实例：onResize 对已 disposed 实例 resize() 会报警告
         const inst = echarts.getInstanceByDom(el);
         if (inst) {
