@@ -8,6 +8,14 @@
 # Release 标题沿用“展惠进销存 v<版本>”，与旧发行版同一条链，
 # 老用户从旧安装包升级到 Electron 版时更新器能沿着同一条 Release 链找到新版。
 #
+# ⚠️ 两次事故教训：
+# ① 首发：只构建不启动服务，回归门禁 1 秒失败。
+# ② 第二次（Release #2）：启动放在单独步骤，Windows 流水线在步骤结束时杀掉
+#    该步骤拉起的后台进程，服务活不过步骤边界——启动 6 秒通过、回归 0 秒即
+#    失败；另 $pid 是 PowerShell 保留变量，停服务那步也因此报错。
+#    所以启动、回归、停止必须在同一个步骤里（try/finally 保证停掉），
+#    且绝不能用 $pid 存进程号。
+#
 # ⚠️ 本文件不要走 connector 的 snapshot-push：没有 Workflows 权限的应用走
 # Contents API 写 .github/workflows/ 会被 GitHub 直接 403 拒绝（已实测），
 # 且安装权限也加不上（权限由应用开发者定义）。正确路线：走 GitHub 网页上传
@@ -59,44 +67,45 @@ jobs:
       - name: 构建服务端
         run: pnpm build
 
-      - name: 启动服务端（回归门禁前置）
-        # run-tests.cjs 只测不拉服务：它要求服务已在 127.0.0.1:7741 回答。
-        # 此前流水线只构建不启动，回归门禁 1 秒即失败（v0.5.3 首发事故）。
-        # 服务从仓库根目录启动，数据目录即仓库 data/，与 rebuild-clean 一致。
-        shell: pwsh
-        run: |
-          $p = Start-Process node -ArgumentList 'dist/server/index.js' -PassThru -NoNewWindow
-          $p.Id | Out-File -FilePath server.pid -Encoding ascii
-          Write-Host "服务端已启动，PID $($p.Id)，等待就绪……"
-          $ok = $false
-          for ($i = 0; $i -lt 30; $i++) {
-            try {
-              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:7741/api/auth/status' -UseBasicParsing -TimeoutSec 3
-              if ($r.StatusCode -eq 200) { $ok = $true; break }
-            } catch { }
-            Start-Sleep -Seconds 3
-          }
-          if (-not $ok) { Write-Error '服务端 90 秒内未就绪'; exit 1 }
-          Write-Host '服务端已就绪'
-
       - name: 安装 Playwright Chromium（UI 回归用）
         run: npx playwright install chromium
 
       - name: 全量回归门禁（不过不发版）
-        run: node tools/run-tests.cjs --with-rounds
-
-      - name: 停止回归用服务端
-        # 必须停掉：后面的安装冒烟要测刚装好的程序（同样起在 7741），
-        # 留着 CI 服务会占端口、甚至让冒烟测到错的服务。
-        if: always()
+        # 启动、回归、停止必须在同一个步骤里：Windows 流水线在步骤结束时
+        # 杀掉该步骤拉起的后台进程，上一版把启动放单独步骤，服务活不过
+        # 步骤边界（Release #2：启动 6 秒通过、回归 0 秒即失败）。
+        # run-tests.cjs 只测不拉服务：它要求服务已在 127.0.0.1:7741 回答。
+        # 服务从仓库根目录启动，数据目录即仓库 data/，与 rebuild-clean 一致。
+        # 停止放在 finally 里：回归无论过不过都要停掉服务，否则后面的安装
+        # 冒烟会占 7741 端口、甚至测到错的服务。
         shell: pwsh
         run: |
-          if (Test-Path server.pid) {
-            $pid = Get-Content server.pid -Raw
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-            Remove-Item server.pid -ErrorAction SilentlyContinue
-            Write-Host "已停止服务端 PID $pid"
+          $proc = Start-Process node -ArgumentList 'dist/server/index.js' -PassThru -NoNewWindow
+          Write-Host "服务端已启动，PID $($proc.Id)，等待就绪……"
+          $testExit = 1
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              if ($proc.HasExited) { Write-Error "服务端进程已退出（PID $($proc.Id)）"; break }
+              try {
+                $r = Invoke-WebRequest -Uri 'http://127.0.0.1:7741/api/auth/status' -UseBasicParsing -TimeoutSec 3
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch { }
+              Start-Sleep -Seconds 3
+            }
+            if (-not $ok) { Write-Error '服务端 90 秒内未就绪' }
+            else {
+              Write-Host '服务端已就绪'
+              node tools/run-tests.cjs --with-rounds
+              $testExit = $LASTEXITCODE
+            }
+          } finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "已停止服务端 PID $($proc.Id)"
+            }
           }
+          if ($testExit -ne 0) { exit $testExit }
 
       - name: 构建 Windows 安装包并发布到 Release
         env:
