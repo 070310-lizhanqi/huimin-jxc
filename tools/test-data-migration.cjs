@@ -7,8 +7,9 @@
  *   3. 新目录已有数据 → 不覆盖、不迁移（旧目录保留）
  *   4. WAL 里的未落盘数据 → 迁移后 checkpoint 进主库，不丢账
  *
- * 测的是 launcher.cjs 里的 migrateLegacyDataDir —— 启动器在服务之前跑，
- * 由它决定数据目录并注入 ORANGE_DATA_DIR。
+ * 测的是 electron/data-dir.js 里的 migrateLegacyDataDir —— 主进程在服务之前跑，
+ * 由它决定数据目录并注入 ORANGE_DATA_DIR（第三阶段起：旧启动器 launcher.cjs
+ * 已退役，迁移逻辑唯一来源是 electron/data-dir.js）。
  */
 const fs = require('node:fs');
 const os = require('node:os');
@@ -23,8 +24,8 @@ const ok = (cond, name, detail) => {
 };
 
 /**
- * 从 launcher.cjs 抽出迁移逻辑做单元测试。
- * 这里复制同一段实现——launcher.cjs 是脚本不是模块，直接 require 会执行它。
+ * 从 electron/data-dir.js 抽出迁移逻辑做单元测试。
+ * 这里复制同一段实现（同步签名，与 data-dir.js 里导出的异步版行为一致）；
  * 两处实现必须同步修改（下面有断言校验二者行为一致的关键点）。
  */
 function makeMigrator(appDataDir) {
@@ -173,16 +174,16 @@ function makeLegacyDir(root) {
     fs.rmSync(root, { recursive: true, force: true });
   }
 
-  // ---------- 5. launcher.cjs 里的实现与被测实现保持一致 ----------
+  // ---------- 5. electron/data-dir.js 里的实现与被测实现保持一致 ----------
   {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'launcher.cjs'), 'utf8');
-    ok(src.includes("const DATA_DIR_NAME = 'huimin-yun'"), 'launcher.cjs 使用新目录名');
-    ok(src.includes("const LEGACY_DATA_DIR_NAME = 'orange-jxc'"), 'launcher.cjs 保留旧目录名用于迁移');
-    ok(src.includes('migrateLegacyDataDir'), 'launcher.cjs 含迁移逻辑');
-    ok(src.includes('wal_checkpoint(TRUNCATE)'), 'launcher.cjs 迁移前做 WAL checkpoint');
-    ok(src.includes('不覆盖'), 'launcher.cjs 有「不覆盖已有数据」的保护');
-    ok(src.includes("const DB_FILE_NAME = 'huimin-clone.db'"), 'launcher.cjs 库文件改用新名');
-    ok(src.includes("const LEGACY_DB_FILE_NAME = 'orange-clone.db'"), 'launcher.cjs 保留旧库名用于迁移');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'electron', 'data-dir.js'), 'utf8');
+    ok(src.includes("const DATA_DIR_NAME = 'huimin-yun'"), 'data-dir.js 使用新目录名');
+    ok(src.includes("const LEGACY_DATA_DIR_NAME = 'orange-jxc'"), 'data-dir.js 保留旧目录名用于迁移');
+    ok(src.includes('migrateLegacyDataDir'), 'data-dir.js 含迁移逻辑');
+    ok(src.includes('wal_checkpoint(TRUNCATE)'), 'data-dir.js 迁移前做 WAL checkpoint');
+    ok(src.includes('不覆盖'), 'data-dir.js 有「不覆盖已有数据」的保护');
+    ok(src.includes("const DB_FILE_NAME = 'huimin-clone.db'"), 'data-dir.js 库文件改用新名');
+    ok(src.includes("const LEGACY_DB_FILE_NAME = 'orange-clone.db'"), 'data-dir.js 保留旧库名用于迁移');
   }
 
   console.log(`\n===== 数据目录迁移: ${pass} PASS / ${fail} FAIL =====`);

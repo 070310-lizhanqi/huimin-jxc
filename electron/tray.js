@@ -3,8 +3,9 @@
  * 展惠进销存 —— 托盘图标 + 右键菜单（第二阶段）。
  *
  * 菜单（中文，对不懂电脑的用户也要一眼能懂）：
- *   打开主窗口 / 重启服务 / 打开数据目录 / 打开日志文件 / 打开开发者工具 / 退出。
- * “检查更新”是第三阶段的事（auto-updater 未接入），不要出现在这里。
+ *   打开主窗口 / 重启服务 / 打开数据目录 / 打开日志文件 / 检查更新 / 打开开发者工具 / 退出。
+ * “检查更新”走第三阶段接入的 electron-updater：点一下就检查，有新版问要不要下载，
+ * 没新版提示已是最新，绝不静默下载安装。
  *
  * 图标：项目现有素材，不从网上拉图。
  *   Windows 托盘用 assets/icon-app.ico；Linux 托盘用 assets/preview-app.png
@@ -30,6 +31,7 @@ function trayIconPath() {
 /**
  * @param {{onShowWindow: () => void, onRestartServer: () => unknown,
  *   onOpenDataDir: () => void, onOpenLogFile: () => void,
+ *   onCheckUpdates: () => unknown,
  *   onOpenDevTools: () => void, onQuit: () => void}} callbacks
  * @returns {{tray: Tray, labels: Record<string,string>,
  *   clickMenu: (label: string) => unknown, showBalloon: (title: string, content: string) => boolean,
@@ -45,6 +47,7 @@ function createTray(callbacks) {
     restart: '重启服务',
     dataDir: '打开数据目录',
     logFile: '打开日志文件',
+    checkUpdates: '检查更新',
     devtools: '打开开发者工具',
     quit: '退出',
   };
@@ -53,6 +56,7 @@ function createTray(callbacks) {
     [labels.restart]: () => callbacks.onRestartServer(),
     [labels.dataDir]: () => callbacks.onOpenDataDir(),
     [labels.logFile]: () => callbacks.onOpenLogFile(),
+    [labels.checkUpdates]: () => callbacks.onCheckUpdates(),
     [labels.devtools]: () => callbacks.onOpenDevTools(),
     [labels.quit]: () => callbacks.onQuit(),
   };
@@ -62,6 +66,7 @@ function createTray(callbacks) {
     { label: labels.restart, click: handlers[labels.restart] },
     { label: labels.dataDir, click: handlers[labels.dataDir] },
     { label: labels.logFile, click: handlers[labels.logFile] },
+    { label: labels.checkUpdates, click: handlers[labels.checkUpdates] },
     { label: labels.devtools, click: handlers[labels.devtools] },
     { type: 'separator' },
     { label: labels.quit, click: handlers[labels.quit] },

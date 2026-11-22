@@ -1,9 +1,8 @@
 'use strict';
 /**
- * 展惠进销存 —— preload（第一阶段最小 API）。
+ * 展惠进销存 —— preload（第三阶段最小 API）。
  * contextIsolation 开、nodeIntegration 关；只暴露最小接口，不暴露 fs、child_process、
- * 不暴露任何服务端内部接口。窗口控制、打开数据目录/日志、重启服务、退出应用。
- * 检查更新（app:check-updates）在第三阶段随 electron-updater 接入，这里不暴露。
+ * 不暴露任何服务端内部接口。窗口控制、打开数据目录/日志、重启服务、检查更新、退出应用。
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
@@ -25,6 +24,8 @@ contextBridge.exposeInMainWorld('zhanhui', {
   openLogFile: () => ipcRenderer.invoke('app:open-log-file'),
   /** 重启服务子进程，返回新端口。 */
   restartServer: () => ipcRenderer.invoke('app:restart-server'),
+  /** 检查更新（有新版问要不要下载，没新版提示已是最新；返回结果对象）。 */
+  checkForUpdates: () => ipcRenderer.invoke('app:check-updates'),
   /** 退出应用（先停服务子进程）。 */
   quitApp: () => ipcRenderer.invoke('app:quit'),
 });

@@ -17,7 +17,8 @@
  * 打开开发者工具 / 退出）、关闭窗口最小化到托盘（首次给一次气泡提示）、下载接管
  * （will-download → 保存对话框，完成后提示并可打开所在文件夹）。
  *
- * 不做（第三阶段）：自动更新。不要在这里加。
+ * 第三阶段新增：自动更新（electron-updater + GitHub Releases；托盘菜单“检查更新”，
+ * 启动后 60 秒做一次后台检查，没新版静默；绝不静默下载安装，见 electron/auto-updater.js）。
  *
  * P0 冒烟模式（仅用于验证，不进产品流程）：
  *   electron . --p0-smoke [--p0-shot=/tmp/p0-shot.png]
@@ -42,6 +43,15 @@ const { initDataDir } = require('./data-dir');
 const { startServerManaged } = require('./server-runner');
 const { loadWindowState, saveWindowState, isStateVisible } = require('./window-state');
 const { createTray } = require('./tray');
+const {
+  initAutoUpdater,
+  checkForUpdatesManual,
+  checkForUpdatesBackground,
+  scheduleBackgroundCheck,
+  installUpdateAndRestart,
+  setTestFeedUrl,
+  getLastResult,
+} = require('./auto-updater');
 
 // ---------- 实验 1：node:sqlite 在 Electron 主进程里是否无需重编即可用 ----------
 function checkSqlite() {
@@ -323,7 +333,7 @@ function createWindow(url) {
   return win;
 }
 
-/** preload 最小 API 的主进程侧实现（检查更新在第三阶段再加）。 */
+/** preload 最小 API 的主进程侧实现（检查更新走第三阶段接入的 electron-updater）。 */
 function registerIpc() {
   ipcMain.handle('app:get-version', () => app.getVersion());
   ipcMain.handle('app:window-minimize', () => {
@@ -348,6 +358,8 @@ function registerIpc() {
     if (dataDir) await shell.showItemInFolder(path.join(dataDir, 'server.log'));
   });
   ipcMain.handle('app:restart-server', () => restartServerFlow());
+  // 检查更新（托盘菜单与渲染进程共用同一条路；有新版问要不要下载，没新版明确提示）。
+  ipcMain.handle('app:check-updates', () => checkForUpdatesManual());
   // 渲染进程预告下一个下载的文件名（blob: 下载的主进程拿不到 <a download> 的名字）。
   ipcMain.on('app:set-download-filename', (_event, name) => {
     if (typeof name === 'string' && name) pendingDownloadFilename = { name, at: Date.now() };
@@ -436,6 +448,7 @@ async function main() {
       onOpenLogFile: () => {
         if (dataDir) shell.showItemInFolder(path.join(dataDir, 'server.log'));
       },
+      onCheckUpdates: () => checkForUpdatesManual(),
       onOpenDevTools: () => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.openDevTools();
       },
@@ -447,6 +460,15 @@ async function main() {
     console.error(`P2:TRAY_FAIL ${e.message}（托盘不可用：关闭窗口将直接退出应用）`);
   }
 
+  // 自动更新（第三阶段）：托盘菜单“检查更新”与 IPC 共用同一条路；
+  // 启动后 60 秒做一次后台检查（没新版/失败时静默）。冒烟模式下不自动跑，
+  // 改由探针触发（否则 60 秒后的自动检查会干扰冒烟断言）。
+  initAutoUpdater({ getWindow: () => mainWindow });
+  if (process.env.ZHANHUI_SMOKE !== '1') {
+    scheduleBackgroundCheck(60000);
+  }
+  console.log('P3:UPDATER_READY');
+
   // 冒烟测试专用只读探针（ZHANHUI_SMOKE=1 时才挂载，生产环境不暴露）。
   if (process.env.ZHANHUI_SMOKE === '1') {
     globalThis.__zhanhuiTest = {
@@ -457,6 +479,11 @@ async function main() {
       windowVisible: () => !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
       childWindowCount: () =>
         BrowserWindow.getAllWindows().filter((w) => w !== mainWindow && !w.isDestroyed()).length,
+      // 第三阶段：更新检查探针（冒烟脚本用本地 latest.yml 服务切换更新源）。
+      lastUpdateResult: () => getLastResult(),
+      setUpdateFeed: (url) => setTestFeedUrl(url),
+      triggerBackgroundCheck: () => checkForUpdatesBackground(),
+      installUpdate: () => installUpdateAndRestart(),
     };
   }
 

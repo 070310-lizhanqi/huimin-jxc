@@ -1,6 +1,6 @@
 {
   "name": "zhanhui-jxc",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "展惠进销存系统：面向小微批发 / 零售的商品、采购、销售、库存与往来账管理（独立原创实现）",
   "license": "MIT",
@@ -15,10 +15,9 @@
     "dev:server": "ts-node server/src/index.ts",
     "serve": "node dist/server/index.js",
     "test": "node tools/run-tests.cjs",
-    "dist:win": "node tools/dist-win.cjs",
+    "dist:electron": "electron-builder --win --publish never",
     "dev:electron": "electron .",
-    "pack": "electron-builder --dir",
-    "dist:electron": "electron-builder --win"
+    "pack": "electron-builder --dir"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
@@ -31,9 +30,11 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "express": "^4.19.0"
   },
   "build": {
+    "afterPack": "tools/after-pack-locales.cjs",
     "appId": "com.zhanhui.jxc",
     "productName": "展惠进销存",
     "directories": {
@@ -54,7 +55,6 @@
       "web/**",
       "node_modules/**"
     ],
-    "afterPack": "tools/after-pack-locales.cjs",
     "win": {
       "target": "nsis",
       "icon": "assets/icon-app.ico",
@@ -62,10 +62,17 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
+      "createStartMenuShortcut": true,
+      "perMachine": false
+    },
+    "publish": [
+      {
+        "owner": "070310-lizhanqi",
+        "provider": "github",
+        "repo": "huimin-jxc"
+      }
+    ]
   }
 }
