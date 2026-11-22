@@ -2,7 +2,7 @@
 /**
  * 惠民服务管理器 —— 本地服务控制页
  *
- * 管理 1) 惠民云服务器（node dist/server/index.js，端口 7741）
+ * 管理 1) 展惠服务器（node dist/server/index.js，端口 7741）
  *      2) Cloudflare 隧道（cloudflared.exe，trycloudflare 快速隧道）
  *
  * 仅监听 127.0.0.1:7742，不暴露公网。
@@ -15,10 +15,10 @@ const path = require('path');
 const os = require('os');
 
 const ROOT = path.join(__dirname, '..');
-// 管理器自己监听的端口（与橙子云服务端口区分开）；可用 ORANGE_MGR_PORT 覆盖
+// 管理器自己监听的端口（与展惠服务端口区分开）；可用 ORANGE_MGR_PORT 覆盖
 const PORT = Number(process.env.ORANGE_MGR_PORT) || 7742;
 const HOST = '127.0.0.1';
-// 橙子云服务端口：可用 ORANGE_PORT 覆盖（默认 7741，被占用时服务自身会自适应后移并写 port.txt）
+// 展惠服务端口：可用 ORANGE_PORT 覆盖（默认 7741，被占用时服务自身会自适应后移并写 port.txt）
 const APP_PORT = Number(process.env.ORANGE_PORT) || 7741;
 // 运行期产物（pid/日志/二进制）放 .tools/（已在 .gitignore，不进 git）
 const RUNTIME = path.join(__dirname, '..', '.tools');
@@ -57,7 +57,7 @@ function pidByPort(port) {
   } catch { return null; }
 }
 
-/** 探测惠民云服务器 HTTP 是否可达 */
+/** 探测展惠服务器 HTTP 是否可达 */
 function probeApp() {
   return new Promise((resolve) => {
     const req = http.get(`http://${HOST}:${APP_PORT}/api/auth/status`, { timeout: 2000 }, (res) => {
@@ -252,7 +252,7 @@ function pageHtml() {
 
 <div class="card">
   <div class="head">
-    <span class="name"><span class="dot" id="app-dot" class="off"></span>惠民云服务器</span>
+    <span class="name"><span class="dot" id="app-dot" class="off"></span>展惠服务器</span>
     <span class="state" id="app-state">检查中…</span>
   </div>
   <button class="btn start" onclick="act('/api/start/app')">启动</button>

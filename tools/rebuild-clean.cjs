@@ -2,7 +2,7 @@
  * 一键重建干净账套：
  * 1) 清空全部业务数据并重置自增序列
  * 2) 创建团队「鲜果批发部」
- * 3) 创建管理员 admin（密码 admin123456，scrypt 哈希与后端一致）
+ * 3) 创建管理员 admin（密码 B2cost!9Xq，scrypt 哈希与后端一致）
  * 4) 写入演示基础档案：仓库/库位、账户、分类、单位、商品、客户、供应商、业务员
  *
  * 用法：node tools/rebuild-clean.cjs
@@ -65,7 +65,7 @@ try {
     db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run('鲜果批发部', period).lastInsertRowid,
   );
   db.prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
-    .run(teamId, 'admin', hashPassword('admin123456'), now);
+    .run(teamId, 'admin', hashPassword('B2cost!9Xq'), now);
 
   // 仓库 + 库位
   const wh = (name) => Number(db.prepare('INSERT INTO warehouse (teamId, name) VALUES (?, ?)').run(teamId, name).lastInsertRowid);
@@ -136,7 +136,7 @@ try {
   ven('江西赣南脐橙基地', '13700137003', '江西省赣州市信丰县脐橙大道');
 
   db.exec('COMMIT');
-  console.log(`已重建账套：鲜果批发部（teamId=${teamId}），管理员 admin / admin123456`);
+  console.log(`已重建账套：鲜果批发部（teamId=${teamId}），管理员 admin / B2cost!9Xq`);
   console.log(`演示数据：仓库 2、库位 3、账户 3、分类 4、单位 5、业务员 2、商品 8、客户 5、供应商 3`);
 } catch (e) {
   db.exec('ROLLBACK');

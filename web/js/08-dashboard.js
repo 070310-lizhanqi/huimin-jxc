@@ -1,6 +1,6 @@
 'use strict';
 /* web/js/08-dashboard.js —— 由 app.js 拆分（lines 368-938） */
-/* ================= 工作台（对齐惠民云 6 格图表墙） ================= */
+/* ================= 工作台（对齐原产品 6 格图表墙） ================= */
 const DashboardPage = {
   components: { DocViewer },
   setup() {
@@ -24,7 +24,7 @@ const DashboardPage = {
     const charts = [];
 
     /**
-     * 三张独立排行卡（对齐真实惠民云工作台）：
+     * 三张独立排行卡（对齐原产品工作台）：
      * 销售订单排行 / 销售出库排行 / 销售收款排行，各自独立切维度与时间范围
      */
     const DIM_ALL = [
@@ -42,7 +42,7 @@ const DashboardPage = {
     const rankData = reactive({ order: [], out: [], receipt: [] });
     const rankBy = reactive({ order: 'cus', out: 'cus', receipt: 'cus' });
     const rankRefs = reactive({});
-    /** 常用功能快捷入口（对齐惠民云工作台，可在页面上增删，存 localStorage） */
+    /** 常用功能快捷入口（对齐原产品工作台，可在页面上增删，存 localStorage） */
     const QUICK_DEFAULT = [
       { label: '销售出库', icon: 'Sell', to: '#/doc/sale?type=stockout&new=1' },
       { label: '采购入库', icon: 'ShoppingCart', to: '#/doc/purchase?type=stockin&new=1' },
@@ -97,7 +97,7 @@ const DashboardPage = {
       quickEdit.value = false;
     }
 
-    /** 四项 KPI（对齐惠民云「新增销售数据」） */
+    /** 四项 KPI（对齐原产品「新增销售数据」） */
     const kpis = computed(() => {
       const s = sales.value;
       if (!s) return [];
@@ -144,8 +144,10 @@ const DashboardPage = {
      * 中心金额用各档位净值之和（与下方「未结合计」一致）；环图面积用绝对值占比，
      * 否则负档位（退货冲减后的负数）会在饼图里消失导致视觉与数字不符。
      */
-    function donut(el, totals, unit, centerLabel) {
+    async function donut(el, totals, unit, centerLabel) {
       if (!el) return null;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const raw = BUCKET_KEYS.map((k) => Number(totals?.[k] ?? 0));
       const sumAbs = raw.reduce((a, v) => a + Math.abs(v), 0);
@@ -219,8 +221,10 @@ const DashboardPage = {
      * 横向条形排行图。
      * 负值（退货冲减后往来余额为负）用红色反向条 + 负号标签，避免出现「一根灰短条」的观感。
      */
-    function barRank(el, rows, unit) {
+    async function barRank(el, rows, unit) {
       if (!el) return null;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const data = (rows || []).slice().reverse();
       c.setOption({
@@ -262,8 +266,10 @@ const DashboardPage = {
       return c;
     }
 
-    function renderTrend() {
+    async function renderTrend() {
       if (!trendEl.value) return;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      if (!trendEl.value || !document.body.contains(trendEl.value)) return;
       const byDay = {};
       for (const r of trend.value) byDay[r.day] = r;
       const days = [];
@@ -342,16 +348,62 @@ const DashboardPage = {
 
     /** 仪表盘统计卡：与 range 无关，手动刷新时才重新拉 */
     async function loadDash() {
-      stats.value = await api.get('/stats/dashboard', { teamId: store.teamId });
+      // B-前1：手动刷新强制拉新（绕过进行中的去重请求）
+      stats.value = await fetchDashboardStats(true);
     }
 
     async function reloadAll() {
       const mySeq = ++loadSeq;
-      try {
-        await Promise.all([loadDash(), loadSales()]);
-        await loadAllRanks();
-      } catch (e) {
-        if (mySeq === loadSeq) toast('工作台数据加载失败：' + e.message, 'error');
+      // 半刷新修复：与首屏 onMounted 同款 7+2 个请求——统计卡 / 销售概要 / 趋势图 /
+      // 最近单据 / 客户·供应商·库存账龄环图 / 客户·供应商欠款排行 top5，随后重绘对应图表与列表。
+      // 全部用 allSettled：单个区块失败只影响该区块，不再整体空白。
+      const settled = await Promise.allSettled([
+        // B-前1：5 分钟自动刷新 / 手动刷新强制拉新（绕过首屏缓存）
+        fetchDashboardStats(true),
+        api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
+        api.get('/stats/trend', { teamId: store.teamId }),
+        api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ar' }),
+        api.get('/report/aging', { teamId: store.teamId, mode: 'ap' }),
+        api.get('/report/stock-aging', { teamId: store.teamId }),
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
+        api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
+      ]);
+      if (mySeq !== loadSeq || disposed) return;
+      const val = (i) => (settled[i].status === 'fulfilled' ? settled[i].value : null);
+      const failed = settled.filter((r) => r.status === 'rejected').length;
+      if (failed) toast(`工作台有 ${failed} 个数据区块刷新失败`, 'warning');
+      const [s, sum, t, d, ar, ap, sa, arT, apT] = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(val);
+      if (s) stats.value = s;
+      if (sum) sales.value = sum;
+      if (t) trend.value = t;
+      if (d) recent.value = d;
+      if (ar) arAging.value = ar;
+      if (ap) apAging.value = ap;
+      if (sa) stockAging.value = sa;
+      if (arT) arTop.value = arT.rows || [];
+      if (apT) apTop.value = apT.rows || [];
+      await nextTick();
+      if (mySeq !== loadSeq || disposed) return;
+      // 重绘只对成功取到数据的区块进行；失败区块保持旧图，不白屏
+      if (t) { disposeChart(trendEl.value); renderTrend(); }
+      if (ar) { disposeChart(arEl.value); donut(arEl.value, ar.totals, '元', '应收未结'); }
+      if (ap) { disposeChart(apEl.value); donut(apEl.value, ap.totals, '元', '应付未结'); }
+      if (sa) { disposeChart(stockEl.value); donut(stockEl.value, sa.totals, '元', '库存货值'); }
+      if (arTop.value.length) { disposeChart(arTopEl.value); barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
+      if (apTop.value.length) { disposeChart(apTopEl.value); barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
+      // 三张销售排行卡仍走 loadAllRanks（内部已 dispose 后重绘）
+      await loadAllRanks();
+    }
+
+    /** 重绘前先 dispose 该容器上的旧实例并从 charts 数组移除，避免实例越积越多 */
+    function disposeChart(el) {
+      if (!el || typeof echarts === 'undefined') return;
+      const inst = echarts.getInstanceByDom(el);
+      if (inst) {
+        const i = charts.indexOf(inst);
+        if (i >= 0) charts.splice(i, 1);
+        inst.dispose();
       }
     }
 
@@ -367,7 +419,9 @@ const DashboardPage = {
     onMounted(async () => {
       // 7 个首屏请求各自独立：一个接口失败只影响它对应区块，不再整体空白
       const settled = await Promise.allSettled([
-        api.get('/stats/dashboard', { teamId: store.teamId }),
+        // B-前1：首屏复用 pickTeam 时 refreshLowStock 已拉（进行中的）
+        // /stats/dashboard，不再单独发一次
+        fetchDashboardStats(),
         api.get('/stats/sales-summary', { teamId: store.teamId, range: range.value }),
         api.get('/stats/trend', { teamId: store.teamId }),
         api.get('/doc/list', { teamId: store.teamId, page: 1, rows: 8 }),
@@ -424,13 +478,13 @@ const DashboardPage = {
   },
   template: `
   <div>
-    <!-- 团队标题条（对齐惠民云：白卡左上角团队名） -->
+    <!-- 团队标题条（对齐原产品：白卡左上角团队名） -->
     <div class="team-bar">
       <span class="team-name">{{ store.team?.name || '当前账套' }}</span>
       <span class="team-sub">欢迎回来，祝您生意兴隆</span>
     </div>
 
-    <!-- 常用功能（对齐惠民云工作台：右侧 添加/移除） -->
+    <!-- 常用功能（对齐原产品工作台：右侧 添加/移除） -->
     <div class="chart-card" style="margin-bottom:14px">
       <div class="ct">
         常用功能
@@ -455,7 +509,7 @@ const DashboardPage = {
     <!-- 新手引导 -->
     <div v-if="showGuide" class="card" style="margin-bottom:14px;padding:18px 20px;border-left:4px solid var(--brand);position:relative">
       <span class="x" title="不再显示" style="position:absolute;top:10px;right:14px;cursor:pointer;color:var(--muted);font-size:16px" @click="dismissGuide">×</span>
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用惠民云进销存 —— 3 步开账</div>
+      <div style="font-weight:600;font-size:15px;margin-bottom:8px">欢迎使用展惠进销存 —— 3 步开账</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:var(--text)">
         <div style="flex:1;min-width:200px">
           <div style="font-weight:600;margin-bottom:4px;color:var(--brand)">① 第 1 步 · 建档</div>
@@ -565,7 +619,7 @@ const DashboardPage = {
       </div>
     </div>
 
-    <!-- 第 3 行：三张独立销售排行卡（对齐惠民云：订单/出库/收款各一格） -->
+    <!-- 第 3 行：三张独立销售排行卡（对齐原产品：订单/出库/收款各一格） -->
     <div class="dash-row">
       <div class="chart-card" v-for="rk in RANK_CARDS" :key="rk.k">
         <div class="ct">

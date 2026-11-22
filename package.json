@@ -1,8 +1,9 @@
 {
-  "name": "huimin-clone",
+  "name": "zhanhui-jxc",
   "version": "0.5.2",
   "private": true,
-  "description": "进销存系统（复刻惠民云 jxc 线核心业务）",
+  "description": "展惠进销存系统：面向小微批发 / 零售的商品、采购、销售、库存与往来账管理（独立原创实现）",
+  "license": "MIT",
   "type": "commonjs",
   "engines": {
     "node": ">=22.5"

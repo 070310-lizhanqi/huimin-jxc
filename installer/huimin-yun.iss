@@ -1,10 +1,10 @@
 ; ============================================================
-; 惠民云进销存 —— Windows 安装包脚本（Inno Setup 6）
+; 展惠进销存 —— Windows 安装包脚本（Inno Setup 6）
 ;
-; 产物：惠民云进销存-Setup-<版本>.exe
+; 产物：展惠进销存-Setup-<版本>.exe
 ; 安装位置：默认 %LOCALAPPDATA%\HuiminYun，用户可在安装向导里改到任意目录
 ; 数据位置：%APPDATA%\huimin-yun（卸载默认保留；卸载时询问是否一并删除）
-; 启动方式：桌面/开始菜单快捷方式指向「惠民云进销存.exe」（无控制台窗口 + 自带图标）
+; 启动方式：桌面/开始菜单快捷方式指向「展惠进销存.exe」（无控制台窗口 + 自带图标）
 ;
 ; 打包前先运行 pnpm run dist:win：
 ;   产出 installer/payload/ 完整运行目录（应用文件 + 自带 node.exe + 原生启动器）
@@ -12,11 +12,11 @@
 ;      故相对路径不要重复写 installer\ 前缀（否则会变成 installer\installer\…）
 ; ============================================================
 
-#define MyAppName "惠民云进销存"
+#define MyAppName "展惠进销存"
 #define MyAppNameEn "HuiminYun"
 #define MyAppVersion ReadIni(SourcePath + "\version.ini", "app", "version", "0.0.0")
 ; 原生无窗口启动器（自带图标，替代原先会弹终端窗口的 .cmd 入口）
-#define MyAppExeName "惠民云进销存.exe"
+#define MyAppExeName "展惠进销存.exe"
 
 [Setup]
 AppId={{8A3E1C62-5B7D-4B8E-9A21-ORANGEJXC001}
@@ -29,7 +29,7 @@ DisableProgramGroupPage=yes
 ; 非管理员可安装；privilegesRequired=lowest 允许直接双击安装
 PrivilegesRequired=lowest
 OutputDir=out
-OutputBaseFilename=惠民云进销存-Setup-{#MyAppVersion}
+OutputBaseFilename=展惠进销存-Setup-{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

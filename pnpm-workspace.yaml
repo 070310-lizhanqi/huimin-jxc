@@ -2,3 +2,8 @@
 # 在部分 Windows 环境递归过深导致栈溢出。本仓库 lockfile 是随源码提交的受信文件，
 # 直接标记信任以跳过该校验。
 trustLockfile: true
+
+# 单包仓库：工作区只含根目录。缺此字段时 pnpm 9.15+ 安装直接报
+# "packages field missing or empty"（A-安1 升级 body-parser 时实测复现）。
+packages:
+  - '.'

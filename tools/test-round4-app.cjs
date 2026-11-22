@@ -40,7 +40,7 @@ function ok(cond, name, detail) {
 }
 
 (async () => {
-  const r0 = await j('POST', '/auth/login', { username: 'admin', password: 'admin123456' });
+  const r0 = await j('POST', '/auth/login', { username: 'admin', password: 'B2cost!9Xq' });
   token = adminToken = r0.body.token;
   teamId = r0.body.team.id; // 恢复后校验数据用
   ok(!!token, '登录成功');
@@ -126,7 +126,7 @@ function ok(cond, name, detail) {
     // 触发恢复：先验证「缺密码被拒」，再带密码提交
     const rs0 = await j('POST', '/backup/restore', { file: snap });
     ok(rs0.status === 400, '恢复缺少密码被拒（二次验密）', JSON.stringify(rs0.body));
-    const rs = await j('POST', '/backup/restore', { file: snap, password: 'admin123456' });
+    const rs = await j('POST', '/backup/restore', { file: snap, password: 'B2cost!9Xq' });
     ok(rs.status === 200, '恢复请求被接受', JSON.stringify(rs.body));
     // 服务由自身「重启助手」拉起（不依赖外部 launcher）；测试只轮询等待
     let up = false;

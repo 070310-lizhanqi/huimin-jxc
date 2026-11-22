@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成桌面快捷方式图标：assets/icon-app.ico（惠民云，橙底白「惠」）、assets/icon-manager.ico（服务管理，深灰底橙齿轮）。"""
+"""生成桌面快捷方式图标：assets/icon-app.ico（展惠，橙底白「惠」）、assets/icon-manager.ico（服务管理，深灰底橙齿轮）。"""
 import math
 import os
 

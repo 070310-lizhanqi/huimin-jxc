@@ -5,49 +5,210 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate } from './db';
 
+/** 历史采购均价（估算）标量子查询（与 report.ts / dashboard.ts / aging.ts 同口径，B-数4 修后）：
+ *  仅统计已审核采购入库单、入库日期 ≤ 今天的流水；零价入库（unitCost<=0，如赠品/价缺省）
+ *  不计入分母；全零价商品返回 NULL，调用方用 COALESCE 回落到 purchasePrice。
+ *  注意：这是按商品全局取价，未分仓库/批次，多仓不同采购价时仍失真——彻底修需按仓/批取价，见 C-数1。
+ *  另：聚合均价不再取单条“最近价”，旧 ORDER BY l.id（插入顺序，补录早日期入库单会成
+ *  “最近价”）的问题随之消除——均价与行选取顺序无关，不再需要 ORDER BY d.date DESC, l.id DESC。 */
+const HIST_AVG_COST_SQL = `(SELECT SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
+     / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0)
+   FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
+   WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
+     AND d.type = 'stockin' AND d.status = 'audit' AND d.date <= date('now', 'localtime'))`;
+
 export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 实时库存（可按仓库/商品/关键词过滤，聚合同商品多仓位批次）
+  //
+  // B-前2 服务端分页：只有显式传 page 才返回分页对象
+  //   { rows, total, page, rowsPerPage, totals: { totalQty, totalValue, lowCount } }；
+  // 不传 page 时沿用旧行为返回全量数组（兼容 test-doc-import*.cjs 的 rows=50 用法与
+  // 13-doc-editor.js 的旧调用；rows 单独传时不改变形状）。
+  // 分页时 rows 缺省 50、钳制 1~500。
+  // totals 在全量过滤集上聚合（不是当前页），否则前端合计只算当前页；
+  // lowCount 是商品级低库存商品数（总量 <= 安全库存），与 /stats/dashboard 同口径。
+  // group=prod：按商品汇总分页（每商品一行，qty 为跨仓总量），供库存页汇总视图用——
+  // 行级分页会把同一商品拆到不同页，汇总视图无法正确分组，故汇总视图必须在商品级分页。
+  // onlyLow=1：只看低库存商品；sort=qtyAsc|qtyDesc：按数量排序（默认按商品名，与旧口径一致）。
   router.get('/stock/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const warehouseId = req.query.warehouseId ? Number(req.query.warehouseId) : 0;
+    const productId = req.query.productId ? Number(req.query.productId) : 0;
+    const kw = typeof req.query.kw === 'string' ? req.query.kw : '';
+    const hideZero = req.query.ifShowZero === '0';
+    const onlyLow = req.query.onlyLow === '1' || req.query.onlyLow === 'true';
+    const sort = String(req.query.sort ?? '');
+    const groupProd = req.query.group === 'prod';
+    const paged = req.query.page !== undefined;
+    const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+    const rowsPerPage = Math.min(
+      500,
+      Math.max(1, Number(req.query.rows) > 0 ? Math.floor(Number(req.query.rows)) : 50),
+    );
+
+    // 共享过滤条件（明细/汇总/合计/低库存子查询共用同一口径）
     const conds: string[] = ['s.teamId = ?'];
     const args: Array<string | number> = [teamId];
-    if (req.query.warehouseId) {
+    if (warehouseId) {
       conds.push('s.warehouseId = ?');
-      args.push(Number(req.query.warehouseId));
+      args.push(warehouseId);
     }
-    if (req.query.productId) {
+    if (productId) {
       conds.push('s.productId = ?');
-      args.push(Number(req.query.productId));
+      args.push(productId);
     }
-    if (req.query.kw) {
+    if (kw) {
       // 名称/条码/规格任一命中（扫码查库存时手上只有条码）
-      const like = `%${String(req.query.kw).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
       conds.push(`(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`);
       args.push(like, like, like);
     }
-    if (req.query.ifShowZero === '0') {
+    if (hideZero) {
       conds.push('s.qty != 0');
     }
-    const list = db
+    const where = conds.join(' AND ');
+
+    /**
+     * 低库存商品 id 集：商品级口径（同一商品在筛选范围内的库存总量 <= 安全库存），
+     * 与 /stats/dashboard 的低库存判定一致，但限定在本次请求的仓库/kw/产品过滤内；
+     * ifShowZero=0 时总量为 0 的商品不计入（与前端汇总视图过滤零库存后算 lowCount 一致）。
+     * 既用于 onlyLow 过滤，也用于给明细行打 isLow 标记与 totals.lowCount。
+     */
+    const lowConds: string[] = ['s2.teamId = ?'];
+    const lowArgs: Array<string | number> = [teamId];
+    if (warehouseId) {
+      lowConds.push('s2.warehouseId = ?');
+      lowArgs.push(warehouseId);
+    }
+    if (productId) {
+      lowConds.push('s2.productId = ?');
+      lowArgs.push(productId);
+    }
+    if (kw) {
+      const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      lowConds.push(`(p2.name LIKE ? ESCAPE '\\' OR IFNULL(p2.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p2.spec,'') LIKE ? ESCAPE '\\')`);
+      lowArgs.push(like, like, like);
+    }
+    const lowHaving = hideZero
+      ? `HAVING COALESCE(SUM(s2.qty), 0) <= MAX(p2.lowQty) AND MAX(p2.lowQty) > 0 AND COALESCE(SUM(s2.qty), 0) != 0`
+      : `HAVING COALESCE(SUM(s2.qty), 0) <= MAX(p2.lowQty) AND MAX(p2.lowQty) > 0`;
+    const lowSql = `SELECT s2.productId FROM stock s2 JOIN product p2 ON p2.id = s2.productId WHERE ${lowConds.join(' AND ')} GROUP BY s2.productId ${lowHaving}`;
+
+    const orderBy =
+      sort === 'qtyAsc'
+        ? ' ORDER BY qty ASC, p.name ASC'
+        : sort === 'qtyDesc'
+          ? ' ORDER BY qty DESC, p.name ASC'
+          : ' ORDER BY p.name';
+
+    let baseSelect: string;
+    let allArgs: Array<string | number>;
+    if (groupProd) {
+      // 按商品汇总：qty 为跨仓总量；whs 是去重后的仓库名（逗号分隔，前端再按 '、' 展示）；
+      // batchNo 取首个非空批次（与旧前端汇总取首个非空批次一致）；value 为货值（qty × 估价成本）。
+      // hideZero 在汇总口径下是 HAVING 总量 != 0（行级 s.qty != 0 已在 WHERE 里，
+      // 但 +5/-5 两行合计为 0 的商品旧前端汇总视图也会过滤掉）。
+      const having: string[] = [];
+      if (onlyLow) having.push('COALESCE(SUM(s.qty), 0) <= MAX(p.lowQty) AND MAX(p.lowQty) > 0');
+      if (hideZero) having.push('SUM(s.qty) != 0');
+      baseSelect = `SELECT s.productId, p.name AS prodName, p.spec, p.unit, p.lowQty,
+              SUM(s.qty) AS qty, COUNT(*) AS rows, COUNT(s.reservoirId) AS locs,
+              GROUP_CONCAT(DISTINCT w.name) AS whs, MIN(NULLIF(s.batchNo, '')) AS batchNo,
+              COALESCE(${HIST_AVG_COST_SQL}, p.purchasePrice) AS estUnitCost,
+              SUM(s.qty) * COALESCE(${HIST_AVG_COST_SQL}, p.purchasePrice) AS value
+       FROM stock s
+       JOIN product p ON p.id = s.productId
+       LEFT JOIN warehouse w ON w.id = s.warehouseId
+       WHERE ${where}
+       GROUP BY s.productId${having.length ? ` HAVING ${having.join(' AND ')}` : ''}`;
+      allArgs = args;
+    } else {
+      baseSelect = `SELECT s.productId, p.name AS prodName, p.spec, p.unit, p.lowQty, s.warehouseId, w.name AS warehouseName,
+              s.reservoirId, s.batchNo, SUM(s.qty) AS qty,
+              COALESCE(${HIST_AVG_COST_SQL}, p.purchasePrice) AS estUnitCost
+       FROM stock s
+       JOIN product p ON p.id = s.productId
+       LEFT JOIN warehouse w ON w.id = s.warehouseId
+       WHERE ${where}${onlyLow ? ` AND s.productId IN (${lowSql})` : ''}
+       GROUP BY s.productId, s.warehouseId, s.reservoirId, s.batchNo`;
+      allArgs = onlyLow ? [...args, ...lowArgs] : args;
+    }
+
+    if (!paged) {
+      const list = db.prepare(`${baseSelect}${orderBy}`).all(...allArgs) as Array<Record<string, unknown>>;
+      if (groupProd) {
+        // 汇总行自带 isLow（导出/全量模式用，与分页口径一致）
+        for (const r of list) r.isLow = (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0) ? 1 : 0;
+      }
+      return res.json(list);
+    }
+
+    // 分页：合计在全量过滤集上聚合（COUNT + SUM 一次查出），与当页行数无关
+    const agg = (
+      groupProd
+        ? db
+          .prepare(
+            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty, COALESCE(SUM(value), 0) AS totalValue,
+                    COALESCE(SUM(CASE WHEN lowQty > 0 AND qty <= lowQty THEN 1 ELSE 0 END), 0) AS lowCount
+             FROM (${baseSelect})`,
+          )
+          .get(...allArgs)
+        : db
+          .prepare(
+            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty,
+                    COALESCE(SUM(qty * estUnitCost), 0) AS totalValue
+             FROM (${baseSelect})`,
+          )
+          .get(...allArgs)
+    ) as { total: number; totalQty: number; totalValue: number; lowCount?: number };
+    // 明细口径的 lowCount 是商品级（不能从分组行直接加总），单独取低库存商品 id 集
+    let lowCount = agg.lowCount ?? 0;
+    let lowSet = new Set<number>();
+    if (!groupProd) {
+      lowSet = new Set(
+        (db.prepare(lowSql).all(...lowArgs) as Array<{ productId: number }>).map((r) => r.productId),
+      );
+      lowCount = lowSet.size;
+    }
+    const pageRows = db
+      .prepare(`${baseSelect}${orderBy} LIMIT ? OFFSET ?`)
+      .all(...allArgs, rowsPerPage, (page - 1) * rowsPerPage) as Array<Record<string, unknown>>;
+    for (const r of pageRows) {
+      r.isLow = groupProd
+        ? (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0)
+          ? 1
+          : 0
+        : lowSet.has(Number(r.productId))
+          ? 1
+          : 0;
+    }
+    return res.json({
+      rows: pageRows,
+      total: agg.total,
+      page,
+      rowsPerPage,
+      totals: { totalQty: agg.totalQty, totalValue: agg.totalValue, lowCount },
+    });
+  });
+
+  /**
+   * B-前3 轻量接口：开单编辑器换仓库时只建 productId → qty 的 Map，
+   * 不需要 /stock/list 的商品名/规格/成本等列。只返回两列，口径与编辑器旧的
+   * “全量 /stock/list 再本地 SUM”完全一致（同仓所有库存行按商品汇总，含零库存行）。
+   */
+  router.get('/stock/qty-by-product', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    const warehouseId = Number(req.query.warehouseId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouseId 不能为空' });
+    const rows = db
       .prepare(
-        `SELECT s.productId, p.name AS prodName, p.spec, p.unit, p.lowQty, s.warehouseId, w.name AS warehouseName,
-                s.reservoirId, s.batchNo, SUM(s.qty) AS qty,
-                COALESCE((
-                  SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-                  WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
-                    AND d.type = 'stockin' AND d.status = 'audit'
-                  ORDER BY l.id DESC LIMIT 1
-                ), 0) AS estUnitCost
-         FROM stock s
-         JOIN product p ON p.id = s.productId
-         LEFT JOIN warehouse w ON w.id = s.warehouseId
-         WHERE ${conds.join(' AND ')}
-         GROUP BY s.productId, s.warehouseId, s.reservoirId, s.batchNo
-         ORDER BY p.name`,
+        `SELECT s.productId, SUM(s.qty) AS qty FROM stock s
+         WHERE s.teamId = ? AND s.warehouseId = ? GROUP BY s.productId ORDER BY s.productId`,
       )
-      .all(...args);
-    return res.json(list);
+      .all(teamId, warehouseId);
+    return res.json(rows);
   });
 
   // 工作台统计卡片
@@ -60,17 +221,14 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
          FROM stock WHERE teamId = ? AND qty > 0`,
       )
       .get(teamId) as { totalQty: number; skuCount: number };
-    // 库存成本：按最近一次「采购入库」流水单价估价（与报表 avgCost 口径一致）。
+    // 库存成本：历史采购均价（估算）× 库存量，与报表 avgCost 同口径（B-数8）。
     // 注意不能 LEFT JOIN 全部入库流水——那会让每条库存行 × 每条流水相乘，货值虚增；
     // 也不能只看 direction='in'——销售退货(sret)的 unitCost 是售价，会污染货值
     const stockValue = (
       db
         .prepare(
-          `SELECT COALESCE(SUM(s.qty * COALESCE((
-               SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-               WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in' AND d.type = 'stockin' AND d.status = 'audit'
-               ORDER BY l.id DESC LIMIT 1
-             ), 0)), 0) AS v
+          `SELECT COALESCE(SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},
+               (SELECT p.purchasePrice FROM product p WHERE p.id = s.productId), 0)), 0) AS v
            FROM stock s
            WHERE s.teamId = ? AND s.qty > 0`,
         )
@@ -153,6 +311,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
          FROM doc
          WHERE teamId = ? AND status = 'audit'
            AND date >= date('now', '-14 day', 'localtime')
+           AND date <= date('now', 'localtime')
            AND type IN ('stockin','stockout','pin','sret')
          GROUP BY day ORDER BY day`,
       )
@@ -207,7 +366,7 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     return res.json({ rows: list, total, page, rowsPerPage: rows });
   });
 
-  // 汇总仪表盘：SKU 数、库存总量、库存货值（按最近入库成本估）
+  // 汇总仪表盘：SKU 数、库存总量、库存货值（历史采购均价（估算），与报表同口径，B-数8）
   router.get('/stock/summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
@@ -219,7 +378,8 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       .get(teamId) as { q: number | null };
     const value = db
       .prepare(
-        `SELECT SUM(s.qty * COALESCE((SELECT l.unitCost FROM stock_ledger l JOIN doc d ON d.id = l.refDocId WHERE l.teamId=s.teamId AND l.productId=s.productId AND l.direction='in' AND d.type='stockin' AND d.status='audit' ORDER BY l.id DESC LIMIT 1), 0)) AS v
+        `SELECT SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},
+               (SELECT p.purchasePrice FROM product p WHERE p.id = s.productId), 0)) AS v
          FROM stock s WHERE s.teamId=? AND s.qty != 0`,
       )
       .get(teamId) as { v: number | null };

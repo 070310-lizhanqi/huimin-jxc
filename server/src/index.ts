@@ -3,8 +3,8 @@
  * 端口 7741，REST 风格 /api/<资源>
  */
 import express from 'express';
-import { openDb, migrate } from './db';
-import { mountCrud } from './crud';
+import { openDb, migrate, tryCheckpoint, createWindowLimiter } from './db';
+import { mountCrud, PRICE_CENTS_MAX, QTY_MAX } from './crud';
 import { mountDocs } from './docs';
 import { mountStockQueries } from './stock';
 import { mountSettlements } from './settlement';
@@ -31,13 +31,62 @@ if (!process.env.ORANGE_JWT_SECRET) {
   console.warn('[安全提示] 未设置 ORANGE_JWT_SECRET，将使用内置本地密钥（仅限本机自用；请勿将服务直接暴露到公网）。');
 }
 
+// A-安2 启动守卫：绑定到非本机地址（ORANGE_BIND=0.0.0.0 或其它非 loopback 地址）时，
+// 内置默认密钥是公开源码里的固定值，任何人都能伪造 admin 令牌，因此必须显式设置强随机密钥才允许启动。
+// 注意：此处只做启动守卫，不改 auth.ts 里的默认值字符串，也不实现持久化密钥方案（见 B-安1）。
+{
+  const bind = String(process.env.ORANGE_BIND ?? '').trim().toLowerCase();
+  const isLoopbackBind = bind === '' || bind === 'localhost' || bind === '::1' || bind === '[::1]'
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bind);
+  const secret = process.env.ORANGE_JWT_SECRET;
+  if (!isLoopbackBind && (!secret || secret === 'huimin-clone-local-secret-v1')) {
+    console.error(`[启动失败] 绑定地址为非本机（ORANGE_BIND=${process.env.ORANGE_BIND}），但未设置有效的 ORANGE_JWT_SECRET。`);
+    console.error('内置默认密钥是公开源码中的固定值，暴露到非本机后任何人都能伪造管理员令牌，拒绝启动。');
+    console.error('请先设置一个 32 位以上的强随机密钥再启动：');
+    console.error('  PowerShell：$env:ORANGE_JWT_SECRET="<32 位以上随机字符串>"');
+    console.error('  Linux/macOS：export ORANGE_JWT_SECRET="<32 位以上随机字符串>"');
+    console.error('设置后旧令牌自动失效，已登录用户需重新登录。');
+    process.exit(1);
+  }
+}
+
 const PORT = Number(process.env.PORT ?? 7741);
+// A-安9：PORT 非法（非整数、<1 或 >65535，如 PORT=abc → NaN、PORT=99999）时直接报错退出，
+// 避免 listen 行为未定义。合法范围：1-65535。
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`[启动失败] PORT 非法：${String(process.env.PORT ?? 7741)}（解析后为 ${String(PORT)}），合法范围为 1-65535 的整数。`);
+  console.error('请设置合法端口再启动，例如：PORT=7741（或不设置，使用默认 7741）。');
+  process.exit(1);
+}
 const db = openDb();
 migrate(db);
 
 const app = express();
 app.set('x-powered-by', false);
 app.use(express.json({ limit: '2mb' }));
+
+// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
+// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
+// A-安5：Host 检查必须在 CORS 之前——CORS 中间件对 OPTIONS 预检直接返回 204，
+// 若 Host 检查在其后，任意 Host 的预检都能绕过白名单拿到 204。
+const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+for (const h of String(process.env.ORANGE_ALLOW_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
+  ALLOW_HOSTS.add(h);
+}
+const hostAllowed = (hostHeader: string): boolean => {
+  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
+  if (ALLOW_HOSTS.has(h)) return true;
+  // 本机任意回环地址（如 127.0.0.5）也算可信
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+};
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const host = String(req.headers.host ?? '');
+  if (host && !hostAllowed(host)) {
+    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
+    return;
+  }
+  next();
+});
 
 // CORS：仅允许同源与本地开发端口（白名单按实际端口动态生成，改 PORT 部署不失效）
 const ALLOW_ORIGINS = new Set(
@@ -79,6 +128,12 @@ const GZIP_MAX_BUFFER = 32 * 1024 * 1024;
 const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
 // 下载/导出路由显式跳过压缩：备份文件已是 SQLite 二进制，压缩无收益且放大内存
 const GZIP_SKIP_PATH = /^\/api\/backup\/download/;
+// B-安12：/vendor/* 压缩结果内存缓存。vendor 文件内容恒定（immutable: true 已声明），
+// 同一文件重复压缩是纯浪费；缓存键为请求路径，附带原文体积做一致性校验。
+// 上限 16MB（全部 vendor 约 2.7MB，gzip 后约 0.8MB，留足余量）；超限后不再新增缓存项。
+const VENDOR_GZIP_CACHE = new Map<string, { body: Buffer; origSize: number }>();
+let vendorGzipCacheBytes = 0;
+const VENDOR_GZIP_CACHE_MAX = 16 * 1024 * 1024;
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const accept = String(req.headers['accept-encoding'] ?? '');
   if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
@@ -90,6 +145,11 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     next();
     return;
   }
+  // B-安12：先把请求路径/方法快照下来。挂载点后的中间件（如 app.use('/vendor', …)）
+  // 会改写 req.url，res.end 执行时 req.path 已不含挂载前缀（实测 /vendor/echarts.min.js
+  // 会变成 /echarts.min.js），缓存键必须用进入中间件时的原始路径，否则永远命中不了。
+  const reqPath = req.path;
+  const reqMethod = req.method;
   // 包装 write/end：缓冲完整体再统一 gzip（静态文件与 JSON 均为一次性写出，内存可控）
   const chunks: Buffer[] = [];
   let size = 0;
@@ -145,39 +205,49 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
     const type = String(res.getHeader('content-type') ?? '').split(';')[0];
     // 决策：类型可压 + 体积达标 + 未手动指定 Content-Encoding
     if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
+      // B-安12：vendor 静态文件先查压缩缓存（内容恒定，命中即零压缩成本）
+      if (reqMethod === 'GET' && reqPath.startsWith('/vendor/')) {
+        const hit = VENDOR_GZIP_CACHE.get(reqPath);
+        if (hit && hit.origSize === size) {
+          usingGzip = true;
+          origSetHeader('content-encoding', 'gzip');
+          origSetHeader('content-length', String(hit.body.length));
+          origSetHeader('vary', 'Accept-Encoding');
+          origWrite(hit.body);
+          return origEnd();
+        }
+      }
       usingGzip = true;
-      const body = zlib.gzipSync(Buffer.concat(chunks), { level: 6 });
+      const body = Buffer.concat(chunks);
       chunks.length = 0;
-      origSetHeader('content-encoding', 'gzip');
-      origSetHeader('content-length', String(body.length));
-      origSetHeader('vary', 'Accept-Encoding');
-      origWrite(body);
-      return origEnd();
+      // B-安12：gzipSync 会阻塞事件循环（1MB 的 echarts 约 47ms，期间登录等小请求都被拖住），
+      // 改为异步 zlib.gzip（走 libuv 线程池），压缩完成后再写出；失败则回落为明文。
+      zlib.gzip(body, { level: 6 }, (err, gzipped) => {
+        if (err || !gzipped) {
+          console.error('[gzip] 压缩失败，回落明文:', err);
+          usingGzip = false;
+          origWrite(body);
+          origEnd();
+          return;
+        }
+        // 压缩成功：vendor 文件记入缓存（总量封顶，超限不再新增）
+        if (reqMethod === 'GET' && reqPath.startsWith('/vendor/') && gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+          if (!VENDOR_GZIP_CACHE.has(reqPath) && vendorGzipCacheBytes + gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+            VENDOR_GZIP_CACHE.set(reqPath, { body: gzipped, origSize: size });
+            vendorGzipCacheBytes += gzipped.length;
+          }
+        }
+        origSetHeader('content-encoding', 'gzip');
+        origSetHeader('content-length', String(gzipped.length));
+        origSetHeader('vary', 'Accept-Encoding');
+        origWrite(gzipped);
+        origEnd();
+      });
+      return res;
     }
     for (const c of chunks) origWrite(c);
     return origEnd();
   };
-  next();
-});
-
-// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
-// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
-const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
-for (const h of String(process.env.ORANGE_ALLOW_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
-  ALLOW_HOSTS.add(h);
-}
-const hostAllowed = (hostHeader: string): boolean => {
-  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
-  if (ALLOW_HOSTS.has(h)) return true;
-  // 本机任意回环地址（如 127.0.0.5）也算可信
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-};
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const host = String(req.headers.host ?? '');
-  if (host && !hostAllowed(host)) {
-    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
-    return;
-  }
   next();
 });
 
@@ -216,10 +286,12 @@ mountCrud(api, db, {
       const editId = Number(body.id);
       if (editId) {
         // 自引用与间接环检测：从父级沿链上溯，遇到自己即成环
+        // B-安10④：语句提到循环外预编译一次（原每跳一次 db.prepare，最深 100 跳即 100 次编译）
+        const parentStmt = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`);
         let cur = parentId;
         for (let hop = 0; hop < 100; hop++) {
           if (cur === editId) return '父分类不能是自己或自己的子分类';
-          const row = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`).get(cur, teamId) as
+          const row = parentStmt.get(cur, teamId) as
             | { parentId: number | null }
             | undefined;
           if (!row || !row.parentId) break;
@@ -321,7 +393,16 @@ mountSettings(api, db);
 mountBackup(api, db);
 
 // 商品批量导入：部分成功模式（错误行跳过并返回行号错误清单）
+/** B-安4③：商品导入按团队限速（每分钟 100 次），1000 行建档是高成本操作。阈值调参（2026-11-21，总协调人）：
+ *  与单据导入同口径：全量回归一分钟内合法导入约 20 余次，10 次/分钟误伤既有测试；100 次留有余量。 */
+const productImportLimit = createWindowLimiter(100, 60_000);
 api.post('/product/import', (req, res) => {
+  // A-安3：批量导入商品仅 admin（与 backup.ts 的 requireAdmin 同款；
+  // settings 侧是 A 组的事；E 组在并行做前端店员门控，随同一批快照发布，不存在 403 窗口）
+  if (!req.auth || req.auth.role !== 'admin') return res.status(403).json({ error: '仅管理员可批量导入商品' });
+  if (!productImportLimit(`team:${req.auth.teamId}`)) {
+    return res.status(429).json({ error: '导入过于频繁，请稍后再试' });
+  }
   const teamId = Number(req.body.teamId);
   if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
   const rows = req.body.rows as Array<Record<string, unknown>>;
@@ -333,14 +414,24 @@ api.post('/product/import', (req, res) => {
     if (s === '') return 0;
     if (!/^\d+(\.\d+)?$/.test(s)) return null;
     const n = Math.round(parseFloat(s) * 100);
-    if (!Number.isFinite(n) || n < 0 || n > 9_999_999) return null;
+    if (!Number.isFinite(n) || n < 0 || n > PRICE_CENTS_MAX) return null;
     return n;
   };
   const errors: Array<{ row: number; msg: string }> = [];
   let success = 0;
+  // B-安10③：一次全量读 + 内存 Map，循环内零查询。原每行两次查询（getProd + getCat），
+  // 1000 行即 2000 次；并发冲突由 product(teamId, name) 唯一索引兜底，记为行错误。
+  const prodNames = new Set<string>(
+    (db.prepare(`SELECT name FROM product WHERE teamId = ?`).all(teamId) as Array<{ name: string }>).map((p) => p.name),
+  );
+  const catByName = new Map<string, number>(
+    (db.prepare(`SELECT id, name FROM cat WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>).map(
+      (c) => [c.name, c.id] as [string, number],
+    ),
+  );
+  // 仅内存未命中时用：复核一次库（可能是并发导入刚建的分类），再决定是否新建
   const getCat = db.prepare(`SELECT id FROM cat WHERE teamId = ? AND name = ?`);
   const insCat = db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, ?)`);
-  const getProd = db.prepare(`SELECT id FROM product WHERE teamId = ? AND name = ?`);
   const ins = db.prepare(
     `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -356,16 +447,26 @@ api.post('/product/import', (req, res) => {
         errors.push({ row: rowNo, msg: '名称不能为空' });
         continue;
       }
-      if (getProd.get(teamId, name)) {
+      if (prodNames.has(name)) {
         errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
         continue;
       }
-      // 分类名：不存在则自动创建
+      // 分类名：不存在则自动创建（先查内存 Map，未命中再复核一次库）
       let catId: number | null = null;
       const catName = String(r.catName ?? '').trim();
       if (catName) {
-        const hit = getCat.get(teamId, catName) as { id: number } | undefined;
-        catId = hit ? hit.id : Number(insCat.run(teamId, catName).lastInsertRowid);
+        const cached = catByName.get(catName);
+        if (cached !== undefined) {
+          catId = cached;
+        } else {
+          const hit = getCat.get(teamId, catName) as { id: number } | undefined;
+          if (hit) {
+            catId = hit.id;
+          } else {
+            catId = Number(insCat.run(teamId, catName).lastInsertRowid);
+          }
+          catByName.set(catName, catId);
+        }
       }
       const prices: number[] = [];
       let bad = '';
@@ -386,32 +487,49 @@ api.post('/product/import', (req, res) => {
       if (lowRaw !== '') {
         const n = Number(lowRaw);
         // 与单据侧 MAX_QTY 同上限：安全库存是数量不是价格，量级失控同样是录错
-        if (!Number.isFinite(n) || n < 0 || n > 9_999_999) {
+        if (!Number.isFinite(n) || n < 0 || n > QTY_MAX) {
           errors.push({ row: rowNo, msg: '安全库存格式不正确' });
           continue;
         }
         lowQty = n;
       }
-      ins.run(
-        teamId,
-        catId,
-        name,
-        String(r.barcode ?? '').trim() || null,
-        String(r.unit ?? '').trim() || '件',
-        String(r.spec ?? '').trim() || null,
-        prices[1],
-        prices[2],
-        prices[0],
-        prices[3],
-        lowQty,
-        String(r.remark ?? '').trim() || null,
-      );
+      try {
+        ins.run(
+          teamId,
+          catId,
+          name,
+          String(r.barcode ?? '').trim() || null,
+          String(r.unit ?? '').trim() || '件',
+          String(r.spec ?? '').trim() || null,
+          prices[1],
+          prices[2],
+          prices[0],
+          prices[3],
+          lowQty,
+          String(r.remark ?? '').trim() || null,
+        );
+      } catch (e) {
+        // B-安10③ 唯一索引兜底：内存判重用的是导入开始时的快照，并发导入已建同名商品时
+        // INSERT 撞 product(teamId, name) 唯一索引，记为行错误继续下一行，不整批 500。
+        // 约束冲突只中止当前语句、不中止事务，循环可继续。
+        if (String((e as Error)?.message ?? '').includes('UNIQUE constraint failed')) {
+          prodNames.add(name); // 后续同名行直接走内存判重
+          errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
+          continue;
+        }
+        throw e;
+      }
+      prodNames.add(name);
       success++;
     }
     db.exec('COMMIT');
+    // B-安17 折中：批量导入落库后显式检查点，把 WAL 落盘
+    tryCheckpoint(db);
   } catch (e) {
     db.exec('ROLLBACK');
-    return res.status(500).json({ error: `导入失败：${(e as Error).message}` });
+    // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名/磁盘路径），只写服务端日志
+    console.error('[product-import] 导入失败:', e);
+    return res.status(500).json({ error: '导入失败，请稍后重试' });
   }
   return res.json({ success, errors, total: rows.length });
 });
@@ -471,7 +589,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
     return;
   }
   console.error('[api-error]', err);
-  res.status(500).json({ error: err.message || '服务器内部错误' });
+  // A-安4：固定返回通用文案，不回吐 err.message（可能含 SQLite 表名/唯一索引名/磁盘路径）；
+  // err.message + stack 只写服务端日志（上一行 console.error 已输出完整错误对象）。
+  res.status(500).json({ error: '服务器内部错误' });
 });
 
 // ---------- 启动监听：本机回环 + 端口自适应 + 单实例文件锁 ----------
@@ -573,14 +693,14 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
 
 (async () => {
   if (!acquireLock()) {
-    console.log('[单实例] 已有一个惠民云进销存实例在运行（锁文件指向存活进程），本次启动退出。');
+    console.log('[单实例] 已有一个展惠进销存实例在运行（锁文件指向存活进程），本次启动退出。');
     process.exit(0);
   }
   const firstPort = PORT;
   const { server, port } = await listenOn(firstPort, 20);
   writePortFile(port);
   const actualPort = port;
-  console.log(`huimin-clone server listening on http://127.0.0.1:${actualPort}`);
+  console.log(`zhanhui-jxc server listening on http://127.0.0.1:${actualPort}`);
   if (actualPort !== firstPort) {
     console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${actualPort}（port.txt 已更新）。`);
   }
@@ -591,6 +711,26 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
     fs.mkdirSync(runtimeDir, { recursive: true });
     fs.writeFileSync(path.join(runtimeDir, 'server.pid'), String(process.pid));
   } catch { /* 无权限或目录不可写时忽略，不影响服务本身 */ }
+  // B-安18：优雅停机——停止接受新连接，等在途请求完成（10 秒超时兜底，不能无限等），
+  // 再 wal_checkpoint(TRUNCATE) 后 db.close() 退出。
+  let shuttingDown = false;
+  const gracefulShutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[停机] 收到 ${signal}，开始优雅停机……`);
+    try {
+      await Promise.race([
+        new Promise<void>((resolve) => server.close(() => resolve())),
+        new Promise<void>((resolve) => setTimeout(resolve, 10000)),
+      ]);
+    } catch { /* 关闭失败仍继续停机 */ }
+    tryCheckpoint(db);
+    try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
+    console.log('[停机] 数据库已关闭，进程退出。');
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
   // keep a reference so the server handle is not GC'd / lint-dead
   void server;
 })();

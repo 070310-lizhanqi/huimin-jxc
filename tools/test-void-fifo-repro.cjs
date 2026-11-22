@@ -1,9 +1,10 @@
 /**
  * P0 复现：作废出库单时 deduct 仍按当前 FIFO 检查可用量——
  * 库存已被后续销售消耗时，作废被「库存不足」错误拒绝（尽管作废本身是往回加库存）。
- * 前置：服务在 7741，账套已初始化（admin/admin123456）。
+ * 前置：服务已启动，账套已初始化（admin/B2cost!9Xq）。
+ * 基址走 test-helpers 的 OC_BASE（B-安8 实测：写死 7741 会在端口自适应后移时连错端口）。
  */
-const BASE = 'http://127.0.0.1:7741/api';
+const { BASE } = require('./test-helpers.cjs');
 let token = '';
 
 async function req(method, path, body) {
@@ -18,7 +19,7 @@ async function req(method, path, body) {
 }
 
 (async () => {
-  const login = await req('POST', '/auth/login', { username: 'admin', password: 'admin123456' });
+  const login = await req('POST', '/auth/login', { username: 'admin', password: 'B2cost!9Xq' });
   token = login.token;
   const teamId = login.team?.id ?? login.user.teamId;
 

@@ -21,7 +21,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(800);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     await page.evaluate(() => { setTimeout(() => { throw new Error('E2E未捕获错误标记'); }, 0); });
@@ -42,7 +42,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(800);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     // 先跳到某业务页，便于验证回跳
@@ -51,10 +51,11 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     // 把令牌换成无效值，然后并发 6 个请求。
     // 必须走应用自身的 req() 包装（api.get）：401 清理逻辑在 req 里，
     // 用裸 fetch 会绕过被测代码，等于没测。
+    // B-前5：令牌在 httpOnly Cookie 里，JS 读不到也改不了 localStorage；
+    // 经 Playwright 的 context.addCookies 把会话 Cookie 置成无效值（同名覆盖）。
     // 同时打桩 sessionStorage.setItem 计数：去抖生效时 6 个并发 401 只应写一次回跳地址。
+    await page.context().addCookies([{ name: 'oc_token', value: 'invalid.token.value', url: BASE }]);
     const res = await page.evaluate(async () => {
-      localStorage.setItem('oc_token', 'invalid.token.value');
-      auth.token = 'invalid.token.value';
       let setItemCalls = 0;
       const origSet = sessionStorage.setItem.bind(sessionStorage);
       sessionStorage.setItem = function (k, v) { if (k === 'oc_return_hash') setItemCalls++; return origSet(k, v); };
@@ -64,11 +65,12 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
       }
       await Promise.all(calls);
       sessionStorage.setItem = origSet;
-      return { hash: location.hash, token: localStorage.getItem('oc_token'), returnKey: sessionStorage.getItem('oc_return_hash'), setItemCalls };
+      return { hash: location.hash, token: localStorage.getItem('oc_token'), cookie: document.cookie, returnKey: sessionStorage.getItem('oc_return_hash'), setItemCalls };
     });
     // 6 个并发 401 只执行一次清理（写入一次回跳地址）
     ok(res.setItemCalls === 1, '6 个并发 401 只执行一次清理（去抖生效）', `setItemCalls=${res.setItemCalls}`);
-    ok(res.token === null, '并发 401 后令牌被清除', JSON.stringify(res));
+    ok(res.token === null, '并发 401 后 localStorage 里无令牌（B-前5：令牌不再存 localStorage）', JSON.stringify(res));
+    ok(!res.cookie.includes('oc_token'), '并发 401 后会话 Cookie 被清掉（handle401 的 Max-Age=0）', JSON.stringify(res.cookie));
     ok(res.hash === '#/login', '并发 401 后跳转登录页', res.hash);
     ok(res.returnKey && res.returnKey.includes('aging'), '记录失效前页面用于回跳', JSON.stringify(res.returnKey));
     await page.close();
@@ -82,7 +84,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     // 预置回跳地址，模拟「被踢出后回来」
     await page.evaluate(() => sessionStorage.setItem('oc_return_hash', '#/aging?mode=ar'));
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2200);
     ok(page.url().includes('aging'), '登录后回跳失效前页面（而非工作台）', page.url());
@@ -97,7 +99,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     await page.goto(BASE + '?t=' + Date.now() + '#/login', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(900);
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2000);
     await page.evaluate(() => { location.hash = '#/aging?mode=ar'; });
@@ -111,7 +113,7 @@ const ok = (c, n, d) => { if (c) { pass++; console.log('  ok - ' + n); } else { 
     ok(rk === null, '主动退出不保留回跳地址', String(rk));
     // 再登录应回工作台
     await page.getByRole('textbox', { name: '用户名' }).fill('admin');
-    await page.getByRole('textbox', { name: '密码' }).fill('admin123456');
+    await page.getByRole('textbox', { name: '密码' }).fill('B2cost!9Xq');
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await page.waitForTimeout(2200);
     ok(page.url().includes('dashboard'), '主动退出后登录回工作台', page.url());

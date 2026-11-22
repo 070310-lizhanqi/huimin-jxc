@@ -6,7 +6,7 @@ const FinancePage = {
     const settlements = ref([]);
     const balances = ref([]);
     const tab = ref('settle');
-    const editor = reactive({ open: false, form: {} });
+    /* editor/busy/delBusy 由下方的 useCrudEditor（B-前6）提供；id 存在 form 内（原形态保留） */
     const viewerId = ref(null);
 
     // 筛选条条件（服务端本来就支持 type/partnerId/from/to，前端此前没把条件传上去）
@@ -88,57 +88,71 @@ const FinancePage = {
       name: b.partnerType === 'cus' ? (byId(store.customers, b.partnerId)?.name ?? `#${b.partnerId}`) : (byId(store.vendors, b.partnerId)?.name ?? `#${b.partnerId}`),
     })));
 
+    /** B-前6：CRUD 骨架走 useCrudEditor；特殊校验（往来单位必填、金额必须 > 0）留在本页 validate */
+    const crud = useCrudEditor({
+      validate(f) {
+        if (!f.partnerId) return '请选择往来单位';
+        if (!(Number(f.amount) > 0)) return '金额必须大于 0';
+        return null;
+      },
+      buildBody(f, id) {
+        // 收付款是资金操作，后端无幂等去重：新建与修改走不同接口、不同请求体
+        if (id) {
+          return {
+            teamId: store.teamId, accountId: f.accountId || null,
+            amount: toCents(f.amount), date: f.date, remark: f.remark,
+          };
+        }
+        return {
+          teamId: store.teamId, type: f.type, partnerType: f.partnerType, partnerId: f.partnerId,
+          accountId: f.accountId || null, amount: toCents(f.amount),
+          date: f.date, remark: f.remark,
+        };
+      },
+      url: (id) => (id ? '/settlement/' + id : '/settlement/create'),
+      savedToast: (isNew) => (isNew ? '已登记' : '已保存'),
+      confirmTitle: '删除确认',
+      confirmDelete: (s) => `确定删除这笔${s.type === 'receipt' ? '收款' : '付款'}记录（${fmtMoney(s.amount)}）？删除后会冲回往来余额与账户余额。`,
+      deleteRequest: (s) => api.del('/settlement/' + s.id, { teamId: store.teamId }),
+      afterSave: () => {
+        // 收付款直接改往来余额：重置 balLoaded 让 load() 强制重拉，顶部合计卡立即更新
+        balLoaded = false;
+        load();
+        // B-前1：收付款只改资金账户余额（往来余额由 load() 单独重拉），只刷新 accounts
+        refreshBase(['accounts']);
+      },
+      afterDelete: () => {
+        // 删除同样改往来余额：强制重拉余额卡片
+        balLoaded = false;
+        load();
+        // B-前1：同上，只刷新 accounts
+        refreshBase(['accounts']);
+      },
+    });
+    const editor = crud.editor;
+    const busy = crud.busy;
+    const delBusy = crud.busyDel;
     function openNew(type) {
-      editor.form = {
+      crud.openNew(() => ({
         type, partnerType: type === 'receipt' ? 'cus' : 'ven', partnerId: null,
         accountId: store.accounts[0]?.id ?? null, amount: 0,
         date: todayStr(), remark: '',
-      };
-      editor.open = true;
+      }));
     }
+    const save = crud.save;
+    function openEdit(s) {
+      crud.openEdit(s, (row) => ({
+        id: row.id, type: row.type, partnerType: row.partnerType, partnerId: row.partnerId,
+        accountId: row.accountId, amount: row.amount / 100, date: row.date, remark: row.remark || '',
+      }));
+    }
+    const remove = crud.del;
     const partnerOpts = computed(() => editor.form.partnerType === 'cus' ? store.customers : store.vendors);
     function partnerName(f) {
       const list = f.partnerType === 'cus' ? store.customers : store.vendors;
       return list.find((p) => p.id === f.partnerId)?.name ?? ('#' + f.partnerId);
     }
-    const busy = ref(false);
-    async function save() {
-      // 防双击：收付款是资金操作，后端无幂等去重，重复提交会双重冲抵往来余额
-      if (busy.value) return;
-      const f = editor.form;
-      if (!f.partnerId) return toast('请选择往来单位', 'error');
-      if (!(Number(f.amount) > 0)) return toast('金额必须大于 0', 'error');
-      busy.value = true;
-      try {
-        if (f.id) {
-          await api.put('/settlement/' + f.id, {
-            teamId: store.teamId, accountId: f.accountId || null,
-            amount: toCents(f.amount), date: f.date, remark: f.remark,
-          });
-        } else {
-          await api.post('/settlement/create', {
-            teamId: store.teamId, type: f.type, partnerType: f.partnerType, partnerId: f.partnerId,
-            accountId: f.accountId || null, amount: toCents(f.amount),
-            date: f.date, remark: f.remark,
-          });
-        }
-        editor.open = false;
-        toast(f.id ? '已保存' : '已登记');
-        // 收付款直接改往来余额：重置 balLoaded 让 load() 强制重拉，顶部合计卡立即更新
-        balLoaded = false;
-        load();
-        loadBase();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busy.value = false; }
-    }
-
-    function openEdit(s) {
-      editor.form = {
-        id: s.id, type: s.type, partnerType: s.partnerType, partnerId: s.partnerId,
-        accountId: s.accountId, amount: s.amount / 100, date: s.date, remark: s.remark || '',
-      };
-      editor.open = true;
-    }
+    /* save/openEdit 由上方的 useCrudEditor（B-前6）提供 */
 
     function watch1() {
       // 切换往来单位时清掉已选的 id，避免类型不匹配
@@ -150,25 +164,7 @@ const FinancePage = {
     }
     watch(fPartnerType, watch1);
 
-    const delBusy = ref(null);
-    async function remove(s) {
-      if (delBusy.value === s.id) return;
-      const ok = await confirmBox(
-        `确定删除这笔${s.type === 'receipt' ? '收款' : '付款'}记录（${fmtMoney(s.amount)}）？删除后会冲回往来余额与账户余额。`,
-        '删除确认',
-      );
-      if (!ok) return;
-      delBusy.value = s.id;
-      try {
-        await api.del('/settlement/' + s.id, { teamId: store.teamId });
-        toast('已删除');
-        // 删除同样改往来余额：强制重拉余额卡片
-        balLoaded = false;
-        load();
-        loadBase();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { delBusy.value = null; }
-    }
+    /* remove/delBusy 由上方的 useCrudEditor（B-前6）提供 */
     const filteredSum = computed(() => settlements.value.reduce((a, s) => a + (s.amount || 0), 0));
 
     // 往来余额导出（此前只有表格，没法带给会计/老板看）
@@ -176,14 +172,14 @@ const FinancePage = {
       if (!balRows.value.length) return toast('没有可导出的往来余额', 'warning');
       exportCsv(
         `往来余额_${todayStr()}.csv`,
-        balRows.value.map((b) => ({
+        balRows.value.map((b) => moneyRow({
           name: b.name,
           ptype: b.partnerType === 'cus' ? '客户' : '供应商',
-          balance: (b.balance / 100).toFixed(2),
+          balance: b.balance,
           note: b.partnerType === 'cus'
             ? (b.balance > 0 ? '客户欠款（应收）' : b.balance < 0 ? '客户预付（预收）' : '已结清')
             : (b.balance > 0 ? '欠供应商（应付）' : b.balance < 0 ? '供应商预付冲抵' : '已结清'),
-        })),
+        }, ['balance'])),
         [
           { key: 'name', label: '往来单位' }, { key: 'ptype', label: '类型' },
           { key: 'balance', label: '余额(元)' }, { key: 'note', label: '说明' },

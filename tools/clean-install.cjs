@@ -21,7 +21,7 @@ const { execFileSync, spawnSync } = require('child_process');
 
 const ASSUME_YES = process.argv.includes('--yes');
 const APP_ID = '{8A3E1C62-5B7D-4B8E-9A21-ORANGEJXC001}_is1';
-const APP_NAME = '惠民云进销存';
+const APP_NAME = '展惠进销存';
 // 旧品牌名（数据目录）——未升级的老用户数据在这
 const LEGACY_DATA_DIR_NAME = 'orange-jxc';
 

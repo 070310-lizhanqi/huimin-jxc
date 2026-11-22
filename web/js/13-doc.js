@@ -20,7 +20,7 @@ const DocPage = {
     const total = ref(0);
     /** 各状态单据数（服务端按当前筛选统计，不受状态页签与分页影响），用于状态页签徽标 */
     const statusCount = ref({ draft: 0, pending: 0, audit: 0, void: 0 });
-    // 筛选条：日期区间 + 往来单位（对齐惠民云列表页密集筛选条）
+    // 筛选条：日期区间 + 往来单位（对齐原产品列表页密集筛选条）
     const filterFrom = ref('');
     const filterTo = ref('');
     const filterPartner = ref(null);
@@ -30,7 +30,7 @@ const DocPage = {
     const editorEditId = ref(0);
     const impOpen = ref(false);
     const busyId = ref(null);
-    /** 列表/明细分页签（真实惠民云有这个二级切换，明细=展开商品行） */
+    /** 列表/明细分页签（原产品有这个二级切换，明细=展开商品行） */
     const viewTab = ref('list');
     /** 复选框选中的单据 id（批量操作/批量提交用） */
     const selected = ref([]);
@@ -174,14 +174,22 @@ const DocPage = {
       const failed = [];
       let done = 0;
       try {
-        for (const d of pool) {
-          try {
-            await api.post('/doc/audit', { teamId: store.teamId, id: d.id, auditBy: store.team?.name || '管理员' });
-            done += 1;
-          } catch (e) {
-            failed.push(`${d.billNo}：${e.message}`);
+        // 并发上限 4 的 worker 池：逐张串行 20 张要 20 个往返，并行后约 1/4 时间；
+        // 每张失败只记入 failed（带单号），其余继续跑完，结束后汇总上报
+        const CONCURRENCY = 4;
+        let next = 0;
+        async function worker() {
+          while (next < pool.length) {
+            const d = pool[next++];
+            try {
+              await api.post('/doc/audit', { teamId: store.teamId, id: d.id, auditBy: store.team?.name || '管理员' });
+              done += 1;
+            } catch (e) {
+              failed.push(`${d.billNo}：${e.message}`);
+            }
           }
         }
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, () => worker()));
         if (failed.length) toast(`已审核 ${done} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${failed.length > 3 ? ' …' : ''}`, 'warning');
         else toast(`已审核 ${done} 张`);
         load();
@@ -291,12 +299,12 @@ const DocPage = {
       // 明细视图导出的是展开后的商品行（按商品对数用），不是单据汇总
       if (viewTab.value === 'summary') {
         if (!flatItems.value.length) return toast('没有可导出的明细', 'warning');
-        exportCsv(`${DOC_META[activeType.value].label}明细.csv`, flatItems.value.map((r) => ({
+        exportCsv(`${DOC_META[activeType.value].label}明细.csv`, flatItems.value.map((r) => moneyRow({
           billNo: r.billNo, date: (r.date || '').slice(0, 10), partner: r.partnerName || '',
           prod: r.prodName, spec: r.spec === '—' ? '' : r.spec, unit: r.unit === '—' ? '' : r.unit,
-          qty: r.qty, price: (r.price / 100).toFixed(2), amount: (r.amount / 100).toFixed(2),
+          qty: r.qty, price: r.price, amount: r.amount,
           status: STATUS_TEXT[r.status] || r.status,
-        })), [
+        }, ['price', 'amount'])), [
           { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' }, { key: 'partner', label: '往来单位' },
           { key: 'prod', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
           { key: 'qty', label: '数量' }, { key: 'price', label: '单价(元)' }, { key: 'amount', label: '金额(元)' },
@@ -311,14 +319,15 @@ const DocPage = {
         { key: 'totalQty', label: '合计数量' }, { key: 'totalAmount', label: '合计金额(元)' },
         { key: 'status', label: '状态' }, { key: 'remark', label: '备注' },
       ];
-      const mapRow = (d) => ({
+      const mapRow = (d) => moneyRow({
         billNo: d.billNo, date: (d.date || '').slice(0, 10),
         partner: partnerLabel(d) || '', warehouse: whLabel(d.warehouseId) || '',
-        totalQty: d.totalQty, totalAmount: (Number(d.totalAmount) / 100).toFixed(2),
+        totalQty: d.totalQty, totalAmount: d.totalAmount,
         status: STATUS_TEXT[d.status] || d.status, remark: d.remark || '',
-      });
+      }, ['totalAmount']);
       // 分页时默认只导出当前页容易误解（财务对账要的是「这批筛选结果的全部」）：
-      // 超过一页就询问，确认后按当前筛选条件把剩下的页也拉完再合并导出
+      // 超过一页就询问，确认后走后端批量导出接口（/doc/export，一次请求返回筛选结果 CSV），
+      // 不再串行逐页拉取（B-前4：1 万条原来要发 50 个串行请求）。
       if (total.value > list.value.length) {
         confirmBox(
           `当前只显示了第 ${page.value} 页的 ${list.value.length} 条，共 ${total.value} 条。\n是否导出全部 ${total.value} 条（按当前筛选条件）？`,
@@ -326,21 +335,13 @@ const DocPage = {
         ).then(async (all) => {
           if (!all) return exportCsv(`${DOC_META[activeType.value].label}列表_第${page.value}页.csv`, list.value.map(mapRow), head);
           try {
-            const merged = [];
-            let p = 1;
-            // 单页上限 200，最多 50 页（1 万条），防止误点导出把浏览器拖死
-            while (p <= 50) {
-              const r = await api.get('/doc/list', {
-                teamId: store.teamId, type: activeType.value, status: status.value,
-                kw: kw.value, page: p, rows: 200,
-                from: filterFrom.value || '', to: filterTo.value || '',
-                partnerId: filterPartner.value || '',
-              });
-              merged.push(...r.rows);
-              if (merged.length >= r.total || !r.rows.length) break;
-              p++;
-            }
-            exportCsv(`${DOC_META[activeType.value].label}列表_全部${merged.length}条.csv`, merged.map(mapRow), head);
+            const q = new URLSearchParams({ teamId: String(store.teamId), type: activeType.value });
+            if (status.value) q.set('status', status.value);
+            if (kw.value) q.set('kw', kw.value);
+            if (filterFrom.value) q.set('from', filterFrom.value);
+            if (filterTo.value) q.set('to', filterTo.value);
+            if (filterPartner.value) q.set('partnerId', String(filterPartner.value));
+            await api.download(`/doc/export?${q.toString()}`, `${DOC_META[activeType.value].label}列表_全部${total.value}条.csv`);
           } catch (e) { toast('导出失败：' + e.message, 'error'); }
         });
         return;
@@ -547,7 +548,7 @@ const DocPage = {
     </div>
   </div>
 
-  <!-- ===== 整页开单态（对齐惠民云）：独立子组件，自持编辑状态 ===== -->
+  <!-- ===== 整页开单态（对齐原产品）：独立子组件，自持编辑状态 ===== -->
   <doc-editor v-else :type="activeType" :doc-id="editorEditId" @close="closeEditor"/>
 
   <!-- ===== Excel/CSV 智能导入弹窗：独立子组件 ===== -->

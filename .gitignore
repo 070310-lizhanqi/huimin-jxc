@@ -30,7 +30,6 @@ _*.txt
 *-out.txt
 reg-out.txt
 seed-out.txt
-!server/src/schema.md
 
 # npm/pnpm 缓存（tools 下曾用过本地 npm-cache，属缓存不属源码）
 .npm-cache/
@@ -104,3 +103,13 @@ installer/out/
 installer/installer/
 .tools/node.exe
 data-payload/
+
+# 运行期本地文件（服务运行时生成，不入库）
+*.db
+*.sqlite*
+port.txt
+server.lock
+launcher.pid
+.env*
+.git-merge-msg.tmp
+*.tmp

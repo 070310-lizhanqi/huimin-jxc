@@ -68,8 +68,10 @@ const ReportPage = {
       finally { if (loadGuard.isCurrent(my)) loading.value = false; }
     }
 
-    function renderChart() {
+    async function renderChart() {
       if (!chartEl.value) return;
+      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      if (!chartEl.value || !document.body.contains(chartEl.value)) return;
       // 切到排行页签时图表容器被 v-if 销毁，旧实例仍挂在已脱离文档的 DOM 上；
       // 切回后 chartEl 是新节点，必须重建实例，否则 setOption 渲染进死节点、趋势图永久空白
       if (chart && chart.getDom() !== chartEl.value) { chart.dispose(); chart = null; }

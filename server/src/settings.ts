@@ -1,7 +1,7 @@
 /**
  * 功能设置：单据编号规则 + 打印抬头（team 级键值配置）
  */
-import type { Router } from 'express';
+import type { Request, Response, Router } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 
 /** 默认单据前缀（可被 team 配置覆盖） */
@@ -11,6 +11,13 @@ export const DEFAULT_PREFIX: Record<string, string> = {
   otherin: 'QR', otherout: 'QC', assembly: 'ZZ', stockinit: 'QCQ', quo: 'BJ',
   outapply: 'SQ', prodtask: 'SC',
 };
+
+/**
+ * B-安19②：单号前缀表只留 settings.ts 一份（唯一来源）。
+ * docimport.ts 与 docs.ts 里的旧硬编码副本已删，单号生成函数收敛到
+ * server/src/bill-no.ts（nextBillNo），两处共用。
+ */
+export const BILL_NO_PREFIXES: Record<string, string> = DEFAULT_PREFIX;
 
 /** 编号日期格式：none=流水不分日期 / day=按日重置 / month=按月重置 */
 export type NoMode = 'none' | 'day' | 'month';
@@ -90,6 +97,24 @@ export function loadPrint(db: DatabaseSync, teamId: number): PrintConf {
 }
 
 export function mountSettings(router: Router, db: DatabaseSync): void {
+  /**
+   * A-安3（后端）：设置写接口仅管理员可用，与 backup.ts 同款 requireAdmin 守卫。
+   * mountSettings 挂在全局 requireAuth 之后，req.auth 已由令牌注入。
+   * 读接口 /setting/get 不设限（店员看设置页不写即不影响）；E 组并行做前端
+   * 店员入口门控，两者随同一批快照发布，不存在 403 窗口。
+   */
+  const requireAdmin = (req: Request, res: Response): boolean => {
+    if (!req.auth) {
+      res.status(401).json({ error: '未登录' });
+      return false;
+    }
+    if (req.auth.role !== 'admin') {
+      res.status(403).json({ error: '仅管理员可以修改设置' });
+      return false;
+    }
+    return true;
+  };
+
   /** 读全部设置（前端打开设置页一次取齐） */
   router.get('/setting/get', (req, res) => {
     const teamId = Number(req.query.teamId);
@@ -104,6 +129,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
 
   /** 保存单据编号前缀 */
   router.post('/setting/prefix', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const teamId = Number(req.body.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const input = req.body.prefix as Record<string, unknown> | undefined;
@@ -125,6 +151,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
 
   /** 保存编号重置模式 */
   router.post('/setting/no-mode', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const teamId = Number(req.body.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const mode = String(req.body.noMode ?? '');
@@ -137,6 +164,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
 
   /** 保存打印抬头 */
   router.post('/setting/print', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const teamId = Number(req.body.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const p = req.body.print as Record<string, unknown> | undefined;
@@ -154,6 +182,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
 
   /** 恢复默认（清掉 team 级覆盖） */
   router.post('/setting/reset', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const teamId = Number(req.body.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const scope = String(req.body.scope ?? 'all');

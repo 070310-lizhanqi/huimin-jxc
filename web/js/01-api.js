@@ -1,22 +1,16 @@
 'use strict';
 /* web/js/01-api.js —— 由 app.js 拆分（lines 6-57） */
 /* ================= API ================= */
-/* 登录态：令牌存 localStorage，所有请求自动携带；收到 401 立即回登录页 */
-const TOKEN_KEY = 'oc_token';
-/** 登录回跳：401 被踢回登录页时记住原地址，重新登录后自动回到该页 */
+/* 登录态：令牌由服务端以 httpOnly Cookie 下发（B-前5），浏览器不再把 token 存
+ * localStorage——任意 XSS 可直接读走 localStorage 里的令牌。同源 fetch 默认
+ * credentials: 'same-origin'，cookie 会自动带上；收到 401 立即回登录页 */
 const RETURN_KEY = 'oc_return_hash';
-const auth = reactive({ token: localStorage.getItem(TOKEN_KEY) || '', user: null, team: null, ready: false });
-
-function setToken(t) {
-  auth.token = t || '';
-  if (t) localStorage.setItem(TOKEN_KEY, t);
-  else localStorage.removeItem(TOKEN_KEY);
-}
+const auth = reactive({ user: null, team: null, ready: false });
 async function logout() {
-  // 服务端吊销当前令牌：单清 localStorage 只是「客户端忘记」，
-  // 已导出的令牌在过期前仍可调用接口（共用电脑/令牌泄漏场景）
-  try { if (auth.token) await fetch('/api/auth/logout', { method: 'POST', headers: { authorization: 'Bearer ' + auth.token } }); } catch { /* 网络失败也要完成本地清理 */ }
-  setToken('');
+  // 服务端吊销当前令牌并清掉 Cookie：单清客户端状态只是「客户端忘记」，
+  // 已导出的令牌在过期前仍可调用接口（共用电脑/令牌泄漏场景）。
+  // 同源 fetch 默认带 cookie，无需再拼 Authorization 头。
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* 网络失败也要完成本地清理 */ }
   auth.user = null; auth.team = null;
   store.loaded = false;
   store.teamId = null; store.team = null; store.teams = [];
@@ -33,13 +27,19 @@ async function logout() {
  *  改为：并发触发共用同一个 Promise，Promise 完成后才允许下一次清理。 */
 let handling401Promise = null;
 function handle401() {
+  // B-前5：401 表示会话已失效（令牌过期/被吊销/被改密顶掉），清掉浏览器里的
+  // 会话 Cookie，等价于旧逻辑里的 setToken('')（localStorage 时代的清令牌）。
+  // document.cookie 写 Max-Age=0 可删掉 HttpOnly Cookie（HttpOnly 只禁读不禁删）。
+  // 放去抖判断之前同步执行：req() 调 handle401() 时不 await，放在这里才能保证
+  // 本次 401 返回前 Cookie 已清掉；无 Cookie 时是空操作。
+  try { document.cookie = 'oc_token=; Path=/; Max-Age=0'; } catch { /* ignore */ }
   if (handling401Promise) return handling401Promise;
   handling401Promise = (async () => {
     // 记住当前页（排除登录页自身），登录成功后回到这里
     const cur = location.hash;
     if (cur && cur !== '#/login' && !cur.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, cur);
-    if (auth.token || auth.user || store.loaded) {
-      setToken(''); auth.user = null; auth.team = null;
+    if (auth.user || store.loaded) {
+      auth.user = null; auth.team = null;
       store.loaded = false; store.teamId = null; store.team = null; store.teams = [];
     }
     if (location.hash !== '#/login') location.hash = '#/login';
@@ -61,7 +61,6 @@ async function req(method, path, body, params) {
     if (s) url += '?' + s;
   }
   const opt = { method, headers: {} };
-  if (auth.token) opt.headers.authorization = 'Bearer ' + auth.token;
   if (body !== undefined) {
     opt.headers['content-type'] = 'application/json';
     opt.body = JSON.stringify(body);
@@ -92,15 +91,35 @@ const api = {
   post: (p, body) => req('POST', p, body ?? {}),
   put: (p, body) => req('PUT', p, body ?? {}),
   del: (p, params) => req('DELETE', p, undefined, params),
-  /** 带鉴权的文件下载：fetch 取 blob 后触发浏览器另存（令牌不能走 URL，会进日志/历史） */
+  /** 带鉴权的文件下载：fetch 取 blob 后触发浏览器另存（令牌不能走 URL，会进日志/历史）。
+   *  同源 fetch 默认 credentials: 'same-origin'，httpOnly Cookie 自动带上，不再手动拼头。 */
   download: async (path, fallbackName) => {
-    const r = await fetch('/api' + path, { headers: auth.token ? { authorization: 'Bearer ' + auth.token } : {} });
+    // 超时中止（与 req() 同款）：备份文件大，超时放宽到 120 秒；超时/断网抛与 req() 相同的中文错误
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 120000);
+    let r;
+    try {
+      r = await fetch('/api' + path, { signal: ctl.signal });
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
+      throw new Error('网络异常，请检查服务是否可用');
+    }
     if (!r.ok) {
+      clearTimeout(timer);
       let data = null;
       try { data = await r.json(); } catch { /* non-json */ }
       throw new Error((data && data.error) || `HTTP ${r.status}`);
     }
-    const blob = await r.blob();
+    let blob;
+    try {
+      blob = await r.blob();
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
+      throw new Error('网络异常，请检查服务是否可用');
+    }
+    clearTimeout(timer);
     const cd = r.headers.get('content-disposition') || '';
     const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
     const name = m ? decodeURIComponent(m[1].replace(/"/g, '')) : fallbackName;

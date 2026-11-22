@@ -7,7 +7,7 @@
  *   3) 单据日期分散到过去 120 天，让账龄分档、趋势图、排行都有数据
  *
  * 用法：node tools/seed-demo-full.cjs
- * 前置：服务已在 7741 端口运行，账套「鲜果批发部」+ admin/admin123456 已存在
+ * 前置：服务已在 7741 端口运行，账套「鲜果批发部」+ admin/B2cost!9Xq 已存在
  */
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
@@ -15,7 +15,7 @@ const path = require('node:path');
 const BASE = process.env.OC_BASE || 'http://127.0.0.1:7741/api';
 const DB_PATH = path.join(__dirname, '..', 'data', 'huimin-clone.db');
 const USER = 'admin';
-const PASS = 'admin123456';
+const PASS = 'B2cost!9Xq';
 
 let TOKEN = '';
 

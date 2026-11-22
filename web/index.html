@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>惠民云进销存</title>
+<title>展惠进销存</title>
 <link rel="stylesheet" href="vendor/element-plus.css">
 <style>
 :root {
@@ -124,7 +124,7 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 .page-head .tabs .tb.on { color: var(--brand); border-bottom-color: var(--brand); font-weight: 500; }
 .page-head .hd-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 
-/* 筛选条（惠民云风格：单行密集） */
+/* 筛选条（单行密集） */
 .filterbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; flex-wrap: wrap; }
 .filterbar .fb-gap { flex: 1; }
 .finp { height: 32px; border: 1px solid var(--border); border-radius: 3px; padding: 0 9px; font-size: 13px; outline: none; background: #fff; color: var(--text); }
@@ -750,40 +750,43 @@ html, body { margin: 0; padding: 0; height: 100%; font-family: "PingFang SC", "M
 </head>
 <body>
 <div id="app"></div>
-<script src="vendor/vue.global.prod.js"></script>
-<script src="vendor/element-plus.full.min.js"></script>
-<script src="vendor/element-plus-icons.iife.min.js"></script>
-<script src="vendor/element-plus.zh-cn.js"></script>
-<script src="vendor/echarts.min.js"></script>
+<script src="vendor/vue.global.prod.js?v=0.5.2"></script>
+<script src="vendor/element-plus.full.min.js?v=0.5.2"></script>
+<script src="vendor/element-plus-icons.iife.min.js?v=0.5.2"></script>
+<script src="vendor/element-plus.zh-cn.js?v=0.5.2"></script>
 <!-- 应用脚本（按依赖顺序加载，均由原 app.js 拆分生成） -->
-<script src="js/00-head.js"></script>
-<script src="js/01-api.js"></script>
-<script src="js/02-tools.js"></script>
-<script src="js/03-meta.js"></script>
-<script src="js/04-state.js"></script>
-<script src="js/05-helpers.js"></script>
-<script src="js/06-router.js"></script>
-<script src="js/07-doc-viewer.js"></script>
-<script src="js/08-dashboard.js"></script>
-<script src="js/09-product.js"></script>
-<script src="js/10-partner.js"></script>
-<script src="js/11-base.js"></script>
-<script src="js/12-stock.js"></script>
+<script defer src="js/00-head.js?v=0.5.2"></script>
+<script defer src="js/01-api.js?v=0.5.2"></script>
+<script defer src="js/02-tools.js?v=0.5.2"></script>
+<script defer src="js/03-meta.js?v=0.5.2"></script>
+<script defer src="js/04-state.js?v=0.5.2"></script>
+<script defer src="js/05-helpers.js?v=0.5.2"></script>
+<script defer src="js/05b-crud-editor.js?v=0.5.2"></script>
+<script defer src="js/06-router.js?v=0.5.2"></script>
+<script defer src="js/07-doc-viewer.js?v=0.5.2"></script>
+<script defer src="js/08-dashboard.js?v=0.5.2"></script>
+<script defer src="js/09-product.js?v=0.5.2"></script>
+<script defer src="js/10-partner.js?v=0.5.2"></script>
+<script defer src="js/11-base.js?v=0.5.2"></script>
+<script defer src="js/12-stock.js?v=0.5.2"></script>
 <!-- 单据页拆分：编辑器与导入弹窗作为独立组件先于 DocPage 定义 -->
-<script src="js/13-doc-editor.js"></script>
-<script src="js/13-doc-import.js"></script>
-<script src="js/13-doc.js"></script>
-<script src="js/14-ledger.js"></script>
-<script src="js/15-finance.js"></script>
-<script src="js/16-help.js"></script>
-<script src="js/17-report.js"></script>
-<script src="js/18-root.js"></script>
-<script src="js/19-jxcstat.js"></script>
-<script src="js/20-forecast.js"></script>
-<script src="js/21-statement.js"></script>
-<script src="js/22-aging.js"></script>
-<script src="js/23-price.js"></script>
-<script src="js/24-login.js"></script>
-<script src="js/25-mount.js"></script>
+<script defer src="js/13-doc-editor.js?v=0.5.2"></script>
+<script defer src="js/13-doc-import.js?v=0.5.2"></script>
+<script defer src="js/13-doc.js?v=0.5.2"></script>
+<script defer src="js/14-ledger.js?v=0.5.2"></script>
+<script defer src="js/15-finance.js?v=0.5.2"></script>
+<script defer src="js/16-help.js?v=0.5.2"></script>
+<script defer src="js/17-report.js?v=0.5.2"></script>
+<script defer src="js/18-root.js?v=0.5.2"></script>
+<script defer src="js/19-jxcstat.js?v=0.5.2"></script>
+<script defer src="js/20-forecast.js?v=0.5.2"></script>
+<script defer src="js/21-statement.js?v=0.5.2"></script>
+<script defer src="js/22-aging.js?v=0.5.2"></script>
+<!-- 价格/设置/待审拆分：三个组件原在同一文件（23-price.js），按原定义顺序加载 -->
+<script defer src="js/23-price.js?v=0.5.2"></script>
+<script defer src="js/23-settings.js?v=0.5.2"></script>
+<script defer src="js/23-approval.js?v=0.5.2"></script>
+<script defer src="js/24-login.js?v=0.5.2"></script>
+<script defer src="js/25-mount.js?v=0.5.2"></script>
 </body>
 </html>

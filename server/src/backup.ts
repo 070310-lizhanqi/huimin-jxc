@@ -10,23 +10,16 @@
  * - 全部接口仅管理员可用。
  */
 import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync as DatabaseSyncImpl } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { dataDir } from './db';
+import { dataDir, createWindowLimiter } from './db';
 import { verifyPassword } from './auth';
-
-/** Express 4 不捕获 async 路由抛错：统一包一层返回 500 JSON */
-function safe(fn: (req: Request, res: Response) => unknown) {
-  return (req: Request, res: Response): void => {
-    Promise.resolve(fn(req, res)).catch((e) => {
-      console.error('[backup] 路由内部错误:', e);
-      if (!res.headersSent) res.status(500).json({ error: '服务器内部错误' });
-      else res.end();
-    });
-  };
-}
+import { safeHandler as safe } from './safe-handler';
 
 const NAME_RE = /^backup-\d{8}-\d{6}(?:-[a-z0-9]{4})?\.db$/;
 
@@ -126,10 +119,64 @@ function removeBackupFile(dir: string, file: string): void {
 }
 
 /** WAL 合并进主库文件：备份前执行，保证复制出的文件是完整快照。
- *  失败必须抛错：checkpoint 失败说明主库文件可能不是完整快照，
- *  继续复制会得到一个缺最新事务的备份——用户日后恢复才发现丢数据。 */
+ *  B-安8：用 prepare().get() 读回 { busy, log, checkpointed }——exec() 不返回结果集，
+ *  忙时 checkpoint 只返回 busy=1 而不抛错，旧代码会静默备出缺最新事务的库。
+ *  busy 或 checkpointed < log 时重试一次，仍失败则抛错拒绝备份。
+ *  实测背景：并发长读事务占住 WAL 读标记时备份会缺最新单。 */
 function checkpoint(db: DatabaseSync): void {
-  db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
+      | { busy: number; log: number; checkpointed: number }
+      | undefined;
+    if (row && row.busy !== 1 && row.checkpointed >= row.log) return;
+    if (attempt === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+  throw new Error('WAL 检查点未完成（数据库正忙），备份已取消');
+}
+
+/** 恢复前必须存在的关键表（缺任何一张都说明该文件不是本系统账套） */
+const REQUIRED_RESTORE_TABLES = ['team', 'user', 'doc', 'doc_item', 'stock', 'product', 'customer', 'vendor', 'settlement', 'setting', 'bill_seq'];
+
+/**
+ * B-安7：恢复前完整性校验。把待恢复文件拷到临时位置，用只读连接跑
+ * `PRAGMA integrity_check` + 校验关键表存在。任一失败即抛错（调用方返回 400 通用文案）。
+ * 注意：integrity_check 对大库耗时数秒是正常的；临时拷贝会短暂占用双倍磁盘，
+ * 先校验磁盘余量（至少 2 倍备份文件大小）。
+ */
+function validateRestoreFile(file: string): { seconds: number } {
+  const size = fs.statSync(file).size;
+  try {
+    const st = fs.statfsSync(path.dirname(file));
+    if (st.bfree * st.bsize < size * 2) {
+      throw new Error('磁盘剩余空间不足（恢复校验与备份当前库需要至少 2 倍备份文件大小的余量）');
+    }
+  } catch (e) {
+    if ((e as Error).message.includes('磁盘剩余空间不足')) throw e;
+    /* statfs 不可用时跳过余量检查 */
+  }
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'huimin-restore-'));
+  const tmpFile = path.join(tmpDir, 'candidate.db');
+  const t0 = Date.now();
+  try {
+    fs.copyFileSync(file, tmpFile);
+    const ro = new DatabaseSyncImpl(tmpFile, { readOnly: true });
+    try {
+      const rows = ro.prepare('PRAGMA integrity_check').all() as Array<{ integrity_check: string }>;
+      if (!rows.length || rows.some((r) => r.integrity_check !== 'ok')) {
+        throw new Error('备份文件完整性校验未通过');
+      }
+      const have = new Set(
+        (ro.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name),
+      );
+      const missing = REQUIRED_RESTORE_TABLES.filter((t) => !have.has(t));
+      if (missing.length) throw new Error(`备份文件缺少关键表：${missing.join(',')}`);
+    } finally {
+      ro.close();
+    }
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  return { seconds: (Date.now() - t0) / 1000 };
 }
 
 /**
@@ -156,10 +203,20 @@ const timer=setInterval(()=>{
 /**
  * 恢复调度：写 restore-pending → spawn 重启助手 → 响应送达后退出进程。
  * 不依赖外部启动器：命令行/服务管理器直接启动的服务也能自行完成重启闭环。
+ *
+ * B-安7：写 pending 前先把当前库文件（含 -wal 检查点后，由调用方先做 checkpoint）
+ * 复制为 backups/pre-restore-<时间戳>.db，恢复失败可凭它回滚。
+ * B-安18：退出前先 db.close() 再 process.exit(0)，WAL 已落盘。
  */
-function scheduleRestore(source: string): void {
+function scheduleRestore(source: string, db: DatabaseSync): void {
   const dir = dataDir();
   const target = `${dbFilePath()}.restore-pending`;
+  const now = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}-${crypto.randomBytes(3).toString('hex')}`;
+  const preName = `pre-restore-${stamp}.db`;
+  fs.copyFileSync(dbFilePath(), path.join(backupDir(), preName));
+  console.log(`[恢复] 当前库已备份为 ${preName}，再写入恢复标记。`);
   fs.copyFileSync(source, target);
   // 服务入口：编译产物 dist/server/index.js 相对 server/src 为 ../../dist/server/index.js
   const entry = path.join(__dirname, '..', '..', 'dist', 'server', 'index.js');
@@ -183,11 +240,22 @@ function scheduleRestore(source: string): void {
   // 响应写完后退出：让 HTTP 响应先落到客户端
   setTimeout(() => {
     console.log('[恢复] 数据库备份已排队，进程退出以应用恢复……');
+    // B-安18：恢复退出前先关库，再退出（重启助手等父进程退出后拉起）
+    try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
     process.exit(0);
   }, 400);
 }
 
 export function mountBackup(router: Router, db: DatabaseSync): void {
+  /** B-安4③：备份创建按团队限速（每分钟 100 次），防反复点备份耗磁盘/CPU。阈值调参（2026-11-21，总协调人）：
+   *  全量回归 v027 用例一次连建 40 份备份并裁剪到 30，20 次/分钟会误伤合法批量操作；100 次留有余量，
+   *  仍可拦住失控循环。 */
+  const backupCreateLimit = createWindowLimiter(100, 60_000);
+  /** B-安4②：/backup/restore 密码失败计数（按 IP）：5 次失败后冷却 10 分钟 */
+  const restoreFailures = new Map<string, { count: number; lockedUntil: number }>();
+  const RESTORE_MAX_FAILS = 5;
+  const RESTORE_COOLDOWN_MS = 10 * 60_000;
+
   /** 管理员守卫：所有备份接口仅 admin 角色 */
   const requireAdmin = (req: Request, res: Response): boolean => {
     if (!req.auth) {
@@ -232,6 +300,10 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
   /** 立即备份 */
   router.post('/backup/create', (req, res) => {
     if (!requireAdmin(req, res)) return;
+    // B-安4③：限速检查在鉴权之后、执行之前（被拒的调用不计入配额的是 401/403，429 本身计入一次）
+    if (!backupCreateLimit(`team:${req.auth!.teamId}`)) {
+      return res.status(429).json({ error: '备份创建过于频繁，请稍后再试' });
+    }
     try {
       checkpoint(db);
       const now = new Date();
@@ -247,7 +319,9 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${KEEP_BACKUPS} 份）的旧备份`);
       return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)), pruned: removed.length });
     } catch (e) {
-      return res.status(500).json({ error: `备份失败：${(e as Error).message}` });
+      // A-安4：不把 err.message 回吐给客户端，只写服务端日志
+      console.error('[backup] 创建备份失败:', e);
+      return res.status(500).json({ error: '备份失败，请稍后重试' });
     }
   });
 
@@ -285,22 +359,49 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     try {
       assertSQLiteFile(full);
     } catch (e) {
-      return res.status(400).json({ error: `恢复已取消：${(e as Error).message}` });
+      // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
+      console.error('[backup] 恢复前校验备份文件失败:', e);
+      return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
     }
     // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
     const password = String(req.body.password ?? '');
     if (!password) return res.status(400).json({ error: '请输入当前登录账号的密码以确认恢复' });
+    // B-安4②：失败计数——同一 IP 连续 5 次密码错误后冷却 10 分钟（冷却期内即使密码正确也 429）
+    const ipKey = String(req.ip ?? 'unknown');
+    const failRec = restoreFailures.get(ipKey);
+    if (failRec && failRec.lockedUntil > Date.now()) {
+      return res.status(429).json({ error: '恢复失败次数过多，请 10 分钟后再试' });
+    }
     const row = db.prepare(`SELECT password FROM "user" WHERE id = ?`).get(req.auth!.userId) as
       | { password: string | null }
       | undefined;
     if (!row || !(await verifyPassword(password, row.password))) {
+      const rec = restoreFailures.get(ipKey) ?? { count: 0, lockedUntil: 0 };
+      rec.count++;
+      if (rec.count >= RESTORE_MAX_FAILS) rec.lockedUntil = Date.now() + RESTORE_COOLDOWN_MS;
+      restoreFailures.set(ipKey, rec);
       return res.status(400).json({ error: '密码不正确，恢复已取消' });
     }
+    restoreFailures.delete(ipKey);
+    // B-安7：恢复前完整性校验（integrity_check 对大库耗时数秒是正常的，请耐心等待；
+    // 校验在临时拷贝上进行，不动当前库）
+    let validation: { seconds: number };
     try {
-      scheduleRestore(full);
-      return res.json({ ok: true, message: '恢复已排队：服务即将重启，重启后数据回到所选备份时点。' });
+      validation = validateRestoreFile(full);
     } catch (e) {
-      return res.status(500).json({ error: `恢复失败：${(e as Error).message}` });
+      // A-安4：校验失败的原始错误不回吐，只返回通用文案，详情写服务端日志
+      console.error('[backup] 恢复前完整性校验失败:', e);
+      return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
+    }
+    try {
+      // 校验通过：先检查点再备份当前库、写 pending（任一步失败都能回滚，见 db.ts）
+      checkpoint(db);
+      scheduleRestore(full, db);
+      return res.json({ ok: true, message: `恢复已排队：服务即将重启，重启后数据回到所选备份时点。（恢复前完整性校验已通过，耗时 ${validation.seconds.toFixed(1)} 秒；当前库已备份，恢复失败可回滚。）` });
+    } catch (e) {
+      // A-安4：不把 err.message 回吐给客户端，只写服务端日志
+      console.error('[backup] 恢复排队失败:', e);
+      return res.status(500).json({ error: '恢复失败，请稍后重试' });
     }
   }));
 

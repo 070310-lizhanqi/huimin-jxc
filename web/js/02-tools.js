@@ -4,6 +4,22 @@
 function toast(msg, type = 'success') {
   ElMessage({ message: msg, type, duration: 2400, showClose: false });
 }
+/* ECharts 按需加载（A-前2）：echarts.min.js 约 1MB，只在工作台/报表/账龄三页用到，
+   不再全局加载。首次调用时动态插 <script>，Promise 缓存保证多页/多次调用只加载一次；
+   调用方等 onload 后再 echarts.init。加载失败时 Promise 置空，允许下次重试。 */
+let echartsPromise = null;
+function loadEcharts() {
+  if (typeof window !== 'undefined' && window.echarts) return Promise.resolve(window.echarts);
+  if (echartsPromise) return echartsPromise;
+  echartsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/echarts.min.js?v=0.5.2';
+    s.onload = () => resolve(window.echarts);
+    s.onerror = () => { echartsPromise = null; reject(new Error('图表组件加载失败，请检查网络后重试')); };
+    document.head.appendChild(s);
+  });
+  return echartsPromise;
+}
 async function confirmBox(msg, tip = '提示') {
   try {
     await ElMessageBox.confirm(msg, tip, {
