@@ -127,7 +127,7 @@ async function serverUp() {
   console.log(
     `聚合结果：通过 ${passed} / ${tests.length}` +
       (skipped ? `，跳过 ${skipped}` : '') +
-      (failed.length ? `，失败 ${failed.length}：\n  - ${failed.join('\n  - ')}` : '，全部通过'),
+      (failed.length ? `，失败 ${failed.length}：\n  - ${failed.join('\n  - ')}` : skipped ? '，未全量（有跳过）' : '，全部通过'),
   );
   if (skippedUi.length) {
     console.log(`跳过的是 UI E2E（浏览器无法启动，非代码失败）：${skippedUi.join('、')}`);
