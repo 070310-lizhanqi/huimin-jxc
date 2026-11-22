@@ -43,6 +43,7 @@
       "dist/**",
       "web/**",
       "electron/**",
+      "assets/**",
       "package.json",
       "LICENSE",
       "NOTICE.md"

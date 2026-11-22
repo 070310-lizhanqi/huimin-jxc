@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('zhanhui', {
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   /** 冒烟探针：验证 preload 正常注入。 */
   ping: () => 'pong',
+  /** 下载文件名提示（第二阶段）：见 web/js/01-api.js 里的说明。 */
+  setDownloadFilename: (name) => ipcRenderer.send('app:set-download-filename', name),
   /** 窗口控制。 */
   windowMinimize: () => ipcRenderer.invoke('app:window-minimize'),
   windowMaximize: () => ipcRenderer.invoke('app:window-maximize'),
