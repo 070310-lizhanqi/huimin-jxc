@@ -59,11 +59,44 @@ jobs:
       - name: 构建服务端
         run: pnpm build
 
+      - name: 启动服务端（回归门禁前置）
+        # run-tests.cjs 只测不拉服务：它要求服务已在 127.0.0.1:7741 回答。
+        # 此前流水线只构建不启动，回归门禁 1 秒即失败（v0.5.3 首发事故）。
+        # 服务从仓库根目录启动，数据目录即仓库 data/，与 rebuild-clean 一致。
+        shell: pwsh
+        run: |
+          $p = Start-Process node -ArgumentList 'dist/server/index.js' -PassThru -NoNewWindow
+          $p.Id | Out-File -FilePath server.pid -Encoding ascii
+          Write-Host "服务端已启动，PID $($p.Id)，等待就绪……"
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:7741/api/auth/status' -UseBasicParsing -TimeoutSec 3
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) { Write-Error '服务端 90 秒内未就绪'; exit 1 }
+          Write-Host '服务端已就绪'
+
       - name: 安装 Playwright Chromium（UI 回归用）
         run: npx playwright install chromium
 
       - name: 全量回归门禁（不过不发版）
         run: node tools/run-tests.cjs --with-rounds
+
+      - name: 停止回归用服务端
+        # 必须停掉：后面的安装冒烟要测刚装好的程序（同样起在 7741），
+        # 留着 CI 服务会占端口、甚至让冒烟测到错的服务。
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path server.pid) {
+            $pid = Get-Content server.pid -Raw
+            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            Remove-Item server.pid -ErrorAction SilentlyContinue
+            Write-Host "已停止服务端 PID $pid"
+          }
 
       - name: 构建 Windows 安装包并发布到 Release
         env:
