@@ -1,12 +1,18 @@
 'use strict';
 /**
- * 展惠进销存 —— Electron 主进程（P0 最小骨架）。
+ * 展惠进销存 —— Electron 主进程（第一阶段：最小可用壳）。
  *
- * 流程：node:sqlite 自检 → 单实例锁 → 解析数据目录 → spawn 服务子进程
- * （ELECTRON_RUN_AS_NODE=1，服务端零改动）→ 轮询就绪 → 建窗口加载本地服务地址。
+ * 流程：node:sqlite 自检 → 单实例锁 → 数据目录初始化（含旧目录迁移）
+ * → 托管启动服务子进程（守护重启，最多连续失败 5 次，服务端零改动）
+ * → 轮询就绪 → 按窗口状态建窗口，加载本地服务地址。
+ * 关闭窗口 → 服务子进程优雅停机（SIGTERM，10 秒超时），无残留进程、无端口占用。
  *
  * 安全边界：contextIsolation 开、nodeIntegration 关、不设 webSecurity: false、
  * 不加 CSP（Vue global build 需要 new Function，服务端注释 index.ts:109-111 已说明）。
+ * 导航锁定：同源放行；外链走系统浏览器；window.open 空白页（单据打印预览）
+ * 在应用内默认新窗口打开——第二阶段再接管为带 preload 的打印子窗口。
+ *
+ * 不做（第二/三阶段）：托盘、自动更新、下载接管。不要在这里加。
  *
  * P0 冒烟模式（仅用于验证，不进产品流程）：
  *   electron . --p0-smoke [--p0-shot=/tmp/p0-shot.png]
@@ -23,12 +29,13 @@
  * 正确做法：main() 返回退出码，失败路径 return 1，绝不继续往下走；
  * 顶层再按退出码调 app.exit()，并同时置 process.exitCode 兜底。
  */
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const { resolveDataDir } = require('./data-dir');
-const { startServer, stopServer } = require('./server-runner');
+const { initDataDir } = require('./data-dir');
+const { startServerManaged } = require('./server-runner');
+const { loadWindowState, saveWindowState, isStateVisible } = require('./window-state');
 
 // ---------- 实验 1：node:sqlite 在 Electron 主进程里是否无需重编即可用 ----------
 function checkSqlite() {
@@ -59,25 +66,47 @@ const shotPath = shotArg ? shotArg.slice('--p0-shot='.length) : '/tmp/p0-shot.pn
 const PREFERRED_PORT = Number(process.env.ORANGE_PORT || 7741);
 
 let mainWindow = null;
-let serverChild = null;
+let serverHandle = null;
 let serverPort = null;
+let dataDir = null;
 let quitting = false;
 
 async function shutdown() {
   if (quitting) return;
   quitting = true;
-  if (serverChild) {
-    await stopServer(serverChild);
+  if (serverHandle) {
+    await serverHandle.stop();
     console.log('P0:SERVER_STOPPED');
-    serverChild = null;
+    serverHandle = null;
+  }
+}
+
+/** 当前服务地址的同源判定（端口可能随服务重启变化，读最新值）。 */
+function isAppUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:') return false;
+    if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') return false;
+    return serverPort !== null && Number(u.port) === serverPort;
+  } catch {
+    return false;
   }
 }
 
 function createWindow(url) {
+  const saved = loadWindowState(app.getPath('userData'));
+  const displays = screen.getAllDisplays().map((d) => d.workArea);
+  const useSaved = isStateVisible(saved, displays);
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: useSaved ? saved.width : 1280,
+    height: useSaved ? saved.height : 800,
+    x: useSaved ? saved.x : undefined,
+    y: useSaved ? saved.y : undefined,
     show: false,
+    // Windows 下用应用图标；Linux 下 .ico 可能不被窗口管理器接受，留空用默认图标。
+    icon: process.platform === 'win32'
+      ? path.join(__dirname, '..', 'assets', 'icon-app.ico')
+      : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -85,7 +114,29 @@ function createWindow(url) {
       sandbox: false,
     },
   });
+  if (useSaved && saved.isMaximized) win.maximize();
   win.on('ready-to-show', () => win.show());
+  // 关闭窗口即保存状态（第一阶段：关闭 = 退出应用，托盘常驻在第二阶段再加）。
+  win.on('close', () => {
+    saveWindowState(app.getPath('userData'), {
+      ...win.getBounds(),
+      isMaximized: win.isMaximized(),
+    });
+  });
+  // 导航锁定：同源放行，外链走系统浏览器。
+  win.webContents.on('will-navigate', (event, navUrl) => {
+    if (!isAppUrl(navUrl)) {
+      event.preventDefault();
+      shell.openExternal(navUrl).catch(() => {});
+    }
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // window.open('', '_blank')（单据打印预览 / 对账单打印）是空白页：应用内默认新窗口打开；
+    // 第二阶段再接管为带 preload 的打印子窗口。
+    if (url === 'about:blank' || isAppUrl(url)) return { action: 'allow' };
+    shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
   win.webContents.on('did-finish-load', async () => {
     console.log('P0:WINDOW_LOADED');
     if (!smokeMode) return;
@@ -118,6 +169,50 @@ function createWindow(url) {
   return win;
 }
 
+/** preload 最小 API 的主进程侧实现（检查更新在第三阶段再加）。 */
+function registerIpc() {
+  ipcMain.handle('app:get-version', () => app.getVersion());
+  ipcMain.handle('app:window-minimize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+  });
+  ipcMain.handle('app:window-maximize', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
+  ipcMain.handle('app:window-close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  });
+  ipcMain.handle('app:window-is-maximized', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    return mainWindow.isMaximized();
+  });
+  ipcMain.handle('app:open-data-dir', async () => {
+    if (dataDir) await shell.openPath(dataDir);
+  });
+  ipcMain.handle('app:open-log-file', async () => {
+    if (dataDir) await shell.showItemInFolder(path.join(dataDir, 'server.log'));
+  });
+  ipcMain.handle('app:restart-server', async () => {
+    if (!serverHandle) return null;
+    const port = await serverHandle.restart();
+    if (port !== null) {
+      serverPort = port;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        // 先把端口回给渲染进程再刷新页面：loadURL 会立即销毁当前执行上下文，
+        // 若不等返回就导航，invoke 的 Promise 永远等不到返回值。
+        setTimeout(() => {
+          if (!mainWindow.isDestroyed()) mainWindow.loadURL(`http://127.0.0.1:${port}/`);
+        }, 100);
+      }
+    }
+    return port;
+  });
+  ipcMain.handle('app:quit', () => {
+    app.quit();
+  });
+}
+
 /** 返回进程退出码：0 继续运行，1 致命错误（调用方负责退出，见文件顶注释）。 */
 async function main() {
   if (!checkSqlite()) {
@@ -144,28 +239,44 @@ async function main() {
 
   await app.whenReady();
 
-  ipcMain.handle('app:get-version', () => app.getVersion());
-
-  const dataDir = resolveDataDir(app);
-  console.log(`[main] 数据目录 ${dataDir}`);
+  let dataInit;
   try {
-    const started = await startServer({
+    dataInit = await initDataDir(app);
+  } catch (e) {
+    console.error(`[main] 数据目录初始化失败：${e.message}`);
+    return 1;
+  }
+  dataDir = dataInit.dataDir;
+  console.log(`[main] 数据目录 ${dataDir}（${dataInit.kind}${dataInit.migrated ? '，已迁移旧目录' : ''}${dataInit.fellBack ? '，迁移失败已回退旧目录' : ''}）`);
+
+  try {
+    serverHandle = await startServerManaged({
       dataDir,
       preferredPort: PREFERRED_PORT,
       isPackaged: app.isPackaged,
+      onRestart: (port) => {
+        serverPort = port;
+        console.log(`[main] 服务已重启，端口 ${port}，窗口重载。`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.loadURL(`http://127.0.0.1:${port}/`);
+        }
+      },
+      onFailed: (err) => {
+        dialog.showErrorBox('服务启动失败', `${err.message}\n\n日志：${path.join(dataDir, 'server.log')}`);
+      },
     });
-    serverChild = started.child;
-    serverPort = started.port;
-    console.log(`P0:SERVER_READY port=${serverPort} reused=${started.reused}`);
+    serverPort = serverHandle.getPort();
+    console.log(`P0:SERVER_READY port=${serverPort} reused=${serverHandle.isReused()}`);
   } catch (e) {
     console.error(`[main] 服务启动失败：${e.message}`);
     return 1;
   }
 
+  registerIpc();
   mainWindow = createWindow(`http://127.0.0.1:${serverPort}/`);
 
   app.on('before-quit', async (event) => {
-    if (serverChild && !quitting) {
+    if (serverHandle && !quitting) {
       event.preventDefault();
       await shutdown();
       app.quit();
