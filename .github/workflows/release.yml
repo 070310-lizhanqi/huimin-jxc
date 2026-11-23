@@ -113,13 +113,18 @@ jobs:
         run: npx electron-builder --win --publish always
 
       - name: 安装冒烟：静默安装刚打出来的安装包
+        # electron-builder NSIS 单用户安装的实际落点是 %LOCALAPPDATA%\Programs\<产品名>\
+        # （app-builder-lib 模板 multiUser.nsh 的 setInstallModePerUser：
+        # $INSTDIR = "$LocalAppData\Programs\${APP_FILENAME}"），不是
+        # %LOCALAPPDATA%\<产品名>\。之前按后者找，静默安装明明成功了，
+        # 冒烟却总报“安装后未找到 exe”（#4、#5 两次都栽在这里）。
         shell: pwsh
         run: |
           $setup = Get-ChildItem dist-electron\展惠进销存-Setup-*.exe | Select-Object -First 1
           if (-not $setup) { Write-Error '未找到安装包'; exit 1 }
           Write-Host "静默安装 $($setup.FullName)"
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
-          $exe = Join-Path $env:LOCALAPPDATA '展惠进销存\展惠进销存.exe'
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\展惠进销存\展惠进销存.exe'
           if (-not (Test-Path $exe)) { Write-Error "安装后未找到 $exe"; exit 1 }
           Start-Process $exe
           # 服务起在 127.0.0.1:7741：轮询状态接口，最多等 90 秒。
@@ -141,12 +146,12 @@ jobs:
         run: |
           Get-Process '展惠进销存' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 3
-          $un = Join-Path $env:LOCALAPPDATA '展惠进销存\Uninstall 展惠进销存.exe'
+          $un = Join-Path $env:LOCALAPPDATA 'Programs\展惠进销存\Uninstall 展惠进销存.exe'
           if (Test-Path $un) {
             Start-Process $un -ArgumentList '/S' -Wait
           } else {
             Write-Warning "未找到卸载程序 $un（安装可能失败过，见上一步）"
           }
-          $dir = Join-Path $env:LOCALAPPDATA '展惠进销存'
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\展惠进销存'
           if (Test-Path $dir) { Write-Error "卸载后安装目录仍在：$dir"; exit 1 }
           Write-Host '卸载完成，安装目录已清理'
