@@ -116,16 +116,32 @@ jobs:
         # electron-builder NSIS 单用户安装的实际落点是 %LOCALAPPDATA%\Programs\<产品名>\
         # （app-builder-lib 模板 multiUser.nsh 的 setInstallModePerUser：
         # $INSTDIR = "$LocalAppData\Programs\${APP_FILENAME}"），不是
-        # %LOCALAPPDATA%\<产品名>\。之前按后者找，静默安装明明成功了，
-        # 冒烟却总报“安装后未找到 exe”（#4、#5 两次都栽在这里）。
+        # %LOCALAPPDATA%\<产品名>\。#4、#5 按后者找，静默安装明明成功了，
+        # 冒烟却总报“安装后未找到 exe”。
+        # #6 已按 Programs 找，仍未找到：说明静默安装可能还没落盘就返回了，
+        # 或落到了别处。本步改为：取安装器退出码、轮询 exe 最多 90 秒、
+        # 找不到时打印 Programs 目录与全盘搜索结果再报错，方便定位。
         shell: pwsh
         run: |
           $setup = Get-ChildItem dist-electron\展惠进销存-Setup-*.exe | Select-Object -First 1
           if (-not $setup) { Write-Error '未找到安装包'; exit 1 }
           Write-Host "静默安装 $($setup.FullName)"
-          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          $proc = Start-Process $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          Write-Host "安装程序退出码：$($proc.ExitCode)"
           $exe = Join-Path $env:LOCALAPPDATA 'Programs\展惠进销存\展惠进销存.exe'
-          if (-not (Test-Path $exe)) { Write-Error "安装后未找到 $exe"; exit 1 }
+          $found = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if (Test-Path $exe) { $found = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $found) {
+            Write-Host "== 诊断：$env:LOCALAPPDATA\Programs 下的内容 =="
+            Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs') -ErrorAction SilentlyContinue | Select-Object Name | Format-Table -AutoSize | Out-String | Write-Host
+            Write-Host "== 诊断：全文搜索 展惠进销存.exe =="
+            Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter '展惠进销存.exe' -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize | Out-String | Write-Host
+            Write-Error "安装后未找到 $exe"
+            exit 1
+          }
           Start-Process $exe
           # 服务起在 127.0.0.1:7741：轮询状态接口，最多等 90 秒。
           $ok = $false
