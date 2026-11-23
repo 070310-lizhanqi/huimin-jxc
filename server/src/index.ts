@@ -731,6 +731,20 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
   };
   process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
+  // B-安18：跨平台优雅停机触发。Windows 没有真正的 SIGTERM：Node 的
+  // process.kill(pid, 'SIGTERM') 在 Windows 上等于 TerminateProcess，
+  // SIGTERM 处理器根本跑不到，WAL 检查点和锁清理都不会发生，回归测试
+  // B-安18 在 Windows 上因此长红，桌面端退出时也是同样问题。
+  // 提供一个仅本机 + 需登录的停机接口，走同一套 gracefulShutdown：
+  // 先回 200，再停机（回环地址校验 + requireAuth 双重限制，见下）。
+  api.post('/admin/shutdown', requireAuth, (req, res) => {
+    const remote = req.socket.remoteAddress;
+    if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+      return res.status(403).json({ error: '仅允许本机调用' });
+    }
+    res.json({ ok: true });
+    setTimeout(() => void gracefulShutdown('HTTP'), 50);
+  });
   // keep a reference so the server handle is not GC'd / lint-dead
   void server;
 })();
