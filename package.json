@@ -61,8 +61,7 @@
       "artifactName": "展惠进销存-Setup-${version}.${ext}"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "perMachine": false
@@ -71,7 +70,8 @@
       {
         "owner": "070310-lizhanqi",
         "provider": "github",
-        "repo": "huimin-jxc"
+        "repo": "huimin-jxc",
+        "releaseType": "release"
       }
     ],
     "releaseInfo": {
