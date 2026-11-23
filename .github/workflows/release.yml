@@ -153,8 +153,15 @@ jobs:
             Start-Sleep -Seconds 3
           }
           if (-not $ok) { Write-Error '安装后应用服务 90 秒内未就绪'; exit 1 }
-          $win = Get-Process '展惠进销存' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | Select-Object -First 1
-          if (-not $win) { Write-Error '安装后应用窗口未出现'; exit 1 }
+          # 应用窗口可能比服务晚出现：#8 里服务已就绪，但窗口单次检查
+          # 没等到就报错。改为轮询最多 60 秒。
+          $win = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $win = Get-Process '展惠进销存' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | Select-Object -First 1
+            if ($win) { break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $win) { Write-Error '安装后应用窗口 60 秒内未出现'; exit 1 }
           Write-Host "冒烟通过：窗口标题 $($win.MainWindowTitle)，服务已就绪"
 
       - name: 卸载冒烟产物
