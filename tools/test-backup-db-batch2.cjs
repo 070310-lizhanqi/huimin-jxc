@@ -358,7 +358,13 @@ async function stopServer() {
     // 停机前先确认 WAL 已无未检查点数据残留风险：制造一次写入再停机
     const w = await j('POST', '/customer', { teamId, name: '停机前客户' });
     ok(w.status === 200, '停机前写入成功');
-    process.kill(pid, 'SIGTERM');
+    // 用停机接口触发优雅停机，不用 SIGTERM：Windows 上 process.kill(pid,
+    // 'SIGTERM') 等于 TerminateProcess，服务端 SIGTERM 处理器根本跑不到，
+    // WAL 检查点和锁清理都不会发生，本节在 Windows 上长红。
+    // 接口走同一套 gracefulShutdown（server.close → checkpoint → db.close），
+    // SIGTERM 处理器本身只是一行转发到它，覆盖不丢。
+    const sd = await j('POST', '/admin/shutdown', {});
+    ok(sd.status === 200, '停机接口返回 200', `status=${sd.status} ${JSON.stringify(sd.body)}`);
     let exited = false;
     const t0 = Date.now();
     while (Date.now() - t0 < 15000) {

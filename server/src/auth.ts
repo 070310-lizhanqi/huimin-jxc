@@ -256,6 +256,20 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
+/** 尽力解析登录态：令牌缺失/失效/版本过期都返回 null，不抛 401。
+ * 供 /auth/session 这类探测接口用；与 requireAuth 同一套校验（签名 + 版本），
+ * 只是把「未登录」从 401 降级为 null，由调用方决定返回什么。 */
+export function resolveAuth(req: Request): AuthUser | null {
+  const token = readToken(req);
+  const user = token ? verifyToken(token) : null;
+  if (!user) return null;
+  if (stmtTokenVer) {
+    const row = stmtTokenVer.get(user.userId) as { tokenVer: number } | undefined;
+    if (!row || user.ver !== row.tokenVer) return null;
+  }
+  return user;
+}
+
 /* ---------------- 简单 IP 限速（防登录/注册爆破） ---------------- */
 
 /** 每个 key 的失败记录：Map<key, timestamps[]>，内存态，重启即清零。
@@ -745,6 +759,19 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     // B-前5：登出同时清掉浏览器里的 Cookie（Max-Age=0）
     clearAuthCookie(res);
     return res.json({ ok: true });
+  });
+
+  /** 会话探测（前端启动时用）：永远返回 200，不用 401 区分登录态。
+   * 未登录时浏览器对 401 的请求会在控制台留一条 Failed to load resource，
+   * 登录页每次打开都会多一条报错，UI E2E 的「无 JS 报错」断言因此长红。
+   * 已登录时顺带返回用户信息，与 /auth/me 同形。 */
+  router.get('/auth/session', (req, res) => {
+    const u = resolveAuth(req);
+    if (!u) return res.json({ loggedIn: false });
+    const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(u.teamId) as
+      | { id: number; name: string }
+      | undefined;
+    return res.json({ loggedIn: true, user: u, team });
   });
 
   /** 当前登录信息（前端启动时校验令牌是否还有效） */

@@ -155,21 +155,28 @@ const App = {
 
     async function boot() {
       // B-前5：登录态存在 httpOnly Cookie 里，JS 读不到，无法像以前那样先看
-      // localStorage 再决定是否调 /auth/me；直接问服务端：有 cookie 即登录，
-      // 无 cookie/失效即 401，由 req() 里的 handle401 统一清态并回登录页。
+      // localStorage 再决定是否调接口；直接问服务端 /auth/session：有 cookie
+      // 即登录，返回 200 { loggedIn: true, user, team }；无 cookie/失效也返回
+      // 200 { loggedIn: false }。不用 /auth/me：未登录时它返回 401，浏览器会
+      // 在控制台留一条 Failed to load resource，登录页每次打开都多一条报错。
       try {
-        const me = await api.get('/auth/me');
-        auth.user = me.user;
-        auth.team = me.team;
-        await ensureTeam();
-        switchTo.value = store.teamId;
-        ready.value = true;
+        const s = await api.get('/auth/session');
+        if (s.loggedIn) {
+          auth.user = s.user;
+          auth.team = s.team;
+          await ensureTeam();
+          switchTo.value = store.teamId;
+          ready.value = true;
+        } else {
+          ready.value = false;
+          auth.user = null; auth.team = null;
+          if (location.hash !== '#/login') location.hash = '#/login';
+        }
       } catch (e) {
-        // 401 已在 req() 里由 handle401 处理（清态 + 回登录页），这里不再 toast，
-        // 否则每次未登录打开页面都会弹一次；非 401（如网络抖动/500）才提示，
-        // 并回登录页可重试，不让页面永久卡「加载中…」
+        // 会话探测本身不返回 401，到这里只剩网络抖动/500：提示后回登录页重试，
+        // 不让页面永久卡「加载中…」
         const msg = String((e && e.message) || '');
-        if (!msg.includes('未登录') && !msg.includes('登录凭证已变更')) toast('登录状态校验失败：' + msg, 'error');
+        toast('登录状态校验失败：' + msg, 'error');
         ready.value = false;
         auth.user = null; auth.team = null;
         if (location.hash !== '#/login') location.hash = '#/login';
