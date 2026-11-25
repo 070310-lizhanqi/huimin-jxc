@@ -22,11 +22,19 @@ const LedgerPage = {
         const q = { teamId: store.teamId, page: page.value, rows: rows.value };
         if (productId.value) q.productId = productId.value;
         if (warehouseId.value) q.warehouseId = warehouseId.value;
-        if (fRange.value?.length === 2) { q.from = fRange.value[0]; q.to = fRange.value[1]; }
+        if (fRange.value?.length === 2) {
+          q.from = fRange.value[0];
+          q.to = fRange.value[1];
+        }
         const r = await api.get('/stock/ledger', q);
         // 兼容旧接口返回数组
-        if (Array.isArray(r)) { list.value = r; total.value = r.length; }
-        else { list.value = r.rows || []; total.value = r.total || 0; }
+        if (Array.isArray(r)) {
+          list.value = r;
+          total.value = r.length;
+        } else {
+          list.value = r.rows || [];
+          total.value = r.total || 0;
+        }
         loadDocNos();
       } catch (e) {
         toast('库存流水加载失败：' + e.message, 'error');
@@ -36,39 +44,68 @@ const LedgerPage = {
     }
 
     async function loadDocNos() {
-      const ids = [...new Set(list.value.map((l) => l.refDocId).filter(Boolean))]
-        .filter((id) => !docNos.value[id]);
+      const ids = [...new Set(list.value.map((l) => l.refDocId).filter(Boolean))].filter((id) => !docNos.value[id]);
       if (!ids.length) return;
       try {
         const map = await api.get('/doc/bill-nos', { teamId: store.teamId, ids: ids.join(',') });
         const next = { ...docNos.value };
-        for (const id of ids) next[id] = map?.[String(id)]?.billNo ?? ('#' + id);
+        for (const id of ids) next[id] = map?.[String(id)]?.billNo ?? '#' + id;
         docNos.value = next;
-      } catch { /* 单号只是展示信息，失败不影响流水本身 */ }
+      } catch {
+        /* 单号只是展示信息，失败不影响流水本身 */
+      }
     }
 
     function resetFilter() {
-      productId.value = null; warehouseId.value = null; fRange.value = [];
-      page.value = 1; load();
+      productId.value = null;
+      warehouseId.value = null;
+      fRange.value = [];
+      page.value = 1;
+      load();
     }
-    function onPage(p) { page.value = p; load(); }
-    function onSize(n) { rows.value = n; pageSizeSave('ledger', n); page.value = 1; load(); }
-    function search() { page.value = 1; load(); }
+    function onPage(p) {
+      page.value = p;
+      load();
+    }
+    function onSize(n) {
+      rows.value = n;
+      pageSizeSave('ledger', n);
+      page.value = 1;
+      load();
+    }
+    function search() {
+      page.value = 1;
+      load();
+    }
 
     function doExport() {
       if (!list.value.length) return toast('没有可导出的流水', 'warning');
       const prodName = (id) => byId(store.products, id)?.name ?? '#' + id;
       const whName = (id) => byId(store.warehouses, id)?.name ?? '—';
       const head = [
-        { key: 'createdAt', label: '时间' }, { key: 'prod', label: '商品' }, { key: 'wh', label: '仓库' },
-        { key: 'batchNo', label: '批次' }, { key: 'dir', label: '方向' }, { key: 'qty', label: '数量' },
-        { key: 'cost', label: '成本单价(元)' }, { key: 'doc', label: '关联单据' },
+        { key: 'createdAt', label: '时间' },
+        { key: 'prod', label: '商品' },
+        { key: 'wh', label: '仓库' },
+        { key: 'batchNo', label: '批次' },
+        { key: 'dir', label: '方向' },
+        { key: 'qty', label: '数量' },
+        { key: 'cost', label: '成本单价(元)' },
+        { key: 'doc', label: '关联单据' },
       ];
-      const mapRow = (l) => moneyRow({
-        createdAt: l.createdAt, prod: prodName(l.productId), wh: whName(l.warehouseId),
-        batchNo: l.batchNo || '—', dir: l.direction === 'in' ? '入库' : '出库', qty: l.qty,
-        cost: l.unitCost, doc: docNos.value[l.refDocId] ?? ('#' + l.refDocId),
-      }, ['cost']);
+      const mapRow = (l) =>
+        moneyRow(
+          {
+            createdAt: l.createdAt,
+            prod: prodName(l.productId),
+            wh: whName(l.warehouseId),
+            batchNo: l.batchNo || '—',
+            dir: l.direction === 'in' ? '入库' : '出库',
+            qty: l.qty,
+            cost: l.unitCost,
+            doc: docNos.value[l.refDocId] ?? '#' + l.refDocId,
+          },
+          ['cost'],
+        );
       // 分页时只导当前页容易误解（帮助文档承诺「导出当前筛选结果」）：
       // 与单据列表页同款交互——超过一页就询问，确认后走后端批量导出接口
       // （/stock/ledger/export，一次请求返回筛选结果 CSV），不再串行逐页拉取（B-前4）。
@@ -82,9 +119,14 @@ const LedgerPage = {
             const q = new URLSearchParams({ teamId: String(store.teamId) });
             if (productId.value) q.set('productId', String(productId.value));
             if (warehouseId.value) q.set('warehouseId', String(warehouseId.value));
-            if (fRange.value?.length === 2) { q.set('from', fRange.value[0]); q.set('to', fRange.value[1]); }
+            if (fRange.value?.length === 2) {
+              q.set('from', fRange.value[0]);
+              q.set('to', fRange.value[1]);
+            }
             await api.download(`/stock/ledger/export?${q.toString()}`, `库存流水_全部${total.value}条.csv`);
-          } catch (e) { toast('导出失败：' + e.message, 'error'); }
+          } catch (e) {
+            toast('导出失败：' + e.message, 'error');
+          }
         });
         return;
       }
@@ -93,8 +135,24 @@ const LedgerPage = {
 
     onMounted(load);
     return {
-      productId, warehouseId, fRange, list, total, page, rows, loading, viewerId, docNos,
-      load, resetFilter, onPage, onSize, search, doExport, store, fmtMoney,
+      productId,
+      warehouseId,
+      fRange,
+      list,
+      total,
+      page,
+      rows,
+      loading,
+      viewerId,
+      docNos,
+      load,
+      resetFilter,
+      onPage,
+      onSize,
+      search,
+      doExport,
+      store,
+      fmtMoney,
     };
   },
   template: `

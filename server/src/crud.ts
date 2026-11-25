@@ -61,7 +61,8 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       const n = Math.round(Number(s));
       if (!Number.isFinite(n)) return { error: `「${field}」必须是数字（单位：分）` };
       if (field !== 'balance' && n < 0) return { error: `「${field}」不能为负数` };
-      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX) return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
+      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX)
+        return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
       return { value: n };
     }
     if (QTY_FIELDS.has(field)) {
@@ -85,7 +86,8 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
     if (INT_CENTS_FIELDS.has(field)) {
       const n = Math.round(v);
       if (field !== 'balance' && n < 0) return { error: `「${field}」不能为负数` };
-      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX) return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
+      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX)
+        return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
       return { value: n };
     }
     if (QTY_FIELDS.has(field)) {
@@ -125,7 +127,8 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
 
   router.get(`/${cfg.table}`, (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!Number.isInteger(teamId) || teamId <= 0) return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    if (!Number.isInteger(teamId) || teamId <= 0)
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
     const kw = String(req.query.kw ?? '').trim();
     const page = Math.max(1, Number(req.query.page ?? 1) || 1);
     /**
@@ -198,9 +201,7 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
         }
         let info: { lastInsertRowid: number | bigint };
         try {
-          info = db
-            .prepare(`INSERT INTO ${cfg.table} (teamId, ${cols}) VALUES (?, ${holders})`)
-            .run(teamId, ...values);
+          info = db.prepare(`INSERT INTO ${cfg.table} (teamId, ${cols}) VALUES (?, ${holders})`).run(teamId, ...values);
         } catch {
           throw new ValidationError('保存失败：名称可能已存在');
         }

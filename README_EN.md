@@ -63,7 +63,7 @@ Copy `.env.example` to `.env` before customizing (`.env` is gitignored). Startup
 | `ORANGE_REQUIRE_SECRET` | `0` | Set `1` to forbid ephemeral/auto-persisted secret fallback |
 | `ORANGE_ALLOW_HOSTS` | Empty | Comma-separated extra allowed `Host` domains for reverse proxies or tunnels |
 | `ORANGE_COOKIE_SECURE` | `0` | Cookie `Secure` attribute: `0` \| `1` \| `auto` (`auto` follows `X-Forwarded-Proto=https`) |
-| `ORANGE_TRUST_PROXY` | `0` | Set `1` behind TLS-terminating reverse proxies to trust `X-Forwarded-*` headers |
+| `ORANGE_TRUST_PROXY` | `0` | Trusted reverse-proxy hop count (`0`=disabled, `1..20`=hop count, `false`/`true` aliases supported); set `1` behind a single Nginx/Caddy TLS proxy |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `LOG_FORMAT` | `pretty` (`json` in `production`) | `pretty` \| `json` |
 | `BACKUP_KEEP_COUNT` | `30` | Retained rolling backup snapshots (`1`–`365`) |

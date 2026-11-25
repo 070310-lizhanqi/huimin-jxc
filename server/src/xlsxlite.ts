@@ -109,7 +109,8 @@ function readCentralDirectory(buf: Buffer): ZipEntryMeta[] {
 /** 解压单个条目（按元数据定位本地头并取数据） */
 function inflateEntry(buf: Buffer, meta: ZipEntryMeta): Buffer {
   const { name, method, compSize, localOffset } = meta;
-  if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`ZIP 本地头损坏：${name}`);
+  if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== 0x04034b50)
+    throw new Error(`ZIP 本地头损坏：${name}`);
   const lNameLen = buf.readUInt16LE(localOffset + 26);
   const lExtraLen = buf.readUInt16LE(localOffset + 28);
   const dataStart = localOffset + 30 + lNameLen + lExtraLen;
@@ -177,7 +178,9 @@ function parseSharedStrings(xml: string): string[] {
   }
   for (const si of sis) {
     const ts = si.match(/<t(?:\s[^>]*)?>[\s\S]*?<\/t>/g) ?? [];
-    out.push(ts.map((x) => decodeXmlEntities(stripCdata(x.replace(/<t(?:\s[^>]*)?>/, '').replace(/<\/t>/, '')))).join(''));
+    out.push(
+      ts.map((x) => decodeXmlEntities(stripCdata(x.replace(/<t(?:\s[^>]*)?>/, '').replace(/<\/t>/, '')))).join(''),
+    );
   }
   return out;
 }
@@ -237,9 +240,7 @@ export function readXlsx(buf: Buffer, opts: ReadSpreadsheetOptions = {}): { shee
   const sheetFiles = unzip(buf, (name) => wantedPaths.has(name));
   // 共享字符串表只在确有 sheet 用到 t="s" 时才解压
   const needsShared = [...sheetFiles.values()].some((b) => b.toString('utf8').includes('t="s"'));
-  const sharedFiles = needsShared
-    ? unzip(buf, (name) => name === 'xl/sharedStrings.xml')
-    : new Map<string, Buffer>();
+  const sharedFiles = needsShared ? unzip(buf, (name) => name === 'xl/sharedStrings.xml') : new Map<string, Buffer>();
   const shared = sharedFiles.has('xl/sharedStrings.xml')
     ? parseSharedStrings(sharedFiles.get('xl/sharedStrings.xml')!.toString('utf8'))
     : [];
@@ -277,7 +278,9 @@ function backfillShared(xml: string, shared: string[], maxRows?: number): string
       if (!cellTag.endsWith('/>')) {
         if (t === 'inlineStr') {
           const ts = cellTag.match(/<t(?:\s[^>]*)?>[\s\S]*?<\/t>/g) ?? [];
-          value = ts.map((x) => decodeXmlEntities(stripCdata(x.replace(/<t(?:\s[^>]*)?>/, '').replace(/<\/t>/, '')))).join('');
+          value = ts
+            .map((x) => decodeXmlEntities(stripCdata(x.replace(/<t(?:\s[^>]*)?>/, '').replace(/<\/t>/, ''))))
+            .join('');
         } else {
           const v = cellTag.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/);
           if (v) {
@@ -336,13 +339,16 @@ function parseCsvText(text: string, delim: string, maxRows?: number): string[][]
     const ch = text[i];
     if (inQuotes) {
       if (ch === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else inQuotes = false;
       } else field += ch;
     } else if (ch === '"') {
       inQuotes = true;
     } else if (ch === delim) {
-      row.push(field); field = '';
+      row.push(field);
+      field = '';
     } else if (ch === '\n' || ch === '\r') {
       if (ch === '\r' && text[i + 1] === '\n') i++;
       finishRow();
@@ -375,7 +381,10 @@ export function readCsv(buf: Buffer, maxRows?: number): { rows: string[][] } {
 }
 
 /** 统一入口：按魔数识别 xlsx / CSV，返回全部工作表（CSV 视为单表） */
-export function readSpreadsheet(buf: Buffer, opts: ReadSpreadsheetOptions = {}): { kind: 'xlsx' | 'csv'; sheets: SheetData[] } {
+export function readSpreadsheet(
+  buf: Buffer,
+  opts: ReadSpreadsheetOptions = {},
+): { kind: 'xlsx' | 'csv'; sheets: SheetData[] } {
   if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
     return { kind: 'xlsx', sheets: readXlsx(buf, opts).sheets };
   }

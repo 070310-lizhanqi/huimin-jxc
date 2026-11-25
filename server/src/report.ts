@@ -8,12 +8,7 @@ import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
 import { sendError } from './infra/errors';
 import { parseOptionalPositiveInt } from './infra/validate';
-import {
-  allocateDocDiscounts,
-  roundHalfAwayFromZero,
-  roundQty,
-  type DiscountableLine,
-} from './shared/money';
+import { allocateDocDiscounts, roundHalfAwayFromZero, roundQty, type DiscountableLine } from './shared/money';
 
 export { allocateDocDiscounts, roundHalfAwayFromZero, type DiscountableLine };
 
@@ -70,7 +65,10 @@ function rangeOf(req: Request): { from: string; to: string } {
  *  不做静默回落（回落会把错账伪装成「本月没数据」，用户无从察觉参数没生效）。 */
 function strictRange(req: Request): { from: string; to: string; error: string | null } {
   const { from, to } = rangeOf(req);
-  for (const [label, v] of [['from', from], ['to', to]] as const) {
+  for (const [label, v] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
     const err = validBizDate(v);
     if (err) return { from, to, error: `${label} 参数非法：${err}` };
   }
@@ -93,7 +91,13 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const partnerRes = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
     if (!partnerRes.ok) return sendError(req, res, 400, partnerRes.error, 'VALIDATION_ERROR');
     const { from, to } = range;
-    const conds = ['d.teamId = ?', "d.status = 'audit'", "d.type IN ('stockout', 'sret')", 'd.date >= ?', 'd.date <= ?'];
+    const conds = [
+      'd.teamId = ?',
+      "d.status = 'audit'",
+      "d.type IN ('stockout', 'sret')",
+      'd.date >= ?',
+      'd.date <= ?',
+    ];
     const args: Value[] = [teamId, from, to];
     if (partnerRes.value !== null) {
       conds.push('d.partnerId = ?');
@@ -116,8 +120,8 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       (s, r) => ({
         saleAmount: s.saleAmount + r.saleAmount,
         retAmount: s.retAmount + r.retAmount,
-        saleQty: s.saleQty + r.saleQty,
-        retQty: s.retQty + r.retQty,
+        saleQty: roundQty(s.saleQty + r.saleQty),
+        retQty: roundQty(s.retQty + r.retQty),
         orderCount: s.orderCount + r.orderCount,
       }),
       { saleAmount: 0, retAmount: 0, saleQty: 0, retQty: 0, orderCount: 0 },
@@ -169,10 +173,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       number,
       { prodName: string; unit: string | null; spec: string | null; purchasePrice: number }
     >();
-    const aggMap = new Map<
-      number,
-      { saleQty: number; retQty: number; saleAmount: number; retAmount: number }
-    >();
+    const aggMap = new Map<number, { saleQty: number; retQty: number; saleAmount: number; retAmount: number }>();
     for (const l of lines) {
       if (!prodMeta.has(l.productId)) {
         prodMeta.set(l.productId, {

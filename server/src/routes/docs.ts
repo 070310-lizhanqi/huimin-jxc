@@ -41,7 +41,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.get('/doc/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
-    const { conds, args, statusArgIndex } = docListFilter(req, teamId);
+    const filter = docListFilter(req, teamId);
+    if (filter.error) return sendError(req, res, 400, filter.error);
+    const { conds, args, statusArgIndex } = filter;
     const page = Math.max(1, Number(req.query.page ?? 1) || 1);
     const rows = Math.min(200, Math.max(1, Number(req.query.rows ?? 20) || 20));
     const total = db.prepare(`SELECT COUNT(*) AS c FROM doc d WHERE ${conds.join(' AND ')}`).get(...args) as {
@@ -77,7 +79,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.get('/doc/export', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
-    const { conds, args } = docListFilter(req, teamId);
+    const filter = docListFilter(req, teamId);
+    if (filter.error) return sendError(req, res, 400, filter.error);
+    const { conds, args } = filter;
     const where = conds.join(' AND ');
     const total = db.prepare(`SELECT COUNT(*) AS c FROM doc d WHERE ${where}`).get(...args) as { c: number };
     if (total.c > MAX_EXPORT_ROWS) {
@@ -226,8 +230,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         .all(id, teamId) as Array<{ productId: number; qty: number }>;
       const convMap = new Map<number, number>(converted.map((r) => [r.productId, r.qty]));
       fulfillment = (items as Array<{ productId: number; qty: number }>).map((it) => {
-        const c = convMap.get(it.productId) ?? 0;
-        return { productId: it.productId, ordered: it.qty, converted: c, remain: roundQty(it.qty - c) };
+        const avail = convMap.get(it.productId) ?? 0;
+        const used = roundQty(Math.min(Math.max(0, it.qty), Math.max(0, avail)));
+        convMap.set(it.productId, roundQty(avail - used));
+        return { productId: it.productId, ordered: it.qty, converted: used, remain: roundQty(it.qty - used) };
       });
     }
     return res.json({ doc, items, fulfillment });
@@ -413,7 +419,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         const fulfilled = new Map<number, number>(fulfilledRows.map((r) => [r.productId, r.qty]));
         const remainItems = items
           .map((it) => {
-            const remain = roundQty(it.qty - (fulfilled.get(it.productId) ?? 0));
+            const avail = fulfilled.get(it.productId) ?? 0;
+            const consume = roundQty(Math.min(Math.max(0, it.qty), Math.max(0, avail)));
+            fulfilled.set(it.productId, roundQty(avail - consume));
+            const remain = roundQty(it.qty - consume);
             return { ...it, qty: remain };
           })
           .filter((it) => it.qty > 0);
@@ -508,9 +517,9 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     try {
       withImmediateTx(db, () => {
         billNo = nextBillNo(db, teamId, doc.type);
-        const totalQty = (
-          db.prepare(`SELECT COALESCE(SUM(qty), 0) AS q FROM doc_item WHERE docId = ?`).get(id) as { q: number }
-        ).q;
+        const totalQty = roundQty(
+          (db.prepare(`SELECT COALESCE(SUM(qty), 0) AS q FROM doc_item WHERE docId = ?`).get(id) as { q: number }).q,
+        );
         const grossAmount = (
           db.prepare(`SELECT COALESCE(SUM(amount), 0) AS a FROM doc_item WHERE docId = ?`).get(id) as { a: number }
         ).a;

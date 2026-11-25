@@ -8,8 +8,15 @@ app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
 app.config.errorHandler = (err, _instance, info) => {
   console.error('[vue]', info, err);
   try {
-    ElMessage({ message: '页面出错：' + String((err && err.message) || err).slice(0, 160), type: 'error', duration: 5000, showClose: true });
-  } catch { /* ignore */ }
+    ElMessage({
+      message: '页面出错：' + String((err && err.message) || err).slice(0, 160),
+      type: 'error',
+      duration: 5000,
+      showClose: true,
+    });
+  } catch {
+    /* ignore */
+  }
 };
 for (const [name, comp] of Object.entries(ElementPlusIconsVue)) app.component(name, comp);
 app.component('doc-viewer', DocViewer);

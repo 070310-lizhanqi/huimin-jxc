@@ -126,6 +126,8 @@ export default tseslint.config(
         store: 'readonly',
         api: 'readonly',
         logout: 'readonly',
+        handle401: 'readonly',
+        nextRequestId: 'readonly',
         nav: 'readonly',
         route: 'readonly',
         toast: 'readonly',

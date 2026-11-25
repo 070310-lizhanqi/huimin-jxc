@@ -26,7 +26,7 @@ export interface AppConfig {
   readonly requireSecret: boolean;
   readonly allowHosts: readonly string[];
   readonly cookieSecure: CookieSecureMode;
-  readonly trustProxy: boolean;
+  readonly trustProxy: number;
   readonly logLevel: LogLevel;
   readonly logFormat: LogFormat;
   readonly backupKeepCount: number;
@@ -127,6 +127,22 @@ function parseIntRange(
     return defaultValue;
   }
   return num;
+}
+
+function parseTrustProxy(raw: string | undefined, errors: string[]): number {
+  if (raw === undefined || raw.trim() === '') return 0;
+  const v = raw.trim().toLowerCase();
+  if (v === 'false') return 0;
+  if (v === 'true') return 1;
+  return parseIntRange(raw, 0, 0, 20, 'ORANGE_TRUST_PROXY', errors);
+}
+
+export function resolveStoragePaths(rawEnv: NodeJS.ProcessEnv = process.env): { dataDir: string; dbPath: string } {
+  const rawDataDir = rawEnv.ORANGE_DATA_DIR?.trim();
+  const resolvedDataDir = rawDataDir ? path.resolve(rawDataDir) : path.join(process.cwd(), 'data');
+  const rawDbPath = rawEnv.ORANGE_DB_PATH?.trim();
+  const dbPath = rawDbPath ? path.resolve(rawDbPath) : path.join(resolvedDataDir, 'huimin-clone.db');
+  return { dataDir: resolvedDataDir, dbPath };
 }
 
 function loadOrCreateLocalSecret(resolvedDataDir: string): { secret: string; created: boolean } {
@@ -247,11 +263,7 @@ export function validateConfig(rawEnv: NodeJS.ProcessEnv, options: ValidateConfi
   const bindHost = (rawEnv.ORANGE_BIND ?? '127.0.0.1').trim() || '127.0.0.1';
   const isLoopbackBind = isLoopbackAddress(bindHost);
 
-  const rawDataDir = rawEnv.ORANGE_DATA_DIR?.trim();
-  const resolvedDataDir = rawDataDir ? path.resolve(rawDataDir) : path.join(process.cwd(), 'data');
-
-  const rawDbPath = rawEnv.ORANGE_DB_PATH?.trim();
-  const dbPath = rawDbPath ? path.resolve(rawDbPath) : path.join(resolvedDataDir, 'huimin-clone.db');
+  const { dataDir: resolvedDataDir, dbPath } = resolveStoragePaths(rawEnv);
 
   const requireSecret = parseBooleanFlag(rawEnv.ORANGE_REQUIRE_SECRET, false, 'ORANGE_REQUIRE_SECRET', errors);
 
@@ -266,7 +278,7 @@ export function validateConfig(rawEnv: NodeJS.ProcessEnv, options: ValidateConfi
   }
   const cookieSecure = (VALID_COOKIE_SECURE.has(rawCookieSecure) ? rawCookieSecure : '0') as CookieSecureMode;
 
-  const trustProxy = parseBooleanFlag(rawEnv.ORANGE_TRUST_PROXY, false, 'ORANGE_TRUST_PROXY', errors);
+  const trustProxy = parseTrustProxy(rawEnv.ORANGE_TRUST_PROXY, errors);
 
   const rawLogLevel = (rawEnv.LOG_LEVEL ?? 'info').trim().toLowerCase() || 'info';
   if (!VALID_LOG_LEVELS.has(rawLogLevel)) {

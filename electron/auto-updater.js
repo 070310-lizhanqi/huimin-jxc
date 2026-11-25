@@ -41,8 +41,12 @@ function isSmokeNoDialog() {
 
 /** 纯数字三段版本号比较（本仓库版本号就是 x.y.z，不引入 semver 依赖）。 */
 function compareVersions(a, b) {
-  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  const pa = String(a)
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0);
+  const pb = String(b)
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i++) {
     if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
   }

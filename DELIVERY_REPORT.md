@@ -10,7 +10,7 @@
 
 | 维度 | 升级前 (`master` `e5983be`) | 升级后 (`feat/enterprise-upgrade`) |
 | --- | --- | --- |
-| **代码规范与质量门禁** | 仅有 `tsc`，无 ESLint、无 Prettier、无 `.editorconfig` | 落地 `eslint.config.mjs`（覆盖 `server/`、`electron/`、`web/js/`，禁止显式 `any` / `no-eval`）、`.prettierrc.json`、`.editorconfig` 与 `lint` / `typecheck` / `format:check` 脚本 |
+| **代码规范与质量门禁** | 仅有 `tsc`，无 ESLint、无 Prettier、无 `.editorconfig` | 落地 `eslint.config.mjs`（覆盖 `server/`、`electron/`、`web/js/`，禁止显式 `any` / `no-eval`）、`.prettierrc.json`、`.editorconfig` 与完整 `lint` / `typecheck` / `format:check`（覆盖 `server/`、`electron/`、`web/js/`、`web/css/`）脚本 |
 | **配置与密钥安全** | 存在硬编码默认 JWT 密钥常量；缺环境变量模板与启动校验 | 移除源码明文密钥，新建 `server/src/config/env.ts` 校验全部配置与弱密钥并快速失败；提供完整 `.env.example`；仅本机回环开发模式自动生成并持久化 `0o600` `.jwt-secret` |
 | **后端架构分层** | `docs.ts` 单文件 >2000 行混杂 HTTP 路由、库存/FIFO/单据业务、SQL 与共享计算；`index.ts` 与中间件耦合 | 拆分装配层 (`app.ts`)、路由层 (`routes/{docs,archives,audit,health}.ts`)、服务层 (`services/{doc-service,stock-service,product-import-service}.ts`)、基础设施层 (`infra/`)、中间件 (`middleware/`) 与公共数学 (`shared/{money,csv}.ts`) |
 | **精度、并发与幂等** | 局部浮点运算分散、缺少统一立即写事务封装；部分写接口无请求幂等键 | `shared/money.ts` 统一数量 `10_000` 倍整型缩放与整单分摊守恒；`withImmediateTx` 统一 `BEGIN IMMEDIATE` 与 `SQLITE_BUSY -> 503`；`doc/create` 与 `settlement/create` 支持 24h `Idempotency-Key` 持久化与载荷冲突 `409` |
@@ -20,7 +20,7 @@
 | **前端工程化与可访问性** | `web/index.html` 内联 740+ 行 CSS；登录页使用 `v-html` 渲染 SVG；缺少全局错误码/追踪 ID 透传与弹窗 Esc 关闭 | CSS 抽离至 `web/css/app.css`；移除 `v-html` 静态化内联 SVG；`01-api.js` 自动注入 `X-Request-Id`；补充 `:focus-visible`、`aria-label`、弹窗 `Escape` 关闭与非管理员改密可见性修复 |
 | **可观测性与探针** | 30 余处零散 `console.log`/`console.error`，无脱敏与请求链路追踪，无健康检查端点 | 新增 `infra/logger.ts`（`AsyncLocalStorage` 透传 `requestId/teamId/userId`、支持 `LOG_LEVEL`/`LOG_FORMAT=json|pretty`、递归敏感字段脱敏），替换全部服务端 `console.*`；新增 `/health`、`/ready`（及 `/api/*`）探针 |
 | **交付与 CI/CD** | 无容器化交付配置，仅有 Windows Release 流程 | 新增多阶段非 root `Dockerfile`、`.dockerignore`、`docker-compose.yml`、`.github/workflows/ci.yml`；重写 `README.md`、`README_EN.md` 并新增 `ARCHITECTURE.md` |
-| **自动化测试覆盖** | 仅手工驱动回归脚本（`tools/`），无单元测试或进程内集成测试 | 新增 `node:test` 单元测试 `20/20` + 进程内集成测试 `8/8`，且原有 `tools/run-tests.cjs` 全量回归 `45/45` 与 `test-round1..4` 全部通过（含 Playwright UI E2E） |
+| **自动化测试覆盖** | 仅手工驱动回归脚本（`tools/`），无单元测试或进程内集成测试 | 新增 `node:test` 单元测试 `22/22` + 进程内集成测试 `13/13`，且原有 `tools/run-tests.cjs` 在 `NODE_ENV=production` 下全量回归 `45/45` 与 `test-round1..4` 全部通过（含 Playwright UI E2E） |
 
 ---
 
@@ -55,38 +55,40 @@
   - 新增 `observability.unit.test.ts` (`3` 项) 与 `health-observability.test.ts` (`2` 项)。
   - 交付多阶段非 root `Dockerfile`、`.dockerignore`、`docker-compose.yml`、`.github/workflows/ci.yml`、`ARCHITECTURE.md`，并同步更新 `README.md` 与 `README_EN.md`。
 
-### Phase 5：独立红队终审、缺陷修复与全量回归
-- 以苛刻外部审计视角对 `master..HEAD` 执行全量静态、边界与对抗测试，修复了复审中暴露的多项高/中危边界问题：
-  - 容器与 CI 安装契约：`Dockerfile` 补齐复制 `pnpm-workspace.yaml` 与 `.npmrc`，`Dockerfile` 与 `.github/workflows/ci.yml` 统一升级至 `pnpm@12.23.0`，并在离线沙箱验证 `pnpm install --frozen-lockfile --offline` 通过。
-  - 配置与边界精度：`env.ts` 支持 `PORT` 回落历史 `ORANGE_PORT`；`shared/money.ts` 修复 `roundQty`/`sumQty` 负数非对称舍入与 `-0`；`doc-service.ts`/`routes/docs.ts`/`product-import-service.ts` 拦截原型链键名（`Object.hasOwn`）、非对象项、极小数量归零、`date: ""` 空串落库、`doc/audit` 非法 ID（返回 `400`）与并发明细锁内重放 `Idempotent-Replayed` 头及 `doc/void` 错误透出。
-  - 结算、档案与传统路由加固：`settlement.ts`、`crud.ts`、`routes/archives.ts`、`auth.ts`、`backup.ts`、`settings.ts`、`price.ts`（修复 `kw` 搜索时 `COUNT(*)` 漏 `JOIN product`）、`docimport.ts`、`stock.ts`、`report.ts`、`jxc-report.ts`、`aging.ts`、`dashboard.ts`、`safe-handler.ts` 统一收敛至 `{ error, code, requestId }`，修复结算更新/删除锁外读取与校验、`crud` 负价格与非法外键、及 `requireAuth` 日志 `teamId`/`userId` 透传与前端 `01-api.js` `download` 401/requestId 对齐。
-  - 文档同步：修正 `ARCHITECTURE.md`、`README.md`、`README_EN.md` 与真实路由、成本计算及 `setting` 表存储一致。
-- 按新版 `README.md` 从零执行依赖漏洞审计、Lint、严格类型检查、格式化检查、构建、单元与集成测试、独立库迁移/幂等种子脚本、以及隔离数据目录全量 `45/45` 业务/UI 端到端回归、`test-round1..4` 与实时浏览器零报错冒烟验证。
+### Phase 5：独立红队终审、缺陷复核修复与全量回归
+- 以苛刻外部审计视角对 `master..HEAD` 执行多轮全量静态、边界与对抗审查，彻底修复了包括第二轮红队复审（`[H-1]`、`[M-1]`–`[M-10]`、`[L-1]`–`[L-4]`）在内的全部核心问题：
+  - **批量导入原子事务与防重 (`[H-1]`)**：`docimport.ts` 为 `autoCreate=1` 补齐 `admin` RBAC 拦截（`403`）；将 `autoCreate` 建档、单据落库与审计日志整体包裹进 `withImmediateTx` 单事务并检查 `MAX_TOTAL_AMOUNT_CENTS`，任意失败全量回滚无孤儿档案；补齐 `prodByBarcode` 同批更新，并在 `db.ts` 增加部分唯一索引 `idx_doc_team_type_src_billno_uniq` 兜底并发防重。
+  - **盘点精准单元格与零差额作废 (`[M-1]`, `[M-2]`)**：`stock-service.ts` 对盘点单启用 `exactCell = true`，使 `batchNo IS NULL`/`reservoirId IS NULL` 精准扣减空单元格而不误伤已有批次库存（保留非盘点单按空筛选通配语义）；允许已审核零差额盘点单（`COALESCE(postQty, 0) = 0`）正常作废冲回。
+  - **往来单据配对校验与串账隔离 (`[M-3]`)**：`doc-service.ts`、`stock-service.ts` 与 `tools/regression.cjs` 统一严格校验单据 `type <-> partnerType`（如 `outapply`/`sret` 仅 `'cus'`，`pin` 仅 `'ven'`）；`jxc-report.ts`（`/report/statement`）与 `aging.ts`（`/report/aging`）查询 `doc` 补充 `AND partnerType = ?`，杜绝 `customer.id === vendor.id` 撞号串账。
+  - **档案枚举与前端兼容归一 (`[M-4]`, `[M-5]`)**：修正 `tools/rebuild-clean.cjs` 使用 `'wechat'`/`'wholePrice'`/`'retailPrice'`；`db.ts` 在 `migrate()` 幂等归一历史 `'wx'`/`'whole'`/`'retail'`；前端 `10-partner.js`/`11-base.js`/`13-doc-editor.js` 同步兼容兜底展示、编辑与客户批发价自动带价。
+  - **类型严格校验与数值/查询边界 (`[M-6]`, `[L-1]`, `[L-2]`, `[L-4]`)**：`doc-service.ts` 与 `settlement.ts` 拦截布尔值、非整数分单价/金额及非整数 `partnerId`/`refDocId` 查询参数；`routes/docs.ts` 修复同商品多行订单的 `/doc/info` 与 `/doc/convert` 顺序核销及 `/doc/copy` 浮点尾差；`settlement.ts` 将关联方/关联单据存在性校验移入 `withImmediateTx`；`report.ts` 与 `dashboard.ts` 对齐 `roundQty`/`roundHalfAwayFromZero`；`backup.ts` 抽离 `resolveSafeBackupPath` 并在 `download`/`restore`/`delete` 全路径禁止软链接。
+  - **代理防伪造、`format:check` 与构建/CLI 稳健 (`[M-7]`–`[M-10]`, `[L-3]`)**：`env.ts`/`app.ts`/`audit-log.ts`/`auth.ts` 将 `ORANGE_TRUST_PROXY` 升级为跳数配置 `0..20`（默认 `0`、`docker-compose.yml` 默认 `0`），按 `req.ip` 右起计数防 `X-Forwarded-For` 伪造，未启用可信代理时不轻信 `X-Forwarded-Proto`；扩充 `package.json` `format`/`format:check` 覆盖 `electron/`、`web/js/`、`web/css/`；`web/js/13-doc-import.js` 补齐 `X-Request-Id` 与 `handle401()`；`tools/db-migrate.cjs` 与 `tools/db-seed.cjs` 通过 `resolveStoragePaths` 脱离 `ORANGE_JWT_SECRET` 约束（并校验 `checkPasswordStrength`、修正 `startPeriod` 为 `YYYYMM`、补种 `默认分类`）；`Dockerfile` 与 `.github/workflows/ci.yml` 安装补充 `--ignore-scripts`。
+- 按新版 `README.md` 从零执行依赖漏洞审计、Lint、严格类型检查、全仓 Prettier 检查、构建、单元与集成测试、独立库 `production` 迁移/幂等种子脚本、以及隔离 `production` 服务全量 `45/45` 业务/UI 端到端回归、`test-round1..4`、Playwright 客户/账户/自动定价 UI 验真与结构化 JSON 日志校验（本地工作分支 `feat/enterprise-upgrade` 待推送前终审后推远端）。
 
 ---
 
 ## 3. 真实执行过的验证命令与最终结果
 
-以下全部命令均在最终修复后真实执行并记录实际结果（不跳过、不删改任何断言）：
+以下全部命令均在最终代码修改完成后真实执行并记录实际输出（未跳过或削弱任何现有测试断言）：
 
 | 验证项 | 执行命令 | 真实结果 |
 | --- | --- | --- |
 | 依赖安全审计 | `npx pnpm audit --audit-level=high` | `No known vulnerabilities found` (exit 0) |
 | 代码规范检查 | `npx pnpm run lint` (`eslint server electron web/js`) | 0 errors, 0 warnings (exit 0) |
 | 严格类型检查 | `npx pnpm run typecheck` (`tsc --noEmit -p server/tsconfig.json`) | 0 errors (exit 0) |
-| 代码风格检查 | `npx pnpm run format:check` | `All matched files use Prettier code style!` (exit 0) |
+| 全仓代码风格检查 | `npx pnpm run format:check` | `All matched files use Prettier code style!` (exit 0) |
 | 后端生产编译 | `npx pnpm run build` | 编译成功至 `dist/server/` (exit 0) |
-| 单元测试套件 | `npx pnpm run test:unit` | **`20 / 20` PASS**（`baseline` 10 + `enterprise-hardening` 7 + `observability` 3） |
-| HTTP 集成测试 | `npx pnpm run test:integration` | **`8 / 8` PASS**（`enterprise-api` 6 + `health-observability` 2） |
-| Dockerfile 拷贝集安装校验 | 独立临时目录仅复制 `package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc` 执行 `npx pnpm install --frozen-lockfile --offline --ignore-scripts` | `Done in 192ms using pnpm v12.23.0` (exit 0) |
-| 迁移与幂等种子 CLI | `ORANGE_DATA_DIR=<tmp> npx pnpm run db:migrate` + `db:seed` (连续执行 2 次) | 已应用 `V1:001_baseline_schema, V2:002_price_memory_schema, V3:003_audit_log_and_idempotency`；首次写入 `teamId=1`，第二次检测已有账套幂等跳过 |
-| 全量业务与 Playwright UI 回归 | 启动隔离服务 `PORT=7749 NODE_ENV=production LOG_FORMAT=json node dist/server/index.js`，执行 `node tools/run-tests.cjs` | **`聚合结果：通过 45 / 45，全部通过`**（含 `regression 92/92`、`test-auth-batch2`、`test-backup-db-batch2 60/60`、`test-ui-e2e`、`test-ui-v027-behavior`、`test-ui-flow` 等；注：`test-doc-import-robust` 内部因 Linux 沙箱无 PowerShell 且无 `.tools/import-test/real.xlsx` 跳过 2 项并打印 `通过 19 / 19，跳过 2`，而 GBK CSV 在 `test-xlsx-limit-batch3` 与 `test-round2` 中实测通过） |
-| 对抗与端到端专项测试集 | 在隔离服务上 `node tools/rebuild-clean.cjs` 后依次执行 `test-round1..4` | `test-round1` **`25 / 25`**、`test-round2` **`27 / 27`**、`test-round3` **`39 / 39`**、`test-round4` **`24 / 24`** (全部 exit 0) |
-| 实时浏览器零报错与 JSON 日志 | Playwright 登录后台并巡检多页面路由 + 校验 `LOG_FORMAT=json` 输出 | `consoleErrors: 0, pageErrors: 0`；44/44 行有效 JSON、39 行精确携带 `teamId` & `userId` & `requestId`、零密钥明文泄露 |
-| `master..HEAD` 静态审计 | 扫描全部变更/新增文件的 `TODO/FIXME/NotImplemented/@ts-ignore/eslint-disable`、`any`、空 `catch`、`Math.random`、服务端 `console.*` | 仅 `config/env.ts` 密钥生成提示文案含 `console.log(...)`，其余全部 0 命中 |
+| 单元测试套件 | `npx pnpm run test:unit` | **`22 / 22` PASS**（`baseline` 10 + `enterprise-hardening` 9 + `observability` 3） |
+| HTTP 集成测试 | `npx pnpm run test:integration` | **`13 / 13` PASS**（`enterprise-api` 11 + `health-observability` 2） |
+| Dockerfile 拷贝集安装校验 | 独立临时目录仅复制 `package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc` 执行 `npx pnpm install --frozen-lockfile --offline --ignore-scripts` | `Done in 209ms using pnpm v12.23.0` (exit 0) |
+| 生产模式迁移与幂等种子 CLI | `NODE_ENV=production ORANGE_DATA_DIR=<tmp>`（无 `ORANGE_JWT_SECRET`）执行 `node tools/db-migrate.cjs` + 弱口令拦截校验 + `node tools/db-seed.cjs` (2 次) | `V1..V3` 迁移完成；弱口令被拒（exit 1）；首次写入 `teamId=1`、`startPeriod=202611`、`默认分类`，未生成 `.jwt-secret`；第二次幂等跳过 |
+| 全量业务与 Playwright UI 回归 | 启动隔离服务 `NODE_ENV=production PORT=7749 LOG_FORMAT=json node dist/server/index.js`，执行 `NODE_ENV=production OC_BASE=http://127.0.0.1:7749/api node tools/run-tests.cjs` | **`聚合结果：通过 45 / 45，全部通过`**（注：`test-doc-import-robust.cjs` 因 Linux 沙箱无 PowerShell 且无 `.tools/import-test/real.xlsx` 内部跳过 2 项并输出 `通过 19 / 19，跳过 2`；GBK CSV 已在 `test-xlsx-limit-batch3` 与 `test-round2` 实测通过） |
+| 对抗与端到端专项测试集 | 在同一 `production` 隔离服务上 `node tools/rebuild-clean.cjs` 后依次执行 `test-round1..4` | `test-round1` **`25 / 25`**、`test-round2` **`26 / 26`**、`test-round3` **`39 / 39`**、`test-round4` **`24 / 24`** (全部 exit 0) |
+| Playwright 重点页面与结构化 JSON 日志校验 | Playwright 验证客户标签/编辑、账户类型兜底展示、`wholePrice` 自动带价 (`98`) 与零报错；检查生产服务端 `LOG_FORMAT=json` 日志 | `consoleErrors: 0, pageErrors: 0, failedResponses: 0`；`total_json=1987, with_requestId=1986, with_team_user=1838, secret_leaks=0` |
+| `master..HEAD` 静态审计 | 扫描全部变更/新增文件的 `TODO/FIXME/NotImplemented/@ts-ignore/eslint-disable`、`any`、`Math.random` | 仅文档规范描述与前端 `01-api.js` 浏览器兼容 fallback 命中，服务端业务代码 0 违规 |
 
 ### 未能在本环境实测的项目（如实披露）
-1. **Docker 镜像构建与 Compose 启动 (`Dockerfile` / `docker-compose.yml`)**：当前执行环境中未安装 Docker CLI / 守护进程（`no-docker`），仅在本地离线沙箱实测了 `Dockerfile` `COPY` 文件清单与 `pnpm install --frozen-lockfile --offline` 安装流程，尚未执行 `docker build` / `docker compose up`，需在具备 Docker 引擎的主机执行一次 `docker compose up -d --build` 并核验 `/health` 与 `/ready`。
+1. **Docker 镜像构建与 Compose 启动 (`Dockerfile` / `docker-compose.yml`)**：当前执行环境中未安装 Docker CLI / 守护进程（`no-docker`），仅在本地离线沙箱实测了 `Dockerfile` `COPY` 文件清单与 `pnpm install --frozen-lockfile --offline --ignore-scripts` 安装流程，尚未执行 `docker build` / `docker compose up`，需在具备 Docker 引擎的主机执行一次 `docker compose up -d --build` 并核验 `/health` 与 `/ready`。
 2. **GitHub Actions CI (`ci.yml`) 远端 Runner**：已在本地完整跑通全部 CI 步骤命令，尚未在 GitHub Actions `ubuntu-latest` 上实际触发。
 3. **Electron 桌面 GUI 托盘与 Windows 安装包构建**：当前为无桌面图形界面的 Linux 沙箱且无 Windows NSIS 工具链，未实测 `pnpm run dev:electron` 托盘交互及 `pnpm run dist:electron`。
 

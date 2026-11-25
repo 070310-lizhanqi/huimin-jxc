@@ -109,9 +109,17 @@ function applyPendingRestore(dbPath: string): void {
     fs.renameSync(pending, dbPath);
   } catch (e) {
     // 回退：已到位的 dbPath（若有）先清掉，再把移走的文件按原路搬回
-    try { if (fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true }); } catch { /* ignore */ }
+    try {
+      if (fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true });
+    } catch {
+      /* ignore */
+    }
     for (const [from, to] of moved.reverse()) {
-      try { fs.renameSync(to, from); } catch { /* 尽力回退 */ }
+      try {
+        fs.renameSync(to, from);
+      } catch {
+        /* 尽力回退 */
+      }
     }
     logger.error('Failed to apply pending restore; rolled back to previous DB', { err: e });
     return;
@@ -147,8 +155,7 @@ export function openDb(dbPath?: string): DB {
 export function tryCheckpoint(db: DB): boolean {
   try {
     const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
-      | { busy: number; log: number; checkpointed: number }
-      | undefined;
+      { busy: number; log: number; checkpointed: number } | undefined;
     return !!row && row.busy !== 1 && row.checkpointed >= row.log;
   } catch {
     return false;
@@ -188,6 +195,15 @@ function ensureUniqueFallbackIndexes(db: DB): void {
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_team_name ON product(teamId, name)`);
   } catch {
     /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
+  }
+  // 外部单号原子唯一性兜底（仅针对非空 srcBillNo）
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_team_type_src_billno_uniq
+       ON doc(teamId, type, srcBillNo) WHERE srcBillNo IS NOT NULL AND srcBillNo != ''`,
+    );
+  } catch {
+    /* 老库存在重复外部单号：跳过唯一索引，业务层幂等检查仍然生效 */
   }
 }
 
@@ -524,6 +540,10 @@ export function migrate(db: DB): void {
     }
     // 幂等兜底：确保 rebuild-clean 等场景下唯一索引仍在
     ensureUniqueFallbackIndexes(db);
+    // 兼容存量库/旧种子脚本遗留的账户类型与客户价格等级简写值
+    db.prepare(`UPDATE account SET type = 'wechat' WHERE type = 'wx'`).run();
+    db.prepare(`UPDATE customer SET priceLevel = 'wholePrice' WHERE priceLevel = 'whole'`).run();
+    db.prepare(`UPDATE customer SET priceLevel = 'retailPrice' WHERE priceLevel = 'retail'`).run();
     db.exec('COMMIT');
   } catch (e) {
     try {

@@ -11,7 +11,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { sendError } from './infra/errors';
-import { allocateDocDiscounts, roundQty } from './shared/money';
+import { allocateDocDiscounts, roundHalfAwayFromZero, roundQty } from './shared/money';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -112,9 +112,10 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       )
       .all(teamId, to) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
-    const priceRows = db
-      .prepare('SELECT id, purchasePrice FROM product WHERE teamId = ?')
-      .all(teamId) as Array<{ id: number; purchasePrice: number }>;
+    const priceRows = db.prepare('SELECT id, purchasePrice FROM product WHERE teamId = ?').all(teamId) as Array<{
+      id: number;
+      purchasePrice: number;
+    }>;
     const priceMap = new Map<number, number>(priceRows.map((p) => [p.id, p.purchasePrice]));
 
     // 毛利：整单折扣按行金额占比分摊（与 /report/product 同口径）后按商品归集净量净额，
@@ -133,7 +134,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       const unitCost = costMap.get(pid) ?? priceMap.get(pid) ?? 0;
       grossProfitFloat += a.amt - a.qty * unitCost;
     }
-    const grossProfit = Math.round(grossProfitFloat);
+    const grossProfit = roundHalfAwayFromZero(grossProfitFloat);
 
     res.json({
       range,
@@ -143,7 +144,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       orderAmount: order.amt,
       outCount: out.cnt,
       outAmount: out.saleAmt - out.retAmt,
-      outQty: out.saleQty - out.retQty,
+      outQty: roundQty(out.saleQty - out.retQty),
       receiptAmount: receipt.amt,
       receiptCount: receipt.cnt,
       grossProfit,

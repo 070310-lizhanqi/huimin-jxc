@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
-import { initConfig, resetConfigForTest } from '../src/config/env';
+import { initConfig, resetConfigForTest, resolveStoragePaths, validateConfig } from '../src/config/env';
 import { getSchemaVersion, listAppliedMigrations, migrate, openDb } from '../src/db';
 import { BusyError } from '../src/infra/errors';
 import { safeRollback, withImmediateTx } from '../src/infra/tx';
@@ -245,6 +245,96 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
         resetConfigForTest();
         initConfig({ persistSecret: false });
       }
+    });
+  });
+
+  describe('legacy archive value normalization and srcBillNo uniqueness', () => {
+    it('normalizes legacy account.type and customer.priceLevel during migrate and enforces unique srcBillNo index', () => {
+      const tmp = mkTmp('jxc-legacy-norm-');
+      const db = openDb(path.join(tmp, 'legacy.db'));
+      try {
+        migrate(db);
+        const teamId = Number(
+          db.prepare("INSERT INTO team (name, startPeriod) VALUES ('兼容测试', '202611')").run().lastInsertRowid,
+        );
+        const whId = Number(
+          db.prepare("INSERT INTO warehouse (teamId, name) VALUES (?, '主仓')").run(teamId).lastInsertRowid,
+        );
+        const accId = Number(
+          db.prepare("INSERT INTO account (teamId, name, type, balance) VALUES (?, '老微信', 'wx', 0)").run(teamId)
+            .lastInsertRowid,
+        );
+        const cus1Id = Number(
+          db.prepare("INSERT INTO customer (teamId, name, priceLevel) VALUES (?, '老批发客', 'whole')").run(teamId)
+            .lastInsertRowid,
+        );
+        const cus2Id = Number(
+          db.prepare("INSERT INTO customer (teamId, name, priceLevel) VALUES (?, '老零售客', 'retail')").run(teamId)
+            .lastInsertRowid,
+        );
+
+        // Re-running migrate normalizes legacy stored values idempotently
+        migrate(db);
+        const acc = db.prepare('SELECT type FROM account WHERE id = ?').get(accId) as { type: string };
+        const cus1 = db.prepare('SELECT priceLevel FROM customer WHERE id = ?').get(cus1Id) as { priceLevel: string };
+        const cus2 = db.prepare('SELECT priceLevel FROM customer WHERE id = ?').get(cus2Id) as { priceLevel: string };
+        assert.equal(acc.type, 'wechat');
+        assert.equal(cus1.priceLevel, 'wholePrice');
+        assert.equal(cus2.priceLevel, 'retailPrice');
+
+        // Unique partial index idx_doc_team_type_src_billno_uniq allows NULL/empty srcBillNo, rejects duplicates
+        db.prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, warehouseId, status, totalAmount, totalQty, srcBillNo)
+           VALUES (?, 'CK-N1', 'stockout', '2026-11-25', ?, 'draft', 0, 1, NULL)`,
+        ).run(teamId, whId);
+        db.prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, warehouseId, status, totalAmount, totalQty, srcBillNo)
+           VALUES (?, 'CK-N2', 'stockout', '2026-11-25', ?, 'draft', 0, 1, '')`,
+        ).run(teamId, whId);
+        db.prepare(
+          `INSERT INTO doc (teamId, billNo, type, date, warehouseId, status, totalAmount, totalQty, srcBillNo)
+           VALUES (?, 'CK-S1', 'stockout', '2026-11-25', ?, 'draft', 0, 1, 'EXT-UNIQ-1')`,
+        ).run(teamId, whId);
+        assert.throws(() => {
+          db.prepare(
+            `INSERT INTO doc (teamId, billNo, type, date, warehouseId, status, totalAmount, totalQty, srcBillNo)
+             VALUES (?, 'CK-S2', 'stockout', '2026-11-25', ?, 'draft', 0, 1, 'EXT-UNIQ-1')`,
+          ).run(teamId, whId);
+        });
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  describe('config/env ORANGE_TRUST_PROXY hop count and resolveStoragePaths', () => {
+    it('parses hop count 0..20 (accepting boolean aliases) and rejects invalid values', () => {
+      const tmp = mkTmp('jxc-tp-');
+      assert.equal(validateConfig({ ORANGE_DATA_DIR: tmp }, { persistSecret: false }).trustProxy, 0);
+      assert.equal(
+        validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: 'false' }, { persistSecret: false }).trustProxy,
+        0,
+      );
+      assert.equal(
+        validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: 'true' }, { persistSecret: false }).trustProxy,
+        1,
+      );
+      assert.equal(
+        validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: '2' }, { persistSecret: false }).trustProxy,
+        2,
+      );
+      assert.throws(() => validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: '21' }, { persistSecret: false }));
+      assert.throws(() => validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: '-1' }, { persistSecret: false }));
+      assert.throws(() =>
+        validateConfig({ ORANGE_DATA_DIR: tmp, ORANGE_TRUST_PROXY: 'abc' }, { persistSecret: false }),
+      );
+
+      const paths = resolveStoragePaths({
+        NODE_ENV: 'production',
+        ORANGE_DATA_DIR: tmp,
+      });
+      assert.equal(paths.dataDir, path.resolve(tmp));
+      assert.equal(paths.dbPath, path.join(path.resolve(tmp), 'huimin-clone.db'));
     });
   });
 });

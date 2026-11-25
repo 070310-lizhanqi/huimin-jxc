@@ -59,9 +59,7 @@ function resolveDataDirTarget(paths) {
 
 /** 从 Electron app 对象拼出 resolveDataDirTarget 要的路径（打包后 appRoot 取 exe 所在目录）。 */
 function pathsForApp(app) {
-  const appRoot = app.isPackaged
-    ? path.dirname(app.getPath('exe'))
-    : path.join(__dirname, '..');
+  const appRoot = app.isPackaged ? path.dirname(app.getPath('exe')) : path.join(__dirname, '..');
   return {
     appData: app.getPath('appData'),
     userData: app.getPath('userData'),

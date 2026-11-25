@@ -42,13 +42,10 @@ function readPort(dataDir) {
 
 function probe(port) {
   return new Promise((resolve) => {
-    const req = http.get(
-      { host: '127.0.0.1', port, path: '/api/auth/status', timeout: 2000 },
-      (res) => {
-        res.resume();
-        resolve(res.statusCode === 200);
-      },
-    );
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/auth/status', timeout: 2000 }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
     req.on('error', () => resolve(false));
     req.on('timeout', () => {
       req.destroy();

@@ -15,14 +15,41 @@ const SettingsPage = {
     const print = reactive({ company: '', address: '', phone: '', footer: '', showLogo: true });
     const defaults = ref({});
     const DOC_LABELS = {
-      stockin: '采购入库', stockout: '销售出库', transfer: '转仓调拨', adjust: '库存调整', stocktake: '库存盘点',
-      porder: '采购订单', sorder: '销售订单', pin: '采购退货', sret: '销售退货',
-      otherin: '其它入库', otherout: '其它出库', assembly: '生产组装', stockinit: '期初库存', quo: '报价单',
-      outapply: '出库申请单', prodtask: '生产任务',
+      stockin: '采购入库',
+      stockout: '销售出库',
+      transfer: '转仓调拨',
+      adjust: '库存调整',
+      stocktake: '库存盘点',
+      porder: '采购订单',
+      sorder: '销售订单',
+      pin: '采购退货',
+      sret: '销售退货',
+      otherin: '其它入库',
+      otherout: '其它出库',
+      assembly: '生产组装',
+      stockinit: '期初库存',
+      quo: '报价单',
+      outapply: '出库申请单',
+      prodtask: '生产任务',
     };
-    const ORDER = ['stockin', 'stockout', 'porder', 'sorder', 'pin', 'sret',
-      'transfer', 'adjust', 'stocktake', 'otherin', 'otherout', 'assembly', 'stockinit', 'quo',
-      'outapply', 'prodtask'];
+    const ORDER = [
+      'stockin',
+      'stockout',
+      'porder',
+      'sorder',
+      'pin',
+      'sret',
+      'transfer',
+      'adjust',
+      'stocktake',
+      'otherin',
+      'otherout',
+      'assembly',
+      'stockinit',
+      'quo',
+      'outapply',
+      'prodtask',
+    ];
 
     async function load() {
       loading.value = true;
@@ -33,8 +60,11 @@ const SettingsPage = {
         defaults.value = r.defaults || {};
         noMode.value = r.noMode || 'day';
         Object.assign(print, r.print || {});
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        loading.value = false;
+      }
     }
 
     async function savePrefix() {
@@ -44,8 +74,11 @@ const SettingsPage = {
         const r = await api.post('/setting/prefix', { teamId: store.teamId, prefix: { ...prefix } });
         Object.assign(prefix, r.prefix || {});
         toast('单据编号已保存');
-      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
-      finally { saving.value = false; }
+      } catch (e) {
+        toast(forbiddenErr(e) || e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
     }
 
     async function saveNoMode() {
@@ -54,8 +87,11 @@ const SettingsPage = {
       try {
         await api.post('/setting/no-mode', { teamId: store.teamId, noMode: noMode.value });
         toast('编号重置方式已保存');
-      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
-      finally { saving.value = false; }
+      } catch (e) {
+        toast(forbiddenErr(e) || e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
     }
 
     async function savePrint() {
@@ -64,14 +100,24 @@ const SettingsPage = {
       try {
         await api.post('/setting/print', { teamId: store.teamId, print: { ...print } });
         toast('打印抬头已保存');
-      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
-      finally { saving.value = false; }
+      } catch (e) {
+        toast(forbiddenErr(e) || e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
     }
 
     async function reset(scope) {
       if (!isAdmin.value) return toast('仅管理员可修改设置', 'error');
       // 一键重置所有设置是不可逆操作，必须二次确认（对齐恢复备份的交互等级）
-      const label = scope === 'all' ? '所有设置（编号前缀 + 编号方式 + 打印抬头）' : scope === 'prefix' ? '所有单据编号前缀' : scope === 'noMode' ? '编号方式' : '打印抬头';
+      const label =
+        scope === 'all'
+          ? '所有设置（编号前缀 + 编号方式 + 打印抬头）'
+          : scope === 'prefix'
+            ? '所有单据编号前缀'
+            : scope === 'noMode'
+              ? '编号方式'
+              : '打印抬头';
       if (!(await confirmBox(`确定要恢复${label}为默认值吗？此操作不可撤销。`, '恢复默认设置'))) return;
       try {
         const r = await api.post('/setting/reset', { teamId: store.teamId, scope });
@@ -80,7 +126,9 @@ const SettingsPage = {
         noMode.value = r.noMode || 'day';
         Object.assign(print, r.print || {});
         toast('已恢复默认');
-      } catch (e) { toast(forbiddenErr(e) || e.message, 'error'); }
+      } catch (e) {
+        toast(forbiddenErr(e) || e.message, 'error');
+      }
     }
 
     /** 预览编号样例 */
@@ -122,8 +170,11 @@ const SettingsPage = {
       userLoading.value = true;
       try {
         users.value = await api.get('/auth/users');
-      } catch (e) { toast(e.message, 'error'); }
-      finally { userLoading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        userLoading.value = false;
+      }
     }
 
     function openUserDialog() {
@@ -134,8 +185,14 @@ const SettingsPage = {
     }
 
     async function saveUser() {
-      if (!userForm.username.trim()) { toast('请输入用户名', 'error'); return; }
-      if (userForm.password.length < 8) { toast('密码至少 8 位', 'error'); return; }
+      if (!userForm.username.trim()) {
+        toast('请输入用户名', 'error');
+        return;
+      }
+      if (userForm.password.length < 8) {
+        toast('密码至少 8 位', 'error');
+        return;
+      }
       userBusy.value = true;
       try {
         await api.post('/auth/users', {
@@ -146,8 +203,11 @@ const SettingsPage = {
         toast('已添加用户');
         userDialog.value = false;
         await loadUsers();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { userBusy.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        userBusy.value = false;
+      }
     }
 
     /* B-前6：删除走 confirmDeleteRow（确认标题 '删除用户' 保留） */
@@ -168,17 +228,29 @@ const SettingsPage = {
     }
 
     async function savePassword() {
-      if (pwdForm.newPassword.length < 8) { toast('新密码至少 8 位', 'error'); return; }
-      if (pwdForm.newPassword !== pwdForm.newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
+      if (pwdForm.newPassword.length < 8) {
+        toast('新密码至少 8 位', 'error');
+        return;
+      }
+      if (pwdForm.newPassword !== pwdForm.newPassword2) {
+        toast('两次输入的新密码不一致', 'error');
+        return;
+      }
       userBusy.value = true;
       try {
-        const r = await api.post('/auth/password', { oldPassword: pwdForm.oldPassword, newPassword: pwdForm.newPassword });
+        const r = await api.post('/auth/password', {
+          oldPassword: pwdForm.oldPassword,
+          newPassword: pwdForm.newPassword,
+        });
         // B-前5：改密会吊销旧令牌，服务端已把重签的新令牌经 Set-Cookie 下发，
         // 浏览器自动存，body 里的 token 前端直接忽略，不再写 localStorage
         toast('密码已修改');
         pwdDialog.value = false;
-      } catch (e) { toast(e.message, 'error'); }
-      finally { userBusy.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        userBusy.value = false;
+      }
     }
 
     const isAdmin = computed(() => auth.user?.role === 'admin');
@@ -206,8 +278,11 @@ const SettingsPage = {
         // 兼容旧后端回显：只取「是否已设置」，绝不把回显的明文填进输入框
         regConf.hasInviteCode = r.hasInviteCode ?? !!r.inviteCode;
         regConf.inviteCode = '';
-      } catch (e) { toast(e.message, 'error'); }
-      finally { regLoading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        regLoading.value = false;
+      }
     }
 
     async function saveRegConf() {
@@ -233,8 +308,11 @@ const SettingsPage = {
         regConf.hasInviteCode = r.hasInviteCode ?? (regConf.enabled ? (code ? true : regConf.hasInviteCode) : false);
         regConf.inviteCode = '';
         toast(regConf.enabled ? '已开放注册，请把邀请码发给需要开账套的人' : '已关闭注册');
-      } catch (e) { toast(e.message, 'error'); }
-      finally { regBusy.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        regBusy.value = false;
+      }
     }
 
     /* ---- 数据备份与恢复 ---- */
@@ -250,8 +328,11 @@ const SettingsPage = {
     /** 服务重启期间请求会失败，轮询等它回来后刷新页面拿新状态 */
     const pollRestore = (retries) => {
       if (restorePollStopped) return;
-      api.get('/auth/status')
-        .then(() => { if (!restorePollStopped) location.reload(); })
+      api
+        .get('/auth/status')
+        .then(() => {
+          if (!restorePollStopped) location.reload();
+        })
         .catch(() => {
           if (restorePollStopped) return;
           if (retries <= 0) {
@@ -287,8 +368,11 @@ const SettingsPage = {
         const r = await api.get('/backup/list');
         backups.value = r.rows || [];
         backupDir.value = r.dir || '';
-      } catch (e) { toast(e.message, 'error'); }
-      finally { backupLoading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        backupLoading.value = false;
+      }
     }
 
     async function createBackup() {
@@ -297,31 +381,46 @@ const SettingsPage = {
         await api.post('/backup/create');
         toast('备份完成');
         await loadBackups();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { backupBusy.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        backupBusy.value = false;
+      }
     }
 
     function downloadBackup(row) {
-      api.download(`/backup/download?file=${encodeURIComponent(row.file)}`, row.file)
+      api
+        .download(`/backup/download?file=${encodeURIComponent(row.file)}`, row.file)
         .then(() => toast('已开始下载'))
         .catch((e) => toast(e.message, 'error'));
     }
 
     async function restoreBackup(row) {
       const label = fmtBackupName(row.file);
-      if (!(await confirmBox(
-        `确定恢复到备份「${label}」吗？当前数据将被该备份完全覆盖，服务会自动重启。建议先点一次「立即备份」保留现状。`,
-        '恢复备份',
-      ))) return;
+      if (
+        !(await confirmBox(
+          `确定恢复到备份「${label}」吗？当前数据将被该备份完全覆盖，服务会自动重启。建议先点一次「立即备份」保留现状。`,
+          '恢复备份',
+        ))
+      )
+        return;
       // 二次验密：恢复不可逆，要求再输一次当前账号密码（服务端同样强校验）
       let password;
       try {
-        const r = await ElMessageBox.prompt('恢复会整体覆盖当前数据且不可撤销，请输入你的登录密码以确认：', '安全确认', {
-          confirmButtonText: '确认恢复', cancelButtonText: '取消',
-          inputType: 'password', inputPlaceholder: '当前账号密码',
-        });
+        const r = await ElMessageBox.prompt(
+          '恢复会整体覆盖当前数据且不可撤销，请输入你的登录密码以确认：',
+          '安全确认',
+          {
+            confirmButtonText: '确认恢复',
+            cancelButtonText: '取消',
+            inputType: 'password',
+            inputPlaceholder: '当前账号密码',
+          },
+        );
         password = (r.value || '').trim();
-      } catch { return; }
+      } catch {
+        return;
+      }
       if (!password) return toast('未输入密码，已取消恢复', 'warning');
       restoreFailed.value = false;
       backupBusy.value = true;
@@ -346,7 +445,9 @@ const SettingsPage = {
         await api.del(`/backup/${encodeURIComponent(row.file)}`);
         toast('已删除');
         await loadBackups();
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        toast(e.message, 'error');
+      }
     }
 
     /* ---- 操作审计日志（仅管理员） ---- */
@@ -371,21 +472,70 @@ const SettingsPage = {
         });
         auditLogs.value = r.rows || [];
         auditTotal.value = Number(r.total || 0);
-      } catch (e) { toast(e.message, 'error'); }
-      finally { auditLoading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        auditLoading.value = false;
+      }
     }
 
     onMounted(load);
     return {
-      tab, loading, saving, prefix, noMode, print, defaults, rows, sample,
-      savePrefix, saveNoMode, savePrint, reset, store,
-      auth, isAdmin, isOwner, users, userLoading, userBusy, userDialog, userForm,
-      pwdDialog, pwdForm, loadUsers, openUserDialog, saveUser, removeUser, openPwdDialog, savePassword,
-      regConf, regLoading, regBusy, loadRegConf, saveRegConf,
-      backups, backupDir, backupLoading, backupBusy, loadBackups, createBackup, downloadBackup, restoreBackup, deleteBackup,
-      restoreFailed, retryRestore,
-      auditLogs, auditLoading, auditPage, auditTotal, auditKw, auditAction, loadAuditLogs,
-      fmtSize, fmtBackupName,
+      tab,
+      loading,
+      saving,
+      prefix,
+      noMode,
+      print,
+      defaults,
+      rows,
+      sample,
+      savePrefix,
+      saveNoMode,
+      savePrint,
+      reset,
+      store,
+      auth,
+      isAdmin,
+      isOwner,
+      users,
+      userLoading,
+      userBusy,
+      userDialog,
+      userForm,
+      pwdDialog,
+      pwdForm,
+      loadUsers,
+      openUserDialog,
+      saveUser,
+      removeUser,
+      openPwdDialog,
+      savePassword,
+      regConf,
+      regLoading,
+      regBusy,
+      loadRegConf,
+      saveRegConf,
+      backups,
+      backupDir,
+      backupLoading,
+      backupBusy,
+      loadBackups,
+      createBackup,
+      downloadBackup,
+      restoreBackup,
+      deleteBackup,
+      restoreFailed,
+      retryRestore,
+      auditLogs,
+      auditLoading,
+      auditPage,
+      auditTotal,
+      auditKw,
+      auditAction,
+      loadAuditLogs,
+      fmtSize,
+      fmtBackupName,
     };
   },
   template: `
@@ -640,5 +790,3 @@ const SettingsPage = {
     </el-dialog>
   </div>`,
 };
-
-

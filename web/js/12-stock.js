@@ -6,7 +6,6 @@ const StockPage = {
   components: { DocViewer },
   props: { group: { type: String, default: 'purchase' } },
   setup(props) {
-
     const kw = ref('');
     const warehouseId = ref(null);
     const ifShowZero = ref(true);
@@ -26,11 +25,18 @@ const StockPage = {
     const serverAgg = ref(false);
     const pages = computed(() => Math.max(1, Math.ceil(total.value / rows.value)));
     const pageBtns = computed(() => {
-      const n = pages.value, c = page.value, arr = [];
+      const n = pages.value,
+        c = page.value,
+        arr = [];
       for (let p = 1; p <= n; p++) if (p === 1 || p === n || Math.abs(p - c) <= 2) arr.push(p);
       return arr;
     });
-    function onRowsChange(e) { rows.value = Number(e.target.value) || 50; pageSizeSave('stock', rows.value); page.value = 1; load(); }
+    function onRowsChange(e) {
+      rows.value = Number(e.target.value) || 50;
+      pageSizeSave('stock', rows.value);
+      page.value = 1;
+      load();
+    }
 
     // 请求序守卫：仓库/关键词/显示零库存连点时，慢的旧响应不得覆盖新结果
     const loadGuard = seqGuard();
@@ -45,10 +51,12 @@ const StockPage = {
         // 汇总视图无法正确分组）；低库存筛选与排序也交给服务端（分页后前端只剩当前页，
         // 再在前端算会漏掉其他页的低库存商品）
         const r = await api.get('/stock/list', {
-          teamId: store.teamId, kw: effKw,
+          teamId: store.teamId,
+          kw: effKw,
           warehouseId: warehouseId.value,
           ifShowZero: ifShowZero.value ? '' : '0',
-          page: page.value, rows: rows.value,
+          page: page.value,
+          rows: rows.value,
           group: view.value === 'prod' ? 'prod' : undefined,
           onlyLow: onlyLow.value ? '1' : undefined,
           sort: sortKey.value !== 'default' ? sortKey.value : undefined,
@@ -73,7 +81,10 @@ const StockPage = {
       }
     }
     /** 筛选条件变化从第 1 页开始（翻页时 load() 不重置页码） */
-    function search() { page.value = 1; load(); }
+    function search() {
+      page.value = 1;
+      load();
+    }
     onMounted(load);
     /** B-前2：分页后合计行取服务端 totals（全量口径），回落时才前端算当前页 */
     const totalQty = computed(() => (totals.value ? totals.value.totalQty : list.value.reduce((s, r) => s + r.qty, 0)));
@@ -104,7 +115,9 @@ const StockPage = {
       const low = lowQtyMap.value[r.productId];
       return low != null && (prodTotalMap.value[r.productId] ?? 0) <= low;
     }
-    function resvName(id) { return id ? (byId(store.reservoirs, id)?.name ?? `#${id}`) : '—'; }
+    function resvName(id) {
+      return id ? (byId(store.reservoirs, id)?.name ?? `#${id}`) : '—';
+    }
 
     /**
      * 按商品汇总：同一商品可能散在多个仓库/库位，汇总视图把它们加总，
@@ -115,11 +128,24 @@ const StockPage = {
     const summary = computed(() => {
       if (serverAgg.value) {
         return list.value.map((r) => ({
-          productId: r.productId, prodName: r.prodName, spec: r.spec, unit: r.unit,
-          code: r.code, qty: r.qty,
-          whs: [...new Set(String(r.whs || '').split(',').filter(Boolean))].join('、'),
-          locs: r.locs || 0, batchNo: r.batchNo || '', rows: r.rows || 0,
-          lowQty: r.lowQty, estUnitCost: r.estUnitCost ?? 0,
+          productId: r.productId,
+          prodName: r.prodName,
+          spec: r.spec,
+          unit: r.unit,
+          code: r.code,
+          qty: r.qty,
+          whs: [
+            ...new Set(
+              String(r.whs || '')
+                .split(',')
+                .filter(Boolean),
+            ),
+          ].join('、'),
+          locs: r.locs || 0,
+          batchNo: r.batchNo || '',
+          rows: r.rows || 0,
+          lowQty: r.lowQty,
+          estUnitCost: r.estUnitCost ?? 0,
           value: r.value ?? Math.round((r.qty || 0) * (r.estUnitCost || 0)),
           isLow: r.isLow === 1 || r.isLow === true,
         }));
@@ -129,9 +155,18 @@ const StockPage = {
         let s = map.get(r.productId);
         if (!s) {
           s = {
-            productId: r.productId, prodName: r.prodName, spec: r.spec, unit: r.unit,
-            code: r.code, qty: 0, whs: new Set(), locs: 0, batchNo: '', rows: 0,
-            lowQty: r.lowQty, estUnitCost: r.estUnitCost ?? 0,
+            productId: r.productId,
+            prodName: r.prodName,
+            spec: r.spec,
+            unit: r.unit,
+            code: r.code,
+            qty: 0,
+            whs: new Set(),
+            locs: 0,
+            batchNo: '',
+            rows: 0,
+            lowQty: r.lowQty,
+            estUnitCost: r.estUnitCost ?? 0,
           };
           map.set(r.productId, s);
         }
@@ -165,7 +200,9 @@ const StockPage = {
       return rows;
     });
     /** B-前2：分页模式下货值合计取服务端 totals.totalValue（全量口径） */
-    const totalValue = computed(() => (totals.value ? totals.value.totalValue : summary.value.reduce((s, r) => s + r.value, 0)));
+    const totalValue = computed(() =>
+      totals.value ? totals.value.totalValue : summary.value.reduce((s, r) => s + r.value, 0),
+    );
 
     /** 汇总排序：默认按商品建档顺序；点表头切 数量升序 → 降序 → 默认 */
     const sortKey = ref('default');
@@ -174,7 +211,10 @@ const StockPage = {
     }
     // B-前2：低库存筛选与排序在服务端做，切换时从第 1 页重查（回落的全量模式下
     // 前端 computed 同样会再算一次，结果一致）
-    watch([onlyLow, sortKey], () => { page.value = 1; load(); });
+    watch([onlyLow, sortKey], () => {
+      page.value = 1;
+      load();
+    });
 
     /** 汇总行点「N 条明细」→ 切到明细视图并按商品名过滤，需重新请求后端 */
     async function drillTo(s) {
@@ -204,7 +244,8 @@ const StockPage = {
       try {
         const effKw = view.value === 'detail' && drillKw.value ? drillKw.value : kw.value;
         const q = {
-          teamId: store.teamId, kw: effKw,
+          teamId: store.teamId,
+          kw: effKw,
           warehouseId: warehouseId.value,
           ifShowZero: ifShowZero.value ? '' : '0',
           onlyLow: onlyLow.value ? '1' : undefined,
@@ -212,38 +253,103 @@ const StockPage = {
         };
         if (view.value === 'prod') {
           const r = await api.get('/stock/list', { ...q, group: 'prod' });
-          const rowsAll = Array.isArray(r) ? r : (r.rows || []);
+          const rowsAll = Array.isArray(r) ? r : r.rows || [];
           if (!rowsAll.length) return toast('没有可导出的数据', 'warning');
-          exportCsv('库存汇总.csv', rowsAll.map((s) => ({
-            prodName: s.prodName, spec: s.spec || '', unit: s.unit,
-            whs: [...new Set(String(s.whs || '').split(',').filter(Boolean))].join('、'),
-            rows: s.rows, qty: s.qty, lowQty: s.lowQty ?? '',
-            value: ((s.value ?? Math.round((s.qty || 0) * (s.estUnitCost || 0))) / 100).toFixed(2),
-          })), [
-            { key: 'prodName', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
-            { key: 'whs', label: '所在仓库' }, { key: 'rows', label: '库存行数' },
-            { key: 'qty', label: '合计数量' }, { key: 'lowQty', label: '安全库存' }, { key: 'value', label: '库存货值(元)' },
-          ]);
+          exportCsv(
+            '库存汇总.csv',
+            rowsAll.map((s) => ({
+              prodName: s.prodName,
+              spec: s.spec || '',
+              unit: s.unit,
+              whs: [
+                ...new Set(
+                  String(s.whs || '')
+                    .split(',')
+                    .filter(Boolean),
+                ),
+              ].join('、'),
+              rows: s.rows,
+              qty: s.qty,
+              lowQty: s.lowQty ?? '',
+              value: ((s.value ?? Math.round((s.qty || 0) * (s.estUnitCost || 0))) / 100).toFixed(2),
+            })),
+            [
+              { key: 'prodName', label: '商品' },
+              { key: 'spec', label: '规格' },
+              { key: 'unit', label: '单位' },
+              { key: 'whs', label: '所在仓库' },
+              { key: 'rows', label: '库存行数' },
+              { key: 'qty', label: '合计数量' },
+              { key: 'lowQty', label: '安全库存' },
+              { key: 'value', label: '库存货值(元)' },
+            ],
+          );
           return;
         }
         const r = await api.get('/stock/list', q);
-        const rowsAll = Array.isArray(r) ? r : (r.rows || []);
+        const rowsAll = Array.isArray(r) ? r : r.rows || [];
         if (!rowsAll.length) return toast('没有可导出的数据', 'warning');
-        exportCsv('实时库存.csv', rowsAll.map((r) => ({
-          prodName: r.prodName, spec: r.spec || '', unit: r.unit,
-          warehouse: r.warehouseName || '', reservoir: resvName(r.reservoirId), batchNo: r.batchNo || '',
-          qty: r.qty, lowQty: r.lowQty ?? '',
-        })), [
-          { key: 'prodName', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
-          { key: 'warehouse', label: '仓库' }, { key: 'reservoir', label: '库位' }, { key: 'batchNo', label: '批次' },
-          { key: 'qty', label: '数量' }, { key: 'lowQty', label: '安全库存' },
-        ]);
-      } catch (e) { toast('导出失败：' + e.message, 'error'); }
+        exportCsv(
+          '实时库存.csv',
+          rowsAll.map((r) => ({
+            prodName: r.prodName,
+            spec: r.spec || '',
+            unit: r.unit,
+            warehouse: r.warehouseName || '',
+            reservoir: resvName(r.reservoirId),
+            batchNo: r.batchNo || '',
+            qty: r.qty,
+            lowQty: r.lowQty ?? '',
+          })),
+          [
+            { key: 'prodName', label: '商品' },
+            { key: 'spec', label: '规格' },
+            { key: 'unit', label: '单位' },
+            { key: 'warehouse', label: '仓库' },
+            { key: 'reservoir', label: '库位' },
+            { key: 'batchNo', label: '批次' },
+            { key: 'qty', label: '数量' },
+            { key: 'lowQty', label: '安全库存' },
+          ],
+        );
+      } catch (e) {
+        toast('导出失败：' + e.message, 'error');
+      }
     }
     return {
-      kw, warehouseId, ifShowZero, list, loading, load, search, totalQty, isLow, resvName, doExport, lowQtyMap, store,
-      view, summary, sortedSummary, sortKey, toggleSort, isLowSum, lowCount, drillTo, backToSummary, toDetail, drillKw,
-      onlyLow, totalValue, fmtMoney, page, rows, total, pages, pageBtns, onRowsChange,
+      kw,
+      warehouseId,
+      ifShowZero,
+      list,
+      loading,
+      load,
+      search,
+      totalQty,
+      isLow,
+      resvName,
+      doExport,
+      lowQtyMap,
+      store,
+      view,
+      summary,
+      sortedSummary,
+      sortKey,
+      toggleSort,
+      isLowSum,
+      lowCount,
+      drillTo,
+      backToSummary,
+      toDetail,
+      drillKw,
+      onlyLow,
+      totalValue,
+      fmtMoney,
+      page,
+      rows,
+      total,
+      pages,
+      pageBtns,
+      onRowsChange,
     };
   },
   template: `
@@ -343,4 +449,3 @@ const StockPage = {
     </div>
   </div>`,
 };
-

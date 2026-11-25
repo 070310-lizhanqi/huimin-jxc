@@ -10,10 +10,17 @@ async function logout() {
   // 服务端吊销当前令牌并清掉 Cookie：单清客户端状态只是「客户端忘记」，
   // 已导出的令牌在过期前仍可调用接口（共用电脑/令牌泄漏场景）。
   // 同源 fetch 默认带 cookie，无需再拼 Authorization 头。
-  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* 网络失败也要完成本地清理 */ }
-  auth.user = null; auth.team = null;
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch {
+    /* 网络失败也要完成本地清理 */
+  }
+  auth.user = null;
+  auth.team = null;
   store.loaded = false;
-  store.teamId = null; store.team = null; store.teams = [];
+  store.teamId = null;
+  store.team = null;
+  store.teams = [];
   // 打印抬头重置：换账号后新账套未设置打印时，不能沿用上一账号的抬头
   store.print = { company: '', address: '', phone: '', footer: '', showLogo: true };
   // 主动退出不保留回跳地址：下次登录回工作台，而非退出前那页
@@ -32,19 +39,27 @@ function handle401() {
   // document.cookie 写 Max-Age=0 可删掉 HttpOnly Cookie（HttpOnly 只禁读不禁删）。
   // 放去抖判断之前同步执行：req() 调 handle401() 时不 await，放在这里才能保证
   // 本次 401 返回前 Cookie 已清掉；无 Cookie 时是空操作。
-  try { document.cookie = 'oc_token=; Path=/; Max-Age=0'; } catch { /* ignore */ }
+  try {
+    document.cookie = 'oc_token=; Path=/; Max-Age=0';
+  } catch {
+    /* ignore */
+  }
   if (handling401Promise) return handling401Promise;
   handling401Promise = (async () => {
     // 记住当前页（排除登录页自身），登录成功后回到这里
     const cur = location.hash;
     if (cur && cur !== '#/login' && !cur.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, cur);
     if (auth.user || store.loaded) {
-      auth.user = null; auth.team = null;
-      store.loaded = false; store.teamId = null; store.team = null; store.teams = [];
+      auth.user = null;
+      auth.team = null;
+      store.loaded = false;
+      store.teamId = null;
+      store.team = null;
+      store.teams = [];
     }
     if (location.hash !== '#/login') location.hash = '#/login';
     // 等渲染/路由切换完成后再释放单例，避免真实的下一次失效被吞掉
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 100));
     handling401Promise = null;
   })();
   return handling401Promise;
@@ -88,7 +103,11 @@ async function req(method, path, body, params) {
   }
   clearTimeout(timer);
   let data = null;
-  try { data = await r.json(); } catch { /* non-json */ }
+  try {
+    data = await r.json();
+  } catch {
+    /* non-json */
+  }
   // 令牌失效：清空登录态（含缓存账套数据）并跳登录页（登录接口自身的 401 交给调用方提示）
   if (r.status === 401 && !path.startsWith('/auth/login')) handle401();
   if (!r.ok) {
@@ -127,7 +146,11 @@ const api = {
     if (!r.ok) {
       clearTimeout(timer);
       let data = null;
-      try { data = await r.json(); } catch { /* non-json */ }
+      try {
+        data = await r.json();
+      } catch {
+        /* non-json */
+      }
       const err = new Error((data && data.error) || `HTTP ${r.status}`);
       err.status = r.status;
       err.code = data && data.code;
@@ -150,7 +173,11 @@ const api = {
     // will-download 拿不到 <a download> 的名字（item.getFilename() 只会给 "download"），
     // 保存对话框需要这个名字做默认值。浏览器里没有 window.zhanhui，这行是空操作。
     if (window.zhanhui && typeof window.zhanhui.setDownloadFilename === 'function') {
-      try { window.zhanhui.setDownloadFilename(name); } catch { /* ignore */ }
+      try {
+        window.zhanhui.setDownloadFilename(name);
+      } catch {
+        /* ignore */
+      }
     }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -164,4 +191,3 @@ const api = {
     requestAnimationFrame(() => URL.revokeObjectURL(url));
   },
 };
-

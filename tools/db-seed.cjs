@@ -3,13 +3,15 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
-const { initConfig } = require(path.join(__dirname, '..', 'dist', 'server', 'config', 'env.js'));
+const { loadDotEnv, resolveStoragePaths } = require(path.join(__dirname, '..', 'dist', 'server', 'config', 'env.js'));
 const { openDb, migrate, localDate, tryCheckpoint } = require(path.join(__dirname, '..', 'dist', 'server', 'db.js'));
-const { hashPassword } = require(path.join(__dirname, '..', 'dist', 'server', 'auth.js'));
+const { checkPasswordStrength, hashPassword } = require(path.join(__dirname, '..', 'dist', 'server', 'auth.js'));
 
 (async () => {
-  const cfg = initConfig();
-  const db = openDb(cfg.dbPath);
+  loadDotEnv();
+  const nodeEnv = String(process.env.NODE_ENV || 'development').trim().toLowerCase() || 'development';
+  const { dbPath } = resolveStoragePaths(process.env);
+  const db = openDb(dbPath);
   try {
     migrate(db);
     const existing = db.prepare('SELECT COUNT(*) AS c FROM team').get();
@@ -20,20 +22,34 @@ const { hashPassword } = require(path.join(__dirname, '..', 'dist', 'server', 'a
 
     const adminUser = String(process.env.SEED_ADMIN_USER || 'admin').trim();
     const envPass = String(process.env.SEED_ADMIN_PASS || '').trim();
-    if (cfg.nodeEnv === 'production' && envPass.length < 8) {
-      console.error('[db:seed] production 环境必须显式提供至少 8 位的 SEED_ADMIN_PASS');
+    if (nodeEnv === 'production' && !envPass) {
+      console.error('[db:seed] production 环境必须显式提供满足强度要求的 SEED_ADMIN_PASS');
       process.exitCode = 1;
       return;
     }
-    const adminPass = envPass || `Zh-${crypto.randomBytes(6).toString('base64url')}9!`;
+    let adminPass = envPass;
+    if (adminPass) {
+      const strengthErr = checkPasswordStrength(adminPass, adminUser);
+      if (strengthErr) {
+        console.error(`[db:seed] SEED_ADMIN_PASS 密码强度不符合要求：${strengthErr}`);
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      adminPass = `Zh-${crypto.randomBytes(6).toString('base64url')}9!`;
+      if (checkPasswordStrength(adminPass, adminUser)) {
+        adminPass = `${crypto.randomBytes(8).toString('hex')}Q!9x`;
+      }
+    }
     const passHash = await hashPassword(adminPass);
     const today = localDate();
+    const startPeriod = today.slice(0, 7).replace('-', '');
 
     db.exec('BEGIN IMMEDIATE');
     try {
       const teamInfo = db
         .prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)')
-        .run(process.env.SEED_TEAM_NAME || '演示账套', today);
+        .run(process.env.SEED_TEAM_NAME || '演示账套', startPeriod);
       const teamId = Number(teamInfo.lastInsertRowid);
       db.prepare('INSERT INTO "user" (teamId, name, role, password, createdAt, tokenVer) VALUES (?, ?, ?, ?, ?, 0)').run(
         teamId,
@@ -43,6 +59,7 @@ const { hashPassword } = require(path.join(__dirname, '..', 'dist', 'server', 'a
         today,
       );
       db.prepare('INSERT INTO warehouse (teamId, name, remark) VALUES (?, ?, ?)').run(teamId, '主仓库', '默认仓库');
+      db.prepare('INSERT INTO cat (teamId, name) VALUES (?, ?)').run(teamId, '默认分类');
       db.prepare('INSERT INTO account (teamId, name, type, balance) VALUES (?, ?, ?, 0)').run(teamId, '现金账户', 'cash');
       db.prepare('INSERT INTO customer (teamId, name, priceLevel) VALUES (?, ?, ?)').run(teamId, '零售散客', 'salePrice');
       db.prepare('INSERT INTO vendor (teamId, name) VALUES (?, ?)').run(teamId, '默认供应商');

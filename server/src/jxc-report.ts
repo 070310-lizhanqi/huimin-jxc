@@ -19,7 +19,10 @@ function rangeOf(req: Request): { from: string; to: string; error: string | null
   const to = String(req.query.to ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`);
   // 日期参数校验：脏日期（格式错/不存在的日历日）会让字符串比较静默输出错账报表
   // （如 '2026-01-01' < '2026/1/1' 恒真 → 期初吞下全部历史），必须拒绝而不是猜
-  for (const [label, v] of [['from', from], ['to', to]] as const) {
+  for (const [label, v] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
     const err = validBizDate(v);
     if (err) return { from, to, error: `${label} 参数非法：${err}` };
   }
@@ -304,10 +307,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT type, COALESCE(SUM(totalAmount), 0) AS amt FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND date < ?
+           AND partnerType = ? AND partnerId = ? AND date < ?
          GROUP BY type`,
       )
-      .all(teamId, partnerId, from) as Array<{ type: string; amt: number }>;
+      .all(teamId, partnerType, partnerId, from) as Array<{ type: string; amt: number }>;
     const beforeDocs = beforeRows.reduce((s, r) => s + r.amt * signOf(r.type), 0);
     // 期初结算净额：正向收款冲减，反向类型（AR 的 payment=现退客户 / AP 的 receipt=供应商退款）
     // 是退货单审核时落账、bump 往来为正——期初不把它加回去就与 partner_balance 对不上。
@@ -325,10 +328,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT id, billNo, date, type, totalAmount, remark FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND date >= ? AND date <= ?
+           AND partnerType = ? AND partnerId = ? AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, partnerId, from, to) as Array<{
+      .all(teamId, partnerType, partnerId, from, to) as Array<{
       id: number;
       billNo: string;
       date: string;
@@ -374,9 +377,9 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
         `SELECT COALESCE(SUM(CASE WHEN type = 'sret' THEN -deposit WHEN type = 'pin' THEN -deposit ELSE deposit END), 0) AS amt
          FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND deposit > 0 AND date < ?`,
+           AND partnerType = ? AND partnerId = ? AND deposit > 0 AND date < ?`,
       )
-      .get(teamId, partnerId, from) as { amt: number };
+      .get(teamId, partnerType, partnerId, from) as { amt: number };
     const openingFinal = opening - beforeDep.amt;
     let balance = openingFinal;
     // 同日排序：单据行 → 收付款行 → 订金抵扣行。
@@ -410,7 +413,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
           kind: 'settle',
           // 收付款记录无单号体系，用 收-/付- 前缀代替裸 #id（打印件可读）
           billNo: `${settleType === 'receipt' ? '收' : '付'}-${r.id}`,
-          label: isReverse ? '退款' : (settleType === 'receipt' ? '收款' : '付款'),
+          label: isReverse ? '退款' : settleType === 'receipt' ? '收款' : '付款',
           // 退款（退货单当场退款，审核时 bump 往来为正）在应收/应付上都是「加回」，渲染为借方
           debit: isReverse ? r.amount : 0,
           credit: isReverse ? 0 : r.amount,
@@ -424,10 +427,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT id, date, billNo, deposit, type FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND deposit > 0 AND date >= ? AND date <= ?
+           AND partnerType = ? AND partnerId = ? AND deposit > 0 AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, partnerId, from, to) as Array<{
+      .all(teamId, partnerType, partnerId, from, to) as Array<{
       id: number;
       date: string;
       billNo: string;
@@ -466,10 +469,13 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const table = partnerType === 'cus' ? 'customer' : 'vendor';
     const partner = db
       .prepare(`SELECT id, name, mobile, address FROM ${table} WHERE id = ? AND teamId = ?`)
-      .get(partnerId, teamId) as { id: number; name: string; mobile: string | null; address: string | null } | undefined;
+      .get(partnerId, teamId) as
+      { id: number; name: string; mobile: string | null; address: string | null } | undefined;
 
     res.json({
-      mode, from, to,
+      mode,
+      from,
+      to,
       partner: partner ?? { id: partnerId, name: `#${partnerId}`, mobile: null, address: null },
       opening: openingFinal,
       periodDebit,

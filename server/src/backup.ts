@@ -62,7 +62,7 @@ function pruneBackups(dir: string, keepFile?: string): string[] {
   }
   const keepBackups = keepBackupsCount();
   if (entries.length <= keepBackups) return [];
-  entries.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.file < b.file ? 1 : -1)); // 新 → 旧
+  entries.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.file < b.file ? 1 : -1)); // 新 → 旧
   const removed: string[] = [];
   let remaining = entries.length;
   for (let i = entries.length - 1; i >= 0 && remaining > keepBackups; i--) {
@@ -73,7 +73,10 @@ function pruneBackups(dir: string, keepFile?: string): string[] {
     for (const f of [old, old + '-wal', old + '-shm']) {
       try {
         fs.rmSync(path.join(dir, f), { force: true });
-        if (f === old) { removed.push(old); remaining--; }
+        if (f === old) {
+          removed.push(old);
+          remaining--;
+        }
       } catch {
         /* 单个删除失败不影响其它与本次备份结果 */
       }
@@ -106,13 +109,40 @@ function assertSQLiteFile(file: string): void {
   }
 }
 
+function resolveSafeBackupPath(
+  dir: string,
+  file: string,
+):
+  | { ok: true; resolved: string }
+  | { ok: false; status: 400 | 404; error: string; code: 'VALIDATION_ERROR' | 'NOT_FOUND' } {
+  const resolvedDir = path.resolve(dir);
+  const resolved = path.resolve(path.join(resolvedDir, file));
+  if (!resolved.startsWith(resolvedDir + path.sep)) {
+    return { ok: false, status: 400, error: '备份文件路径非法', code: 'VALIDATION_ERROR' };
+  }
+  try {
+    const lst = fs.lstatSync(resolved);
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      return { ok: false, status: 400, error: '备份文件类型非法', code: 'VALIDATION_ERROR' };
+    }
+  } catch {
+    return { ok: false, status: 404, error: '备份文件不存在', code: 'NOT_FOUND' };
+  }
+  return { ok: true, resolved };
+}
+
 /** 连带删除备份的 WAL/SHM 副产物（备份文件被外部工具打开过会留下），避免孤儿文件累积 */
 function removeBackupFile(dir: string, file: string): void {
+  const resolvedDir = path.resolve(dir);
   for (const f of [file, file + '-wal', file + '-shm']) {
     try {
-      fs.rmSync(path.join(dir, f), { force: true });
+      const p = path.resolve(path.join(resolvedDir, f));
+      if (!p.startsWith(resolvedDir + path.sep)) continue;
+      const lst = fs.lstatSync(p);
+      if (lst.isSymbolicLink()) continue;
+      fs.rmSync(p, { force: true });
     } catch {
-      /* 单个删除失败不影响其它 */
+      /* 单个删除失败或不存在不影响其它 */
     }
   }
 }
@@ -125,8 +155,7 @@ function removeBackupFile(dir: string, file: string): void {
 function checkpoint(db: DatabaseSync): void {
   for (let attempt = 0; attempt < 2; attempt++) {
     const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
-      | { busy: number; log: number; checkpointed: number }
-      | undefined;
+      { busy: number; log: number; checkpointed: number } | undefined;
     if (row && row.busy !== 1 && row.checkpointed >= row.log) return;
     if (attempt === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
   }
@@ -134,7 +163,19 @@ function checkpoint(db: DatabaseSync): void {
 }
 
 /** 恢复前必须存在的关键表（缺任何一张都说明该文件不是本系统账套） */
-const REQUIRED_RESTORE_TABLES = ['team', 'user', 'doc', 'doc_item', 'stock', 'product', 'customer', 'vendor', 'settlement', 'setting', 'bill_seq'];
+const REQUIRED_RESTORE_TABLES = [
+  'team',
+  'user',
+  'doc',
+  'doc_item',
+  'stock',
+  'product',
+  'customer',
+  'vendor',
+  'settlement',
+  'setting',
+  'bill_seq',
+];
 
 /**
  * B-安7：恢复前完整性校验。把待恢复文件拷到临时位置，用只读连接跑
@@ -165,7 +206,9 @@ function validateRestoreFile(file: string): { seconds: number } {
         throw new Error('备份文件完整性校验未通过');
       }
       const have = new Set(
-        (ro.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name),
+        (ro.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+          (r) => r.name,
+        ),
       );
       const missing = REQUIRED_RESTORE_TABLES.filter((t) => !have.has(t));
       if (missing.length) throw new Error(`备份文件缺少关键表：${missing.join(',')}`);
@@ -173,7 +216,11 @@ function validateRestoreFile(file: string): { seconds: number } {
       ro.close();
     }
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   }
   return { seconds: (Date.now() - t0) / 1000 };
 }
@@ -245,7 +292,11 @@ function scheduleRestore(source: string, db: DatabaseSync): void {
   setTimeout(() => {
     logger.info('Exiting process to apply queued database restore');
     // B-安18：恢复退出前先关库，再退出（重启助手等父进程退出后拉起）
-    try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
+    try {
+      db.close();
+    } catch {
+      /* 关库失败不阻塞退出 */
+    }
     process.exit(0);
   }, 400);
 }
@@ -282,22 +333,21 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
   router.get('/backup/list', (req, res) => {
     if (!requireAdmin(req, res)) return;
     const dir = backupDir();
-    const rows = (
-      fs
-        .readdirSync(dir)
-        .filter((f) => NAME_RE.test(f))
-        .map((f) => {
-          try {
-            const st = fs.statSync(path.join(dir, f));
-            return { file: f, size: st.size, mtime: st.mtime.toISOString(), _ms: st.mtimeMs };
-          } catch {
-            return null;
-          }
-        })
-        .filter((x): x is { file: string; size: number; mtime: string; _ms: number } => x !== null)
-        // 按 mtime 倒序：同一秒内多份备份仅按文件名排序顺序不定，最新一份可能不在首位
-        .sort((a, b) => (b._ms - a._ms) || (a.file < b.file ? 1 : -1))
-    ).map(({ _ms, ...rest }) => rest);
+    const rows = fs
+      .readdirSync(dir)
+      .filter((f) => NAME_RE.test(f))
+      .map((f) => {
+        try {
+          const st = fs.statSync(path.join(dir, f));
+          return { file: f, size: st.size, mtime: st.mtime.toISOString(), _ms: st.mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { file: string; size: number; mtime: string; _ms: number } => x !== null)
+      // 按 mtime 倒序：同一秒内多份备份仅按文件名排序顺序不定，最新一份可能不在首位
+      .sort((a, b) => b._ms - a._ms || (a.file < b.file ? 1 : -1))
+      .map(({ _ms, ...rest }) => rest);
     return res.json({ dir, rows });
   });
 
@@ -345,98 +395,92 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     const file = typeof req.query.file === 'string' ? req.query.file : '';
     if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
     // 防符号链接逃逸：仅文件名白名单不够，攻击者若能把 backupDir 里的文件替换成
-    // 指向敏感文件的软链接，res.download 会读到任意文件。resolve 后必须仍落在 backupDir 内。
-    const dir = backupDir();
-    const full = path.join(dir, file);
-    const resolved = path.resolve(full);
-    if (!resolved.startsWith(path.resolve(dir) + path.sep)) {
-      return sendError(req, res, 400, '备份文件路径非法', 'VALIDATION_ERROR');
-    }
-    // 拒绝软链接/硬链接：lstat 与 stat 比较，符号链接直接拒绝
-    try {
-      const lst = fs.lstatSync(resolved);
-      if (lst.isSymbolicLink()) return sendError(req, res, 400, '备份文件类型非法', 'VALIDATION_ERROR');
-    } catch {
-      return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
-    }
-    if (!fs.existsSync(resolved)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
-    return res.download(resolved, file);
+    const safePath = resolveSafeBackupPath(backupDir(), file);
+    if (!safePath.ok) return sendError(req, res, safePath.status, safePath.error, safePath.code);
+    return res.download(safePath.resolved, file);
   });
 
   /** 恢复备份：需二次验证当前管理员密码（高危不可逆操作），排队后自动重启生效 */
-  router.post('/backup/restore', safe(async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    const body =
-      req.body && typeof req.body === 'object' && !Array.isArray(req.body)
-        ? (req.body as Record<string, unknown>)
-        : {};
-    const file = typeof body.file === 'string' ? body.file : '';
-    if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
-    const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
-    try {
-      assertSQLiteFile(full);
-    } catch (e) {
-      // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
-      logger.error('Restore validation failed (invalid SQLite header)', { file, err: e });
-      return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
-    }
-    // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
-    const password = typeof body.password === 'string' ? body.password : '';
-    if (!password) return sendError(req, res, 400, '请输入当前登录账号的密码以确认恢复', 'VALIDATION_ERROR');
-    // B-安4②：失败计数——同一 IP 连续 5 次密码错误后冷却 10 分钟（冷却期内即使密码正确也 429）
-    const ipKey = extractClientIp(req);
-    const failRec = restoreFailures.get(ipKey);
-    if (failRec && failRec.lockedUntil > Date.now()) {
-      return sendError(req, res, 429, '恢复失败次数过多，请 10 分钟后再试', 'RATE_LIMITED');
-    }
-    const row = db.prepare(`SELECT password FROM "user" WHERE id = ?`).get(req.auth!.userId) as
-      | { password: string | null }
-      | undefined;
-    if (!row || !(await verifyPassword(password, row.password))) {
-      const rec = restoreFailures.get(ipKey) ?? { count: 0, lockedUntil: 0 };
-      rec.count++;
-      if (rec.count >= RESTORE_MAX_FAILS) rec.lockedUntil = Date.now() + RESTORE_COOLDOWN_MS;
-      restoreFailures.set(ipKey, rec);
-      return sendError(req, res, 400, '密码不正确，恢复已取消', 'VALIDATION_ERROR');
-    }
-    restoreFailures.delete(ipKey);
-    // B-安7：恢复前完整性校验（integrity_check 对大库耗时数秒是正常的，请耐心等待；
-    // 校验在临时拷贝上进行，不动当前库）
-    let validation: { seconds: number };
-    try {
-      validation = validateRestoreFile(full);
-    } catch (e) {
-      // A-安4：校验失败的原始错误不回吐，只返回通用文案，详情写服务端日志
-      logger.error('Restore integrity verification failed', { file, err: e });
-      return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
-    }
-    try {
-      // 校验通过：先检查点再备份当前库、写 pending（任一步失败都能回滚，见 db.ts）
-      checkpoint(db);
-      recordAuditFromRequest(db, req, {
-        action: 'backup.restore',
-        entityType: 'backup',
-        entityId: file,
-        detail: { validationSeconds: Number(validation.seconds.toFixed(2)) },
-      });
-      scheduleRestore(full, db);
-      return res.json({ ok: true, message: `恢复已排队：服务即将重启，重启后数据回到所选备份时点。（恢复前完整性校验已通过，耗时 ${validation.seconds.toFixed(1)} 秒；当前库已备份，恢复失败可回滚。）` });
-    } catch (e) {
-      // A-安4：不把 err.message 回吐给客户端，只写服务端日志
-      logger.error('Failed to queue restore', { file, err: e });
-      return sendError(req, res, 500, '恢复失败，请稍后重试', 'INTERNAL_ERROR');
-    }
-  }));
+  router.post(
+    '/backup/restore',
+    safe(async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      const body =
+        req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const file = typeof body.file === 'string' ? body.file : '';
+      if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
+      const safePath = resolveSafeBackupPath(backupDir(), file);
+      if (!safePath.ok) return sendError(req, res, safePath.status, safePath.error, safePath.code);
+      const full = safePath.resolved;
+      try {
+        assertSQLiteFile(full);
+      } catch (e) {
+        // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
+        logger.error('Restore validation failed (invalid SQLite header)', { file, err: e });
+        return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
+      }
+      // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!password) return sendError(req, res, 400, '请输入当前登录账号的密码以确认恢复', 'VALIDATION_ERROR');
+      // B-安4②：失败计数——同一 IP 连续 5 次密码错误后冷却 10 分钟（冷却期内即使密码正确也 429）
+      const ipKey = extractClientIp(req);
+      const failRec = restoreFailures.get(ipKey);
+      if (failRec && failRec.lockedUntil > Date.now()) {
+        return sendError(req, res, 429, '恢复失败次数过多，请 10 分钟后再试', 'RATE_LIMITED');
+      }
+      const row = db.prepare(`SELECT password FROM "user" WHERE id = ?`).get(req.auth!.userId) as
+        { password: string | null } | undefined;
+      if (!row || !(await verifyPassword(password, row.password))) {
+        const rec = restoreFailures.get(ipKey) ?? { count: 0, lockedUntil: 0 };
+        rec.count++;
+        if (rec.count >= RESTORE_MAX_FAILS) rec.lockedUntil = Date.now() + RESTORE_COOLDOWN_MS;
+        restoreFailures.set(ipKey, rec);
+        return sendError(req, res, 400, '密码不正确，恢复已取消', 'VALIDATION_ERROR');
+      }
+      restoreFailures.delete(ipKey);
+      // B-安7：恢复前完整性校验（integrity_check 对大库耗时数秒是正常的，请耐心等待；
+      // 校验在临时拷贝上进行，不动当前库）
+      let validation: { seconds: number };
+      try {
+        validation = validateRestoreFile(full);
+      } catch (e) {
+        // A-安4：校验失败的原始错误不回吐，只返回通用文案，详情写服务端日志
+        logger.error('Restore integrity verification failed', { file, err: e });
+        return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
+      }
+      try {
+        // 校验通过：先检查点再备份当前库、写 pending（任一步失败都能回滚，见 db.ts）
+        checkpoint(db);
+        recordAuditFromRequest(db, req, {
+          action: 'backup.restore',
+          entityType: 'backup',
+          entityId: file,
+          detail: { validationSeconds: Number(validation.seconds.toFixed(2)) },
+        });
+        scheduleRestore(full, db);
+        return res.json({
+          ok: true,
+          message: `恢复已排队：服务即将重启，重启后数据回到所选备份时点。（恢复前完整性校验已通过，耗时 ${validation.seconds.toFixed(1)} 秒；当前库已备份，恢复失败可回滚。）`,
+        });
+      } catch (e) {
+        // A-安4：不把 err.message 回吐给客户端，只写服务端日志
+        logger.error('Failed to queue restore', { file, err: e });
+        return sendError(req, res, 500, '恢复失败，请稍后重试', 'INTERNAL_ERROR');
+      }
+    }),
+  );
 
   /** 删除备份 */
   router.delete('/backup/:file', (req, res) => {
     if (!requireAdmin(req, res)) return;
     const file = typeof req.params.file === 'string' ? req.params.file : '';
     if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
-    const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
-    removeBackupFile(backupDir(), file);
+    const dir = backupDir();
+    const safePath = resolveSafeBackupPath(dir, file);
+    if (!safePath.ok) return sendError(req, res, safePath.status, safePath.error, safePath.code);
+    removeBackupFile(dir, file);
     recordAuditFromRequest(db, req, {
       action: 'backup.delete',
       entityType: 'backup',

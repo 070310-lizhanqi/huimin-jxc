@@ -104,7 +104,7 @@ export function batchInboundCost(
   return row ? Number(row.unitCost) : null;
 }
 
-/** 查询可用库存行（FIFO 顺序：按 stock.id 升序） */
+/** 查询可用库存行（FIFO 顺序：按 stock.id 升序；exactCell=true 时 null 也精确匹配为空值格子） */
 export function fifoBatches(
   db: DatabaseSync,
   teamId: number,
@@ -113,16 +113,22 @@ export function fifoBatches(
   reservoirId: number | null,
   batchNo: string | null,
   qty: number,
+  exactCell = false,
 ): Array<{ batchNo: string | null; reservoirId: number | null; qty: number; unitCost: number | null }> {
   const params: SQLInputValue[] = [teamId, productId, warehouseId];
   let where = `teamId=? AND productId=? AND warehouseId=? AND qty > 0`;
-  if (reservoirId != null) {
-    where += ` AND reservoirId = ?`;
-    params.push(reservoirId);
-  }
-  if (batchNo != null) {
-    where += ` AND batchNo = ?`;
-    params.push(batchNo);
+  if (exactCell) {
+    where += ` AND (reservoirId IS ?) AND (batchNo IS ?)`;
+    params.push(reservoirId, batchNo);
+  } else {
+    if (reservoirId != null) {
+      where += ` AND reservoirId = ?`;
+      params.push(reservoirId);
+    }
+    if (batchNo != null) {
+      where += ` AND batchNo = ?`;
+      params.push(batchNo);
+    }
   }
   const rows = db
     .prepare(`SELECT id, batchNo, reservoirId, qty FROM stock WHERE ${where} ORDER BY id ASC`)
@@ -212,8 +218,9 @@ export function deduct(
   qty: number,
   unitCost: number,
   reverse: boolean,
+  exactCell = false,
 ): void {
-  const batches = fifoBatches(db, doc.teamId, productId, warehouseId, reservoirId, batchNo, qty);
+  const batches = fifoBatches(db, doc.teamId, productId, warehouseId, reservoirId, batchNo, qty, exactCell);
   for (const b of batches) {
     moveStock(
       db,
@@ -280,16 +287,22 @@ export function precheckStock(db: DatabaseSync, docId: number): string | null {
     else needMap.set(key, { productId: it.productId, reservoirId: it.reservoirId, batchNo: it.batchNo, need });
   }
 
+  const exactCell = doc.type === 'stocktake';
   for (const { productId, reservoirId, batchNo, need } of needMap.values()) {
     const params: SQLInputValue[] = [doc.teamId, productId, doc.warehouseId];
     let where = `teamId=? AND productId=? AND warehouseId=? AND qty > 0`;
-    if (reservoirId != null) {
-      where += ` AND reservoirId = ?`;
-      params.push(reservoirId);
-    }
-    if (batchNo != null) {
-      where += ` AND batchNo = ?`;
-      params.push(batchNo);
+    if (exactCell) {
+      where += ` AND (reservoirId IS ?) AND (batchNo IS ?)`;
+      params.push(reservoirId, batchNo);
+    } else {
+      if (reservoirId != null) {
+        where += ` AND reservoirId = ?`;
+        params.push(reservoirId);
+      }
+      if (batchNo != null) {
+        where += ` AND batchNo = ?`;
+        params.push(batchNo);
+      }
     }
     const rows = db.prepare(`SELECT qty FROM stock WHERE ${where}`).all(...params) as Array<{ qty: number }>;
     const avail = sumQty(rows.map((r) => r.qty));
@@ -347,6 +360,7 @@ export function postStockForward(
           Math.abs(diff),
           unitCost,
           false,
+          true,
         );
       }
     } else if (doc.type === 'assembly') {
@@ -413,7 +427,16 @@ export function reverseStockByLedger(
     qty: number;
     unitCost: number;
   }>;
-  if (!orig.length) throw new StockError('找不到本单的原始库存流水，无法作废冲回');
+  if (!orig.length) {
+    // 账实相符（diff === 0）的盘点单审核时不写流水，作废时可直接放行
+    if (doc.type === 'stocktake') {
+      const hasDiff = db
+        .prepare(`SELECT 1 AS ok FROM doc_item WHERE docId = ? AND COALESCE(postQty, 0) <> 0 LIMIT 1`)
+        .get(docId) as { ok: number } | undefined;
+      if (!hasDiff) return;
+    }
+    throw new StockError('找不到本单的原始库存流水，无法作废冲回');
+  }
   for (const r of orig) {
     const dirEff: 'in' | 'out' = r.direction === 'in' ? 'out' : 'in';
     db.prepare(
@@ -457,10 +480,18 @@ export function postStock(db: DatabaseSync, docId: number, reverse = false): voi
     postStockForward(db, doc, docId);
   }
 
-  const PARTNER_DELTA: Record<string, number> = { stockin: 1, sret: -1, stockout: 1, pin: -1 };
+  const PARTNER_DELTA: Record<string, { type: 'cus' | 'ven'; sign: number }> = {
+    stockin: { type: 'ven', sign: 1 },
+    pin: { type: 'ven', sign: -1 },
+    stockout: { type: 'cus', sign: 1 },
+    sret: { type: 'cus', sign: -1 },
+  };
   const pd = PARTNER_DELTA[doc.type];
   if (pd && doc.partnerId && doc.partnerType) {
-    const delta = pd * doc.totalAmount * (reverse ? -1 : 1);
+    if (doc.partnerType !== pd.type) {
+      throw new StockError('往来单位类型与单据类型不匹配');
+    }
+    const delta = pd.sign * doc.totalAmount * (reverse ? -1 : 1);
     bumpPartnerBalance(db, doc.teamId, doc.partnerType, doc.partnerId, delta);
   }
 }

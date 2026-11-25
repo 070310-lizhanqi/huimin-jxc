@@ -23,8 +23,11 @@ const PricePage = {
         if (!guard.isCurrent(my)) return;
         rows.value = r.rows || [];
         total.value = r.total ?? (r.rows || []).length;
-      } catch (e) { if (guard.isCurrent(my)) toast(e.message, 'error'); }
-      finally { if (guard.isCurrent(my)) loading.value = false; }
+      } catch (e) {
+        if (guard.isCurrent(my)) toast(e.message, 'error');
+      } finally {
+        if (guard.isCurrent(my)) loading.value = false;
+      }
     }
 
     function openEdit(row) {
@@ -49,7 +52,9 @@ const PricePage = {
         toast('已更新');
         editor.open = false;
         load();
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        toast(e.message, 'error');
+      }
     }
 
     /* B-前6：删除走 confirmDeleteRow（确认/提示骨架共用；本页 editor 是 { open, row, price } 形态，不合 useCrudEditor） */
@@ -71,16 +76,36 @@ const PricePage = {
     /* 导出当前筛选的价格记忆（业务员外出报价常用资料） */
     function doExport() {
       if (!sorted.value.length) return toast('没有可导出的数据', 'warning');
-      exportCsv(`客户价格_${todayStr()}.csv`,
-        sorted.value.map((r) => moneyRow({
-          客户: r.cusName || '', 商品: r.prodName, 规格: r.spec || '', 单位: r.unit || '',
-          记忆价: r.price, 标准售价: r.salePrice || '',
-          对比: diffOf(r), 最近成交: r.lastDate || '', 成交次数: r.times ?? 0,
-        }, ['记忆价', '标准售价'])), [
-          { key: '客户', label: '客户' }, { key: '商品', label: '商品' }, { key: '规格', label: '规格' },
-          { key: '单位', label: '单位' }, { key: '记忆价', label: '记忆价(元)' }, { key: '标准售价', label: '标准售价(元)' },
-          { key: '对比', label: '对比' }, { key: '最近成交', label: '最近成交' }, { key: '成交次数', label: '成交次数' },
-        ]);
+      exportCsv(
+        `客户价格_${todayStr()}.csv`,
+        sorted.value.map((r) =>
+          moneyRow(
+            {
+              客户: r.cusName || '',
+              商品: r.prodName,
+              规格: r.spec || '',
+              单位: r.unit || '',
+              记忆价: r.price,
+              标准售价: r.salePrice || '',
+              对比: diffOf(r),
+              最近成交: r.lastDate || '',
+              成交次数: r.times ?? 0,
+            },
+            ['记忆价', '标准售价'],
+          ),
+        ),
+        [
+          { key: '客户', label: '客户' },
+          { key: '商品', label: '商品' },
+          { key: '规格', label: '规格' },
+          { key: '单位', label: '单位' },
+          { key: '记忆价', label: '记忆价(元)' },
+          { key: '标准售价', label: '标准售价(元)' },
+          { key: '对比', label: '对比' },
+          { key: '最近成交', label: '最近成交' },
+          { key: '成交次数', label: '成交次数' },
+        ],
+      );
     }
 
     onMounted(load);
@@ -92,15 +117,32 @@ const PricePage = {
         arr.sort((a, b) => (b.times ?? 0) - (a.times ?? 0));
       } else if (sortBy.value === 'diffAsc') {
         // 低于标准售价最多（对客户最优惠）排前
-        arr.sort((a, b) => (a.price - (a.salePrice ?? 0)) - (b.price - (b.salePrice ?? 0)));
+        arr.sort((a, b) => a.price - (a.salePrice ?? 0) - (b.price - (b.salePrice ?? 0)));
       } else if (sortBy.value === 'diffDesc') {
-        arr.sort((a, b) => (b.price - (b.salePrice ?? 0)) - (a.price - (a.salePrice ?? 0)));
+        arr.sort((a, b) => b.price - (b.salePrice ?? 0) - (a.price - (a.salePrice ?? 0)));
       } else if (sortBy.value === 'lastDate') {
         arr.sort((a, b) => String(b.lastDate || '').localeCompare(String(a.lastDate || '')));
       }
       return arr;
     });
-    return { kw, partnerId, rows, total, sorted, sortBy, loading, editor, load, openEdit, save, del, diffOf, store, fmtMoney, doExport };
+    return {
+      kw,
+      partnerId,
+      rows,
+      total,
+      sorted,
+      sortBy,
+      loading,
+      editor,
+      load,
+      openEdit,
+      save,
+      del,
+      diffOf,
+      store,
+      fmtMoney,
+      doExport,
+    };
   },
   template: `
   <div>
@@ -174,4 +216,3 @@ const PricePage = {
     </div>
   </div>`,
 };
-

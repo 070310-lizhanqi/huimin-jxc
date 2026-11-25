@@ -170,9 +170,10 @@ export function rememberPrices(
 ): void {
   if (doc.partnerType !== 'cus' || !doc.partnerId) return;
   if (!PRICE_MEMORY_TYPES.includes(doc.type)) return;
-  const items = db
-    .prepare(`SELECT productId, price FROM doc_item WHERE docId = ? AND price > 0`)
-    .all(docId) as Array<{ productId: number; price: number }>;
+  const items = db.prepare(`SELECT productId, price FROM doc_item WHERE docId = ? AND price > 0`).all(docId) as Array<{
+    productId: number;
+    price: number;
+  }>;
   const up = db.prepare(
     `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
      VALUES (?, ?, ?, ?, ?, 1)
@@ -225,16 +226,14 @@ export function recomputePriceMemory(
   );
   const del = db.prepare(`DELETE FROM price_memory WHERE teamId = ? AND partnerId = ? AND productId = ?`);
   for (const { productId } of products) {
-    const latest = latestStmt.get(
-      doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId,
-    ) as { price: number; date: string } | undefined;
+    const latest = latestStmt.get(doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId) as
+      { price: number; date: string } | undefined;
     if (!latest) {
       del.run(doc.teamId, doc.partnerId, productId);
       continue;
     }
-    const times = (
-      countStmt.get(doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId) as { c: number }
-    ).c;
+    const times = (countStmt.get(doc.teamId, ...PRICE_MEMORY_TYPES, doc.partnerId, productId, docId) as { c: number })
+      .c;
     upsert.run(doc.teamId, doc.partnerId, productId, Math.round(latest.price), latest.date, times);
   }
 }

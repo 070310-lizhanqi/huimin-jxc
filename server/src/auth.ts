@@ -40,11 +40,14 @@ function shouldSetCookieSecure(req: Request): boolean {
   const mode = getConfig().cookieSecure;
   if (mode === '1') return true;
   if (mode === 'auto') {
+    if (req.secure) return true;
+    const trustProxy = Boolean(req.app?.get('trust proxy'));
+    if (!trustProxy) return false;
     const xfProto = String(req.headers['x-forwarded-proto'] ?? '')
       .split(',')[0]
       .trim()
       .toLowerCase();
-    return Boolean(req.secure || xfProto === 'https');
+    return xfProto === 'https';
   }
   return false;
 }
@@ -108,18 +111,22 @@ export async function verifyPassword(plain: string, stored: string | null): Prom
  * 格式须能通过 verifyPassword 的解析：`scrypt$<32 位 hex 盐>$<64 位 hex 哈希>`。
  * 全零值仅作耗时填充，从不对应任何真实用户的 stored 密码。
  */
-const DUMMY_HASH = 'scrypt$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000';
+const DUMMY_HASH =
+  'scrypt$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000';
 
 /* ---------------- 令牌签发与校验 ---------------- */
 
 const b64url = (buf: Buffer): string =>
   buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-const sign = (data: string): string =>
-  b64url(crypto.createHmac('sha256', getConfig().jwtSecret).update(data).digest());
+const sign = (data: string): string => b64url(crypto.createHmac('sha256', getConfig().jwtSecret).update(data).digest());
 
 export function issueToken(user: AuthUser): string {
-  const payload = { ...user, jti: crypto.randomBytes(8).toString('hex'), exp: Math.floor(Date.now() / 1000) + TOKEN_TTL };
+  const payload = {
+    ...user,
+    jti: crypto.randomBytes(8).toString('hex'),
+    exp: Math.floor(Date.now() / 1000) + TOKEN_TTL,
+  };
   const body = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
   return `${body}.${sign(body)}`;
 }
@@ -133,8 +140,9 @@ export function verifyToken(token: string): AuthUser | null {
   if (sig.length !== expect.length) return null;
   if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect))) return null;
   try {
-    const payload = JSON.parse(Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) as
-      AuthUser & { exp?: number };
+    const payload = JSON.parse(
+      Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as AuthUser & { exp?: number };
     if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
     // B-安15：载荷类型校验。只判真值不够：userId:true 这类伪造载荷会通过真值
     // 检查，随后在 requireAuth 里把非法绑定值传给 node:sqlite 而抛 500。
@@ -146,7 +154,14 @@ export function verifyToken(token: string): AuthUser | null {
     // 退出登录黑名单：单实例部署用进程内表即可，条目随令牌过期自动失效。
     // 键含 jti（见 AuthUser.jti 注释）：只用 userId:exp 时同秒签发的令牌会互杀。
     if (revoked.has(`${payload.userId}:${payload.exp}:${payload.jti ?? ''}`)) return null;
-    return { userId: payload.userId, teamId: payload.teamId, role: payload.role, name: payload.name, ver: payload.ver, jti: payload.jti };
+    return {
+      userId: payload.userId,
+      teamId: payload.teamId,
+      role: payload.role,
+      name: payload.name,
+      ver: payload.ver,
+      jti: payload.jti,
+    };
   } catch {
     return null;
   }
@@ -182,8 +197,7 @@ function persistRevoked(): void {
 function loadRevoked(db: DatabaseSync): void {
   try {
     const row = db.prepare(`SELECT value FROM setting WHERE teamId = ? AND key = ?`).get(GLOBAL_TEAM, REVOKED_KEY) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!row) return;
     const parsed: unknown = JSON.parse(row.value);
     if (!Array.isArray(parsed)) return;
@@ -437,8 +451,7 @@ interface RegisterConf {
 
 function loadRegisterConf(db: DatabaseSync): RegisterConf {
   const row = db.prepare(`SELECT value FROM setting WHERE teamId = ? AND key = ?`).get(GLOBAL_TEAM, REGISTER_KEY) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!row) return { enabled: false, inviteCodeHash: '', inviteCode: '' };
   try {
     const parsed: unknown = JSON.parse(row.value);
@@ -509,17 +522,85 @@ function safeEqual(a: string, b: string): boolean {
  * 应由总协调人更新夹具，而非把弱口令放回白名单。
  */
 const WEAK_PASSWORDS = new Set([
-  '123456', '1234567', '12345678', '123456789', '1234567890',
-  'password', 'password1', 'password123', 'password1234', 'passw0rd', 'passw0rd123',
-  'admin123', 'admin1234', 'admin12345', 'admin888',
-  'admin666', 'admin000', 'root123', 'root1234', 'abc123', 'abc123456',
-  'abcd1234', 'abc12345', '111111', '11111111', '000000', '00000000', '666666', '888888', '88888888',
-  '999999', '7777777', 'a123456', 'a1234567', 'a12345678', 'a123456789', '123123', '654321', '112233', '123321', '1qaz2wsx',
-  'qwe123', 'qwerty', 'qwerty123', 'qwertyuiop', 'qq123456', 'taobao123', '1111111', '1111',
-  'letmein', 'welcome', 'welcome1', 'monkey', 'dragon', 'football', 'iloveyou', 'sunshine',
-  'master', 'shadow', 'superman', 'michael', 'asdfgh', 'asdfghjkl', 'zxcvbnm',
-  '1q2w3e', '1q2w3e4r', 'qazwsx', '123qwe', '123456a', 'aa123456', 'a1b2c3', 'a1b2c3d4',
-  '5201314', '1314520', 'woaini', 'test123', 'test1234', 'pass123', 'pass1234',
+  '123456',
+  '1234567',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'password',
+  'password1',
+  'password123',
+  'password1234',
+  'passw0rd',
+  'passw0rd123',
+  'admin123',
+  'admin1234',
+  'admin12345',
+  'admin888',
+  'admin666',
+  'admin000',
+  'root123',
+  'root1234',
+  'abc123',
+  'abc123456',
+  'abcd1234',
+  'abc12345',
+  '111111',
+  '11111111',
+  '000000',
+  '00000000',
+  '666666',
+  '888888',
+  '88888888',
+  '999999',
+  '7777777',
+  'a123456',
+  'a1234567',
+  'a12345678',
+  'a123456789',
+  '123123',
+  '654321',
+  '112233',
+  '123321',
+  '1qaz2wsx',
+  'qwe123',
+  'qwerty',
+  'qwerty123',
+  'qwertyuiop',
+  'qq123456',
+  'taobao123',
+  '1111111',
+  '1111',
+  'letmein',
+  'welcome',
+  'welcome1',
+  'monkey',
+  'dragon',
+  'football',
+  'iloveyou',
+  'sunshine',
+  'master',
+  'shadow',
+  'superman',
+  'michael',
+  'asdfgh',
+  'asdfghjkl',
+  'zxcvbnm',
+  '1q2w3e',
+  '1q2w3e4r',
+  'qazwsx',
+  '123qwe',
+  '123456a',
+  'aa123456',
+  'a1b2c3',
+  'a1b2c3d4',
+  '5201314',
+  '1314520',
+  'woaini',
+  'test123',
+  'test1234',
+  'pass123',
+  'pass1234',
 ]);
 
 /**
@@ -534,7 +615,7 @@ const KEYBOARD_RUNS = ['0123456789', 'abcdefghijklmnopqrstuvwxyz', 'qwertyuiop',
  * B-安5：下限由 6 位提到 8 位；只对新设/修改的密码生效，不强制存量用户改密
  * （登录不校验强度，存量弱口令仍可登录）。
  */
-function checkPasswordStrength(password: string, username?: string): string | null {
+export function checkPasswordStrength(password: string, username?: string): string | null {
   if (password.length < 8) return '密码至少 8 位';
   if (password.length > 64) return '密码过长（最多 64 位）';
   // 密码不得包含用户名（不区分大小写；用户名为空时跳过）
@@ -583,195 +664,202 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   }
 
   /** 注册：首个账号自动建团队；已有团队时按全局注册开关走邀请码建「独立新账套」 */
-  router.post('/auth/register', safeHandler(async (req, res) => {
-    // 注册接口按 IP 做总频率限速（不区分成败）：teamCount=0 时若不限速，
-    // 攻击者可无限重试直到抢到首个管理员
-    if (tooManyRegisters(clientIp(req))) {
-      return sendError(req, res, 429, '注册请求过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
-    }
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    const teamName = typeof req.body?.teamName === 'string' ? req.body.teamName.trim() : '';
-    // 失败计数 key 按 ip:username：NAT 出口下一人爆破不再封锁整个公司
-    const failKey = `${clientIp(req)}:${username}`;
-    const fail = (status: number, error: string) => {
-      recordFail(failKey);
-      return sendError(req, res, status, error, defaultCodeForStatus(status));
-    };
-    if (tooManyFails(failKey)) {
-      return fail(429, '尝试过于频繁，请 1 分钟后再试');
-    }
-    const nameErr = checkUsername(username);
-    if (nameErr) return fail(400, nameErr);
-    const pwdErr = checkPasswordStrength(password, username);
-    if (pwdErr) return fail(400, pwdErr);
-    if (teamName.length > 60) return fail(400, '账套名称过长（最多 60 个字符）');
-
-    /**
-     * B-安2 + B-安3：注册原子化 + 首注册竞态。
-     */
-    const teamCountOut = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
-    // 邀请码配置：事务外读一次（存量明文顺带转哈希，见 B-安14）
-    const confOut = await loadRegisterConfMigrated(db);
-    const invite = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
-    let inviteVerified = false;
-    if (teamCountOut > 0) {
-      // 已有账套 → 开放注册默认关闭；开启后凭邀请码创建「独立新账套」（各用各的账套）
-      if (!confOut.enabled) {
-        return fail(400, '注册未开放，请联系已有账套的管理员开启');
+  router.post(
+    '/auth/register',
+    safeHandler(async (req, res) => {
+      // 注册接口按 IP 做总频率限速（不区分成败）：teamCount=0 时若不限速，
+      // 攻击者可无限重试直到抢到首个管理员
+      if (tooManyRegisters(clientIp(req))) {
+        return sendError(req, res, 429, '注册请求过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
       }
-      if (!(await verifyInviteCode(invite, confOut))) {
-        return fail(400, '邀请码不正确');
+      const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const teamName = typeof req.body?.teamName === 'string' ? req.body.teamName.trim() : '';
+      // 失败计数 key 按 ip:username：NAT 出口下一人爆破不再封锁整个公司
+      const failKey = `${clientIp(req)}:${username}`;
+      const fail = (status: number, error: string) => {
+        recordFail(failKey);
+        return sendError(req, res, status, error, defaultCodeForStatus(status));
+      };
+      if (tooManyFails(failKey)) {
+        return fail(429, '尝试过于频繁，请 1 分钟后再试');
       }
-      inviteVerified = true;
-    } else if (invite && confOut.enabled && confOut.inviteCodeHash) {
-      inviteVerified = await verifyPassword(invite, confOut.inviteCodeHash);
-    }
+      const nameErr = checkUsername(username);
+      if (nameErr) return fail(400, nameErr);
+      const pwdErr = checkPasswordStrength(password, username);
+      if (pwdErr) return fail(400, pwdErr);
+      if (teamName.length > 60) return fail(400, '账套名称过长（最多 60 个字符）');
 
-    // 先在事务外算好密码哈希，再在事务内只做纯 SQL 插入
-    const hashed = await hashPassword(password);
-    const createdAt = new Date().toISOString();
-    const teamNameOut = teamName || '我的账套';
-
-    // 事务内可控失败用 sentinel 抛出，catch 里统一 ROLLBACK 后按原口径返回 400
-    const txFail = (status: number, error: string): never => {
-      throw { __txFail: true, status, error };
-    };
-    try {
-      db.exec('BEGIN IMMEDIATE');
-    } catch {
-      // BEGIN 失败即无事务，不执行 ROLLBACK（与 A-数3 同口径）
-      return sendError(req, res, 503, '系统繁忙，请重试', 'SERVICE_UNAVAILABLE');
-    }
-    let teamId: number;
-    let userId: number;
-    try {
-      // B-安3：事务开始后、插入前再次重查 teamCount，按锁内最新值定分支
-      const teamCountIn = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
-      if (teamCountIn === 0) {
-        let startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
-        if (!/^\d{6}$/.test(startPeriod)) {
-          const m = String(startPeriod).match(/^(\d{4})-?(\d{1,2})$/);
-          if (m) startPeriod = `${m[1]}${m[2].padStart(2, '0')}`;
-          else startPeriod = localDate().slice(0, 7).replace('-', '');
+      /**
+       * B-安2 + B-安3：注册原子化 + 首注册竞态。
+       */
+      const teamCountOut = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
+      // 邀请码配置：事务外读一次（存量明文顺带转哈希，见 B-安14）
+      const confOut = await loadRegisterConfMigrated(db);
+      const invite = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
+      let inviteVerified = false;
+      if (teamCountOut > 0) {
+        // 已有账套 → 开放注册默认关闭；开启后凭邀请码创建「独立新账套」（各用各的账套）
+        if (!confOut.enabled) {
+          return fail(400, '注册未开放，请联系已有账套的管理员开启');
         }
-        const mm = Number(startPeriod.slice(4, 6));
-        if (mm < 1 || mm > 12) startPeriod = localDate().slice(0, 7).replace('-', '');
-        const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamNameOut, startPeriod);
-        teamId = Number(info.lastInsertRowid);
-      } else {
-        // 锁内已有账套：配置可能在事务外校验后刚被改动，重新读一次再定
-        const confIn = loadRegisterConf(db);
-        if (!confIn.enabled) {
-          txFail(400, '注册未开放，请联系已有账套的管理员开启');
+        if (!(await verifyInviteCode(invite, confOut))) {
+          return fail(400, '邀请码不正确');
         }
-        if (!inviteVerified) {
-          txFail(400, '邀请码不正确');
-        }
-        const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamNameOut, localDate().slice(0, 7).replace('-', ''));
-        teamId = Number(info.lastInsertRowid);
+        inviteVerified = true;
+      } else if (invite && confOut.enabled && confOut.inviteCodeHash) {
+        inviteVerified = await verifyPassword(invite, confOut.inviteCodeHash);
       }
-      db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);
-      db.prepare(`INSERT INTO account (teamId, name, type) VALUES (?, '现金', 'cash')`).run(teamId);
-      db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, '默认分类')`).run(teamId);
-      const info = db
-        .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
-        .run(teamId, username, hashed, createdAt);
-      userId = Number(info.lastInsertRowid);
-      db.exec('COMMIT');
-    } catch (e) {
+
+      // 先在事务外算好密码哈希，再在事务内只做纯 SQL 插入
+      const hashed = await hashPassword(password);
+      const createdAt = new Date().toISOString();
+      const teamNameOut = teamName || '我的账套';
+
+      // 事务内可控失败用 sentinel 抛出，catch 里统一 ROLLBACK 后按原口径返回 400
+      const txFail = (status: number, error: string): never => {
+        throw { __txFail: true, status, error };
+      };
       try {
-        db.exec('ROLLBACK');
+        db.exec('BEGIN IMMEDIATE');
       } catch {
-        /* 已无事务可回滚 */
+        // BEGIN 失败即无事务，不执行 ROLLBACK（与 A-数3 同口径）
+        return sendError(req, res, 503, '系统繁忙，请重试', 'SERVICE_UNAVAILABLE');
       }
-      const ce = e as { __txFail?: boolean; status?: number; error?: string; message?: string };
-      if (ce && ce.__txFail) {
-        return fail(ce.status ?? 400, ce.error ?? '注册失败');
+      let teamId: number;
+      let userId: number;
+      try {
+        // B-安3：事务开始后、插入前再次重查 teamCount，按锁内最新值定分支
+        const teamCountIn = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
+        if (teamCountIn === 0) {
+          let startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
+          if (!/^\d{6}$/.test(startPeriod)) {
+            const m = String(startPeriod).match(/^(\d{4})-?(\d{1,2})$/);
+            if (m) startPeriod = `${m[1]}${m[2].padStart(2, '0')}`;
+            else startPeriod = localDate().slice(0, 7).replace('-', '');
+          }
+          const mm = Number(startPeriod.slice(4, 6));
+          if (mm < 1 || mm > 12) startPeriod = localDate().slice(0, 7).replace('-', '');
+          const info = db.prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)').run(teamNameOut, startPeriod);
+          teamId = Number(info.lastInsertRowid);
+        } else {
+          // 锁内已有账套：配置可能在事务外校验后刚被改动，重新读一次再定
+          const confIn = loadRegisterConf(db);
+          if (!confIn.enabled) {
+            txFail(400, '注册未开放，请联系已有账套的管理员开启');
+          }
+          if (!inviteVerified) {
+            txFail(400, '邀请码不正确');
+          }
+          const info = db
+            .prepare('INSERT INTO team (name, startPeriod) VALUES (?, ?)')
+            .run(teamNameOut, localDate().slice(0, 7).replace('-', ''));
+          teamId = Number(info.lastInsertRowid);
+        }
+        db.prepare(`INSERT INTO warehouse (teamId, name) VALUES (?, '默认仓库')`).run(teamId);
+        db.prepare(`INSERT INTO account (teamId, name, type) VALUES (?, '现金', 'cash')`).run(teamId);
+        db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, '默认分类')`).run(teamId);
+        const info = db
+          .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, 'admin', ?, ?)`)
+          .run(teamId, username, hashed, createdAt);
+        userId = Number(info.lastInsertRowid);
+        db.exec('COMMIT');
+      } catch (e) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          /* 已无事务可回滚 */
+        }
+        const ce = e as { __txFail?: boolean; status?: number; error?: string; message?: string };
+        if (ce && ce.__txFail) {
+          return fail(ce.status ?? 400, ce.error ?? '注册失败');
+        }
+        if (String(ce?.message ?? '').includes('UNIQUE constraint failed')) {
+          return fail(400, '该用户名已被使用');
+        }
+        logger.error('Registration transaction failed', { err: e });
+        return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
       }
-      if (String(ce?.message ?? '').includes('UNIQUE constraint failed')) {
-        return fail(400, '该用户名已被使用');
-      }
-      logger.error('Registration transaction failed', { err: e });
-      return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
-    }
-    const user: AuthUser = { userId, teamId, role: 'admin', name: username, ver: 0 };
-    clearFails(failKey);
-    const token = issueToken(user);
-    setAuthCookie(req, res, token);
-    recordAudit(db, {
-      teamId,
-      userId,
-      username,
-      action: 'auth.register',
-      entityType: 'user',
-      entityId: userId,
-      ip: clientIp(req),
-      detail: { teamName: teamNameOut },
-    });
-    return res.json({ ok: true, token, user, teamId, teamName: teamNameOut });
-  }));
+      const user: AuthUser = { userId, teamId, role: 'admin', name: username, ver: 0 };
+      clearFails(failKey);
+      const token = issueToken(user);
+      setAuthCookie(req, res, token);
+      recordAudit(db, {
+        teamId,
+        userId,
+        username,
+        action: 'auth.register',
+        entityType: 'user',
+        entityId: userId,
+        ip: clientIp(req),
+        detail: { teamName: teamNameOut },
+      });
+      return res.json({ ok: true, token, user, teamId, teamName: teamNameOut });
+    }),
+  );
 
   /** 登录 */
-  router.post('/auth/login', safeHandler(async (req, res) => {
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    if (!username || !password) return sendError(req, res, 400, '请输入用户名和密码', 'VALIDATION_ERROR');
-    if (userTooManyFails(username)) {
-      return sendError(req, res, 429, '该账号登录尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
-    }
-    const failKey = `${clientIp(req)}:${username}`;
-    if (tooManyFails(failKey)) {
-      recordUserFail(username);
-      return sendError(req, res, 429, '尝试过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
-    }
-    const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
-    if (!row) {
-      await verifyPassword(password, DUMMY_HASH);
-      recordFail(failKey);
-      recordUserFail(username);
-      recordAudit(db, {
-        teamId: 0,
-        username,
-        action: 'auth.login_failed',
-        entityType: 'auth',
-        ip: clientIp(req),
-        detail: { reason: 'invalid_credentials' },
-      });
-      return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
-    }
-    if (!(await verifyPassword(password, row.password))) {
-      recordFail(failKey);
-      recordUserFail(username);
+  router.post(
+    '/auth/login',
+    safeHandler(async (req, res) => {
+      const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      if (!username || !password) return sendError(req, res, 400, '请输入用户名和密码', 'VALIDATION_ERROR');
+      if (userTooManyFails(username)) {
+        return sendError(req, res, 429, '该账号登录尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
+      }
+      const failKey = `${clientIp(req)}:${username}`;
+      if (tooManyFails(failKey)) {
+        recordUserFail(username);
+        return sendError(req, res, 429, '尝试过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
+      }
+      const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
+      if (!row) {
+        await verifyPassword(password, DUMMY_HASH);
+        recordFail(failKey);
+        recordUserFail(username);
+        recordAudit(db, {
+          teamId: 0,
+          username,
+          action: 'auth.login_failed',
+          entityType: 'auth',
+          ip: clientIp(req),
+          detail: { reason: 'invalid_credentials' },
+        });
+        return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
+      }
+      if (!(await verifyPassword(password, row.password))) {
+        recordFail(failKey);
+        recordUserFail(username);
+        recordAudit(db, {
+          teamId: row.teamId,
+          userId: row.id,
+          username: row.name,
+          action: 'auth.login_failed',
+          entityType: 'auth',
+          ip: clientIp(req),
+          detail: { reason: 'invalid_credentials' },
+        });
+        return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
+      }
+      const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
+        { id: number; name: string } | undefined;
+      const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name, ver: row.tokenVer };
+      clearFails(failKey);
+      clearUserFails(username);
+      const token = issueToken(user);
+      setAuthCookie(req, res, token);
       recordAudit(db, {
         teamId: row.teamId,
         userId: row.id,
         username: row.name,
-        action: 'auth.login_failed',
+        action: 'auth.login',
         entityType: 'auth',
         ip: clientIp(req),
-        detail: { reason: 'invalid_credentials' },
       });
-      return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
-    }
-    const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
-      | { id: number; name: string }
-      | undefined;
-    const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name, ver: row.tokenVer };
-    clearFails(failKey);
-    clearUserFails(username);
-    const token = issueToken(user);
-    setAuthCookie(req, res, token);
-    recordAudit(db, {
-      teamId: row.teamId,
-      userId: row.id,
-      username: row.name,
-      action: 'auth.login',
-      entityType: 'auth',
-      ip: clientIp(req),
-    });
-    return res.json({ ok: true, token, user, team });
-  }));
+      return res.json({ ok: true, token, user, team });
+    }),
+  );
 
   /** 退出登录：吊销当前令牌（此前只是客户端删 token，令牌在过期前仍可继续调用接口） */
   router.post('/auth/logout', requireAuth, (req, res) => {
@@ -780,10 +868,13 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const dot = token.lastIndexOf('.');
     if (dot > 0) {
       try {
-        const payload = JSON.parse(Buffer.from(token.slice(0, dot).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) as
-          { userId?: number; exp?: number; jti?: string };
+        const payload = JSON.parse(
+          Buffer.from(token.slice(0, dot).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+        ) as { userId?: number; exp?: number; jti?: string };
         if (payload.userId && payload.exp) revokeToken(payload as { userId: number; exp: number; jti?: string });
-      } catch { /* 令牌格式异常时无需吊销 */ }
+      } catch {
+        /* 令牌格式异常时无需吊销 */
+      }
     }
     // B-前5：登出同时清掉浏览器里的 Cookie（Max-Age=0）
     clearAuthCookie(req, res);
@@ -799,8 +890,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const u = resolveAuth(req);
     if (!u) return res.json({ loggedIn: false });
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(u.teamId) as
-      | { id: number; name: string }
-      | undefined;
+      { id: number; name: string } | undefined;
     return res.json({ loggedIn: true, user: u, team });
   });
 
@@ -809,8 +899,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const u = req.auth;
     if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(u.teamId) as
-      | { id: number; name: string }
-      | undefined;
+      { id: number; name: string } | undefined;
     return res.json({ user: u, team });
   });
 
@@ -822,137 +911,161 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   });
 
   /** 改密码（需登录） */
-  router.post('/auth/password', requireAuth, safeHandler(async (req, res) => {
-    const u = req.auth;
-    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
-    // B-安4②：旧密码连续猜错 5 次后冷却 10 分钟（失败计数，不含新密码强度不合格）
-    if (pwdChangeLocked(u.userId)) {
-      return sendError(req, res, 429, '改密尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
-    }
-    const oldPwd = typeof req.body?.oldPassword === 'string' ? req.body.oldPassword : '';
-    const newPwd = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
-    const pwdErr = checkPasswordStrength(newPwd, u.name);
-    if (pwdErr) return sendError(req, res, 400, '新' + pwdErr, 'VALIDATION_ERROR');
-    const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
-    if (!row || !(await verifyPassword(oldPwd, row.password))) {
-      recordPwdChangeFail(u.userId);
-      return sendError(req, res, 400, '原密码不正确', 'VALIDATION_ERROR');
-    }
-    // 改密后 tokenVer + 1：吊销该用户全部旧令牌（含泄漏在外的），并为当前会话重签新令牌
-    db.prepare(`UPDATE "user" SET password = ?, tokenVer = tokenVer + 1 WHERE id = ?`).run(await hashPassword(newPwd), u.userId);
-    const fresh = db.prepare(`SELECT tokenVer FROM "user" WHERE id = ?`).get(u.userId) as { tokenVer: number } | undefined;
-    const renewed: AuthUser = { userId: u.userId, teamId: u.teamId, role: u.role, name: u.name, ver: fresh?.tokenVer ?? row.tokenVer + 1 };
-    // 改密成功清零失败计数
-    clearPwdChangeFails(u.userId);
-    const renewedToken = issueToken(renewed);
-    setAuthCookie(req, res, renewedToken);
-    recordAuditFromRequest(db, req, {
-      action: 'auth.password_change',
-      entityType: 'user',
-      entityId: u.userId,
-    });
-    return res.json({ ok: true, token: renewedToken });
-  }));
+  router.post(
+    '/auth/password',
+    requireAuth,
+    safeHandler(async (req, res) => {
+      const u = req.auth;
+      if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+      // B-安4②：旧密码连续猜错 5 次后冷却 10 分钟（失败计数，不含新密码强度不合格）
+      if (pwdChangeLocked(u.userId)) {
+        return sendError(req, res, 429, '改密尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
+      }
+      const oldPwd = typeof req.body?.oldPassword === 'string' ? req.body.oldPassword : '';
+      const newPwd = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+      const pwdErr = checkPasswordStrength(newPwd, u.name);
+      if (pwdErr) return sendError(req, res, 400, '新' + pwdErr, 'VALIDATION_ERROR');
+      const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
+      if (!row || !(await verifyPassword(oldPwd, row.password))) {
+        recordPwdChangeFail(u.userId);
+        return sendError(req, res, 400, '原密码不正确', 'VALIDATION_ERROR');
+      }
+      // 改密后 tokenVer + 1：吊销该用户全部旧令牌（含泄漏在外的），并为当前会话重签新令牌
+      db.prepare(`UPDATE "user" SET password = ?, tokenVer = tokenVer + 1 WHERE id = ?`).run(
+        await hashPassword(newPwd),
+        u.userId,
+      );
+      const fresh = db.prepare(`SELECT tokenVer FROM "user" WHERE id = ?`).get(u.userId) as
+        { tokenVer: number } | undefined;
+      const renewed: AuthUser = {
+        userId: u.userId,
+        teamId: u.teamId,
+        role: u.role,
+        name: u.name,
+        ver: fresh?.tokenVer ?? row.tokenVer + 1,
+      };
+      // 改密成功清零失败计数
+      clearPwdChangeFails(u.userId);
+      const renewedToken = issueToken(renewed);
+      setAuthCookie(req, res, renewedToken);
+      recordAuditFromRequest(db, req, {
+        action: 'auth.password_change',
+        entityType: 'user',
+        entityId: u.userId,
+      });
+      return res.json({ ok: true, token: renewedToken });
+    }),
+  );
 
-  router.get('/auth/register-conf', requireAuth, safeHandler(async (req, res) => {
-    const u = req.auth;
-    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
-    if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
-      return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
-    }
-    const conf = await loadRegisterConfMigrated(db);
-    return res.json({ enabled: conf.enabled, hasInviteCode: !!conf.inviteCodeHash });
-  }));
+  router.get(
+    '/auth/register-conf',
+    requireAuth,
+    safeHandler(async (req, res) => {
+      const u = req.auth;
+      if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+      if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
+        return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
+      }
+      const conf = await loadRegisterConfMigrated(db);
+      return res.json({ enabled: conf.enabled, hasInviteCode: !!conf.inviteCodeHash });
+    }),
+  );
 
-  router.post('/auth/register-conf', requireAuth, safeHandler(async (req, res) => {
-    const u = req.auth;
-    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
-    if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
-      return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
-    }
-    const enabled = req.body?.enabled === true;
-    const inviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
-    const existing = await loadRegisterConfMigrated(db);
-    if (enabled) {
-      if (inviteCode) {
-        if (!/^[A-Za-z0-9-]{6,32}$/.test(inviteCode)) {
+  router.post(
+    '/auth/register-conf',
+    requireAuth,
+    safeHandler(async (req, res) => {
+      const u = req.auth;
+      if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+      if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
+        return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
+      }
+      const enabled = req.body?.enabled === true;
+      const inviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
+      const existing = await loadRegisterConfMigrated(db);
+      if (enabled) {
+        if (inviteCode) {
+          if (!/^[A-Za-z0-9-]{6,32}$/.test(inviteCode)) {
+            return sendError(req, res, 400, '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）', 'VALIDATION_ERROR');
+          }
+          saveRegisterConf(db, { enabled: true, inviteCodeHash: await hashPassword(inviteCode) });
+          recordAuditFromRequest(db, req, {
+            action: 'auth.register_conf',
+            entityType: 'setting',
+            entityId: 'global.register',
+            detail: { enabled: true, inviteCodeUpdated: true },
+          });
+          return res.json({ ok: true, enabled: true, hasInviteCode: true });
+        }
+        if (!existing.inviteCodeHash) {
           return sendError(req, res, 400, '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）', 'VALIDATION_ERROR');
         }
-        saveRegisterConf(db, { enabled: true, inviteCodeHash: await hashPassword(inviteCode) });
+        saveRegisterConf(db, { enabled: true, inviteCodeHash: existing.inviteCodeHash });
         recordAuditFromRequest(db, req, {
           action: 'auth.register_conf',
           entityType: 'setting',
           entityId: 'global.register',
-          detail: { enabled: true, inviteCodeUpdated: true },
+          detail: { enabled: true, inviteCodeUpdated: false },
         });
         return res.json({ ok: true, enabled: true, hasInviteCode: true });
       }
-      if (!existing.inviteCodeHash) {
-        return sendError(req, res, 400, '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）', 'VALIDATION_ERROR');
-      }
-      saveRegisterConf(db, { enabled: true, inviteCodeHash: existing.inviteCodeHash });
+      saveRegisterConf(db, { enabled: false, inviteCodeHash: '' });
       recordAuditFromRequest(db, req, {
         action: 'auth.register_conf',
         entityType: 'setting',
         entityId: 'global.register',
-        detail: { enabled: true, inviteCodeUpdated: false },
+        detail: { enabled: false },
       });
-      return res.json({ ok: true, enabled: true, hasInviteCode: true });
-    }
-    saveRegisterConf(db, { enabled: false, inviteCodeHash: '' });
-    recordAuditFromRequest(db, req, {
-      action: 'auth.register_conf',
-      entityType: 'setting',
-      entityId: 'global.register',
-      detail: { enabled: false },
-    });
-    return res.json({ ok: true, enabled: false, hasInviteCode: false });
-  }));
+      return res.json({ ok: true, enabled: false, hasInviteCode: false });
+    }),
+  );
 
   /** 团队内用户列表：仅管理员可看（员工账号信息也是敏感数据） */
   router.get('/auth/users', requireAuth, (req, res) => {
     const u = req.auth;
     if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以查看用户列表', 'FORBIDDEN');
-    const rows = db
-      .prepare(`SELECT id, name, role, createdAt FROM "user" WHERE teamId = ? ORDER BY id`)
-      .all(u.teamId);
+    const rows = db.prepare(`SELECT id, name, role, createdAt FROM "user" WHERE teamId = ? ORDER BY id`).all(u.teamId);
     return res.json(rows);
   });
 
   /** 管理员新增同团队用户 */
-  router.post('/auth/users', requireAuth, safeHandler(async (req, res) => {
-    const u = req.auth;
-    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
-    if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以添加用户', 'FORBIDDEN');
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    const rawRole = req.body?.role;
-    const role = rawRole === 'admin' ? 'admin' : 'clerk';
-    const nameErr = checkUsername(username);
-    if (nameErr) return sendError(req, res, 400, nameErr, 'VALIDATION_ERROR');
-    const pwdErr = checkPasswordStrength(password, username);
-    if (pwdErr) return sendError(req, res, 400, pwdErr, 'VALIDATION_ERROR');
-    const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
-    if (dup) return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
-    const hashed = await hashPassword(password);
-    let info: { lastInsertRowid: number | bigint };
-    try {
-      info = db
-        .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
-        .run(u.teamId, username, role, hashed, new Date().toISOString());
-    } catch {
-      return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
-    }
-    const newUserId = Number(info.lastInsertRowid);
-    recordAuditFromRequest(db, req, {
-      action: 'auth.user_create',
-      entityType: 'user',
-      entityId: newUserId,
-      detail: { username, role },
-    });
-    return res.json({ ok: true, id: newUserId });
-  }));
+  router.post(
+    '/auth/users',
+    requireAuth,
+    safeHandler(async (req, res) => {
+      const u = req.auth;
+      if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+      if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以添加用户', 'FORBIDDEN');
+      const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const rawRole = req.body?.role;
+      const role = rawRole === 'admin' ? 'admin' : 'clerk';
+      const nameErr = checkUsername(username);
+      if (nameErr) return sendError(req, res, 400, nameErr, 'VALIDATION_ERROR');
+      const pwdErr = checkPasswordStrength(password, username);
+      if (pwdErr) return sendError(req, res, 400, pwdErr, 'VALIDATION_ERROR');
+      const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
+      if (dup) return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
+      const hashed = await hashPassword(password);
+      let info: { lastInsertRowid: number | bigint };
+      try {
+        info = db
+          .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
+          .run(u.teamId, username, role, hashed, new Date().toISOString());
+      } catch {
+        return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
+      }
+      const newUserId = Number(info.lastInsertRowid);
+      recordAuditFromRequest(db, req, {
+        action: 'auth.user_create',
+        entityType: 'user',
+        entityId: newUserId,
+        detail: { username, role },
+      });
+      return res.json({ ok: true, id: newUserId });
+    }),
+  );
 
   /** 管理员删除同团队用户（不能删自己，避免把最后一个管理员删掉） */
   router.delete('/auth/users/:id', requireAuth, (req, res) => {
@@ -964,11 +1077,14 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const id = idParsed.value;
     if (id === u.userId) return sendError(req, res, 400, '不能删除当前登录账号', 'VALIDATION_ERROR');
     const row = db.prepare(`SELECT id, name, role FROM "user" WHERE id = ? AND teamId = ?`).get(id, u.teamId) as
-      | { id: number; name: string; role: string }
-      | undefined;
+      { id: number; name: string; role: string } | undefined;
     if (!row) return sendError(req, res, 404, '用户不存在', 'NOT_FOUND');
     if (row.role === 'admin') {
-      const admins = (db.prepare(`SELECT COUNT(*) AS c FROM "user" WHERE teamId = ? AND role = 'admin'`).get(u.teamId) as { c: number }).c;
+      const admins = (
+        db.prepare(`SELECT COUNT(*) AS c FROM "user" WHERE teamId = ? AND role = 'admin'`).get(u.teamId) as {
+          c: number;
+        }
+      ).c;
       if (admins <= 1) return sendError(req, res, 400, '至少保留一个管理员', 'VALIDATION_ERROR');
     }
     db.prepare(`DELETE FROM "user" WHERE id = ? AND teamId = ?`).run(id, u.teamId);

@@ -8,7 +8,12 @@ import type { Request, Response, Router } from 'express';
 import { localDate, validBizDate } from './db';
 import { recordAuditTxFromRequest } from './infra/audit-log';
 import { AppError, ConflictError, NotFoundError, sendError, ValidationError } from './infra/errors';
-import { extractIdempotencyKey, hashRequestPayload, lookupIdempotencyKey, saveIdempotencyKey } from './infra/idempotency';
+import {
+  extractIdempotencyKey,
+  hashRequestPayload,
+  lookupIdempotencyKey,
+  saveIdempotencyKey,
+} from './infra/idempotency';
 import { withImmediateTx } from './infra/tx';
 import { parseOptionalPositiveInt, parseOptionalString, parsePositiveInt } from './infra/validate';
 import { MAX_TOTAL_AMOUNT_CENTS } from './shared/money';
@@ -36,13 +41,17 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       conds.push('type = ?');
       args.push(String(req.query.type));
     }
-    if (req.query.partnerId) {
+    const partnerFilter = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
+    if (!partnerFilter.ok) return sendError(req, res, 400, partnerFilter.error);
+    if (partnerFilter.value !== null) {
       conds.push('partnerId = ?');
-      args.push(Number(req.query.partnerId));
+      args.push(partnerFilter.value);
     }
-    if (req.query.refDocId) {
+    const refDocFilter = parseOptionalPositiveInt(req.query.refDocId, 'refDocId');
+    if (!refDocFilter.ok) return sendError(req, res, 400, refDocFilter.error);
+    if (refDocFilter.value !== null) {
       conds.push('refDocId = ?');
-      args.push(Number(req.query.refDocId));
+      args.push(refDocFilter.value);
     }
     if (req.query.from) {
       conds.push('date >= ?');
@@ -67,7 +76,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     const type = typeof req.body.type === 'string' ? req.body.type : '';
     const partnerType = typeof req.body.partnerType === 'string' ? req.body.partnerType : '';
     const partnerParsed = parsePositiveInt(req.body.partnerId, '往来单位');
-    const amount = Math.round(Number(req.body.amount ?? 0));
+    const rawAmount = req.body.amount;
     if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
     if (!['receipt', 'payment'].includes(type)) return sendError(req, res, 400, 'type 非法');
     if (!['cus', 'ven'].includes(partnerType)) return sendError(req, res, 400, 'partnerType 非法');
@@ -79,6 +88,13 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       return sendError(req, res, 400, '付款（payment）的往来单位必须是供应商');
     if (!partnerParsed.ok) return sendError(req, res, 400, '往来单位不能为空');
     const partnerId = partnerParsed.value;
+    if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount)) {
+      return sendError(req, res, 400, '金额必须是有限数值');
+    }
+    if (!Number.isInteger(rawAmount)) {
+      return sendError(req, res, 400, '金额必须为整数分');
+    }
+    const amount = rawAmount;
     if (!(amount > 0)) return sendError(req, res, 400, '金额必须大于 0');
     if (amount > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
     if (req.body.date !== undefined && req.body.date !== null && typeof req.body.date !== 'string') {
@@ -114,23 +130,19 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       }
     }
 
-    // 引用完整性：往来单位必须存在于本团队
-    const partnerTable = partnerType === 'cus' ? 'customer' : 'vendor';
-    const partner = db
-      .prepare(`SELECT id FROM ${partnerTable} WHERE id = ? AND teamId = ?`)
-      .get(partnerId, teamId) as { id: number } | undefined;
-    if (!partner) return sendError(req, res, 400, '往来单位不存在');
-
-    if (refDocId !== null) {
-      const refDoc = db.prepare(`SELECT id FROM doc WHERE id = ? AND teamId = ?`).get(refDocId, teamId);
-      if (!refDoc) return sendError(req, res, 400, '关联单据不存在');
-    }
-
     let createdId = 0;
     let replayed = false;
     const dedupKey = JSON.stringify([
-      teamId, type, partnerType, partnerId, amount, accountId, rawDate,
-      remark ?? '', refDocId ?? 0, req.auth?.userId ?? 0,
+      teamId,
+      type,
+      partnerType,
+      partnerId,
+      amount,
+      accountId,
+      rawDate,
+      remark ?? '',
+      refDocId ?? 0,
+      req.auth?.userId ?? 0,
     ]);
     if (!idem.present) {
       const hit = recentSettles.get(dedupKey);
@@ -156,6 +168,17 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
               return;
             }
           }
+          // 锁内校验往来单位、关联单据、账户与余额
+          const partnerTable = partnerType === 'cus' ? 'customer' : 'vendor';
+          const partner = db
+            .prepare(`SELECT id FROM ${partnerTable} WHERE id = ? AND teamId = ?`)
+            .get(partnerId, teamId) as { id: number } | undefined;
+          if (!partner) throw new ValidationError('往来单位不存在');
+
+          if (refDocId !== null) {
+            const refDoc = db.prepare(`SELECT id FROM doc WHERE id = ? AND teamId = ?`).get(refDocId, teamId);
+            if (!refDoc) throw new ValidationError('关联单据不存在');
+          }
           // 锁内校验账户与余额
           if (accountId) {
             const account = db
@@ -173,17 +196,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
               `INSERT INTO settlement (teamId, type, partnerType, partnerId, accountId, amount, date, refDocId, remark, isAuto)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
             )
-            .run(
-              teamId,
-              type,
-              partnerType,
-              partnerId,
-              accountId,
-              amount,
-              settleDate,
-              refDocId,
-              remark,
-            );
+            .run(teamId, type, partnerType, partnerId, accountId, amount, settleDate, refDocId, remark);
           createdId = Number(info.lastInsertRowid);
           db.prepare(
             `INSERT INTO partner_balance (teamId, partnerType, partnerId, balance) VALUES (?, ?, ?, ?)
@@ -191,7 +204,11 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, partnerType, partnerId, -amount);
           if (accountId) {
             const inc = type === 'receipt' ? amount : -amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(inc, accountId, teamId);
+            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+              inc,
+              accountId,
+              teamId,
+            );
           }
           recordAuditTxFromRequest(db, req, {
             teamId,
@@ -229,9 +246,16 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
 
     let reqAmount: number | undefined;
     if (req.body.amount !== undefined && req.body.amount !== null) {
-      reqAmount = Math.round(Number(req.body.amount));
-      if (!(reqAmount > 0)) return sendError(req, res, 400, '金额必须大于 0');
-      if (reqAmount > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
+      const rawAmt = req.body.amount;
+      if (typeof rawAmt !== 'number' || !Number.isFinite(rawAmt)) {
+        return sendError(req, res, 400, '金额必须是有限数值');
+      }
+      if (!Number.isInteger(rawAmt)) {
+        return sendError(req, res, 400, '金额必须为整数分');
+      }
+      if (!(rawAmt > 0)) return sendError(req, res, 400, '金额必须大于 0');
+      if (rawAmt > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
+      reqAmount = rawAmt;
     }
     let reqAccountId: number | null | undefined = undefined;
     if (req.body.accountId !== undefined) {
@@ -259,10 +283,18 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       withImmediateTx(
         db,
         () => {
-          const old = db
-            .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
-            .get(id, teamId) as
-            | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; date: string; remark: string | null; isAuto: number }
+          const old = db.prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`).get(id, teamId) as
+            | {
+                id: number;
+                type: string;
+                partnerType: string;
+                partnerId: number;
+                accountId: number | null;
+                amount: number;
+                date: string;
+                remark: string | null;
+                isAuto: number;
+              }
             | undefined;
           if (!old) throw new NotFoundError('收付款记录不存在');
           if (old.isAuto) {
@@ -306,7 +338,11 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, old.partnerType, old.partnerId, old.amount - amount);
           if (old.accountId) {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(back, old.accountId, teamId);
+            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+              back,
+              old.accountId,
+              teamId,
+            );
           }
           const upd = db
             .prepare(
@@ -316,7 +352,11 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           if (upd.changes === 0) throw new NotFoundError('收付款记录不存在');
           if (accountId !== null) {
             const inc = old.type === 'receipt' ? amount : -amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(inc, accountId, teamId);
+            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+              inc,
+              accountId,
+              teamId,
+            );
           }
           recordAuditTxFromRequest(db, req, {
             teamId,
@@ -348,10 +388,17 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
       withImmediateTx(
         db,
         () => {
-          const old = db
-            .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
-            .get(id, teamId) as
-            | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; remark: string | null; isAuto: number }
+          const old = db.prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`).get(id, teamId) as
+            | {
+                id: number;
+                type: string;
+                partnerType: string;
+                partnerId: number;
+                accountId: number | null;
+                amount: number;
+                remark: string | null;
+                isAuto: number;
+              }
             | undefined;
           if (!old) throw new NotFoundError('收付款记录不存在');
           if (old.isAuto) {
@@ -375,7 +422,11 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, old.partnerType, old.partnerId, old.amount);
           if (old.accountId) {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(back, old.accountId, teamId);
+            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+              back,
+              old.accountId,
+              teamId,
+            );
           }
           recordAuditTxFromRequest(db, req, {
             teamId,
@@ -397,9 +448,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
   router.get('/partner/balance', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
-    const list = db
-      .prepare(`SELECT * FROM partner_balance WHERE teamId = ?`)
-      .all(teamId);
+    const list = db.prepare(`SELECT * FROM partner_balance WHERE teamId = ?`).all(teamId);
     return res.json(list);
   });
 }

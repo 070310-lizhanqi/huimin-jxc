@@ -17,10 +17,16 @@ const AgingPage = {
     const BUCKET_COLORS = AGING_COLORS;
     const BUCKET_KEYS = AGING_KEYS;
 
-    watch(() => route.q.mode, (m) => {
-      const next = m === 'ap' ? 'ap' : m === 'stock' ? 'stock' : 'ar';
-      if (next !== mode.value) { mode.value = next; load(); }
-    });
+    watch(
+      () => route.q.mode,
+      (m) => {
+        const next = m === 'ap' ? 'ap' : m === 'stock' ? 'stock' : 'ar';
+        if (next !== mode.value) {
+          mode.value = next;
+          load();
+        }
+      },
+    );
 
     async function load() {
       loading.value = true;
@@ -48,12 +54,18 @@ const AgingPage = {
     /* 本地筛选：关键词 + 点击扇区下钻到该账龄区间 */
     const kw = ref('');
     const drillBucket = ref('');
-    function clearDrill() { drillBucket.value = ''; }
+    function clearDrill() {
+      drillBucket.value = '';
+    }
     const shown = computed(() => {
       let out = rows.value;
       if (kw.value.trim()) {
         const k = kw.value.trim().toLowerCase();
-        out = out.filter((r) => String(r.partnerName || r.prodName || '').toLowerCase().includes(k));
+        out = out.filter((r) =>
+          String(r.partnerName || r.prodName || '')
+            .toLowerCase()
+            .includes(k),
+        );
       }
       if (drillBucket.value && mode.value !== 'stock') {
         out = out.filter((r) => Number(r[drillBucket.value] || 0) > 0);
@@ -70,11 +82,18 @@ const AgingPage = {
       else if (sortDir.value === 'asc') out.sort((a, b) => (a.total ?? a.amount ?? 0) - (b.total ?? b.amount ?? 0));
       return out;
     });
-    function toggleSort() { sortDir.value = sortDir.value === 'desc' ? 'asc' : sortDir.value === 'asc' ? '' : 'desc'; }
+    function toggleSort() {
+      sortDir.value = sortDir.value === 'desc' ? 'asc' : sortDir.value === 'asc' ? '' : 'desc';
+    }
 
     async function renderChart() {
       if (!chartEl.value) return;
-      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      try {
+        await loadEcharts();
+      } catch (e) {
+        toast(e.message, 'error');
+        return;
+      }
       if (!chartEl.value || !document.body.contains(chartEl.value)) return;
       // 切模式不销毁容器，但保险起见复用 getInstanceByDom 查重
       const existing = echarts.getInstanceByDom(chartEl.value);
@@ -83,18 +102,45 @@ const AgingPage = {
       const t = totals.value || {};
       // 扇区值保留原始分（tooltip 用 fmtMoney 精确到分）：取整到元会让大额账龄丢分
       const data = BUCKET_KEYS.map((k, i) => ({
-        name: BUCKET_LABELS[i], value: t[k] || 0, itemStyle: { color: BUCKET_COLORS[i] },
+        name: BUCKET_LABELS[i],
+        value: t[k] || 0,
+        itemStyle: { color: BUCKET_COLORS[i] },
       })).filter((d) => d.value > 0);
-      chart.setOption({
-        tooltip: { trigger: 'item', valueFormatter: (v) => fmtMoney(Number(v)) },
-        legend: { right: 8, top: 'middle', orient: 'vertical', itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 12 } },
-        series: [{
-          type: 'pie', radius: ['48%', '68%'], center: ['32%', '50%'],
-          label: { show: false }, labelLine: { show: false },
-          // 占位扇区静默：悬停不出「¥1」假数据
-          data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#eceff2' }, silent: true, tooltip: { show: false } }],
-        }],
-      }, true);
+      chart.setOption(
+        {
+          tooltip: { trigger: 'item', valueFormatter: (v) => fmtMoney(Number(v)) },
+          legend: {
+            right: 8,
+            top: 'middle',
+            orient: 'vertical',
+            itemWidth: 10,
+            itemHeight: 10,
+            textStyle: { fontSize: 12 },
+          },
+          series: [
+            {
+              type: 'pie',
+              radius: ['48%', '68%'],
+              center: ['32%', '50%'],
+              label: { show: false },
+              labelLine: { show: false },
+              // 占位扇区静默：悬停不出「¥1」假数据
+              data: data.length
+                ? data
+                : [
+                    {
+                      name: '暂无数据',
+                      value: 1,
+                      itemStyle: { color: '#eceff2' },
+                      silent: true,
+                      tooltip: { show: false },
+                    },
+                  ],
+            },
+          ],
+        },
+        true,
+      );
       // 点击扇区下钻：ECharts 事件必须用 chart.on 注册（option 里没有 onClick 字段，会被静默忽略）。
       // p.name 是档位标签（如「30天内」），要换算回行键（d30/d60/…）才能用于过滤
       chart.off('click');
@@ -126,51 +172,96 @@ const AgingPage = {
 
     /* 账龄行跳对应单据列表：AR 看销售出库、AP 看采购入库（带往来单位预筛选） */
     function goDocs(r) {
-      nav(`#/doc/${mode.value === 'ar' ? 'sale' : 'purchase'}?type=${mode.value === 'ar' ? 'stockout' : 'stockin'}&partnerId=${r.partnerId}`);
+      nav(
+        `#/doc/${mode.value === 'ar' ? 'sale' : 'purchase'}?type=${mode.value === 'ar' ? 'stockout' : 'stockin'}&partnerId=${r.partnerId}`,
+      );
     }
 
     function doExport() {
       if (!rows.value.length) return toast('没有可导出的数据', 'warning');
       if (mode.value === 'stock') {
-        exportCsv(`库存账龄_${asOf.value}.csv`,
+        exportCsv(
+          `库存账龄_${asOf.value}.csv`,
           rows.value.map((r) => ({
-            商品: r.prodName, 仓库: r.warehouseName || '', 批次: r.batchNo || '',
-            数量: r.qty, 首次入库: r.firstDate || '', 库龄天数: r.days,
-            账龄区间: BUCKET_LABELS[BUCKET_KEYS.indexOf(r.bucket)] || '', 金额: r.amount == null ? '' : (r.amount / 100).toFixed(2),
-          })), [
-            { key: '商品', label: '商品' }, { key: '仓库', label: '仓库' }, { key: '批次', label: '批次' },
-            { key: '数量', label: '数量' }, { key: '首次入库', label: '首次入库' }, { key: '库龄天数', label: '库龄天数' },
-            { key: '账龄区间', label: '账龄区间' }, { key: '金额', label: '金额' },
-          ]);
+            商品: r.prodName,
+            仓库: r.warehouseName || '',
+            批次: r.batchNo || '',
+            数量: r.qty,
+            首次入库: r.firstDate || '',
+            库龄天数: r.days,
+            账龄区间: BUCKET_LABELS[BUCKET_KEYS.indexOf(r.bucket)] || '',
+            金额: r.amount == null ? '' : (r.amount / 100).toFixed(2),
+          })),
+          [
+            { key: '商品', label: '商品' },
+            { key: '仓库', label: '仓库' },
+            { key: '批次', label: '批次' },
+            { key: '数量', label: '数量' },
+            { key: '首次入库', label: '首次入库' },
+            { key: '库龄天数', label: '库龄天数' },
+            { key: '账龄区间', label: '账龄区间' },
+            { key: '金额', label: '金额' },
+          ],
+        );
         return;
       }
       // CSV 金额列输出纯数字（分→元 2 位），不带千分位/破折号，Excel 可直接求和
-      exportCsv(`${mode.value === 'ar' ? '客户' : '供应商'}欠款账龄_${asOf.value}.csv`,
+      exportCsv(
+        `${mode.value === 'ar' ? '客户' : '供应商'}欠款账龄_${asOf.value}.csv`,
         rows.value.map((r) => {
           const o = { 往来单位: r.partnerName, 最早单据: r.oldestDate || '' };
-          BUCKET_KEYS.forEach((k, i) => { o[BUCKET_LABELS[i]] = r[k] == null ? '' : (r[k] / 100).toFixed(2); });
+          BUCKET_KEYS.forEach((k, i) => {
+            o[BUCKET_LABELS[i]] = r[k] == null ? '' : (r[k] / 100).toFixed(2);
+          });
           o['合计'] = r.total == null ? '' : (r.total / 100).toFixed(2);
           return o;
-        }), [
-          { key: '往来单位', label: '往来单位' }, { key: '最早单据', label: '最早单据' },
+        }),
+        [
+          { key: '往来单位', label: '往来单位' },
+          { key: '最早单据', label: '最早单据' },
           ...BUCKET_LABELS.map((l) => ({ key: l, label: l })),
           { key: '合计', label: '合计' },
-        ]);
+        ],
+      );
     }
 
-    function onResize() { if (chart) chart.resize(); }
+    function onResize() {
+      if (chart) chart.resize();
+    }
     onMounted(() => {
       load();
       window.addEventListener('resize', onResize);
     });
     onBeforeUnmount(() => {
       window.removeEventListener('resize', onResize);
-      if (chart) { chart.dispose(); chart = null; }
+      if (chart) {
+        chart.dispose();
+        chart = null;
+      }
     });
     return {
-      mode, loading, rows, shown, sorted, totals, asOf, cards, chartEl, load, doExport, fmtMoney, fmtQty,
-      BUCKET_LABELS, BUCKET_KEYS, bucketLabel: (k) => BUCKET_LABELS[BUCKET_KEYS.indexOf(k)] || k,
-      kw, drillBucket, clearDrill, sortDir, toggleSort, goDocs,
+      mode,
+      loading,
+      rows,
+      shown,
+      sorted,
+      totals,
+      asOf,
+      cards,
+      chartEl,
+      load,
+      doExport,
+      fmtMoney,
+      fmtQty,
+      BUCKET_LABELS,
+      BUCKET_KEYS,
+      bucketLabel: (k) => BUCKET_LABELS[BUCKET_KEYS.indexOf(k)] || k,
+      kw,
+      drillBucket,
+      clearDrill,
+      sortDir,
+      toggleSort,
+      goDocs,
     };
   },
   template: `
@@ -258,4 +349,3 @@ const AgingPage = {
     </div>
   </div>`,
 };
-

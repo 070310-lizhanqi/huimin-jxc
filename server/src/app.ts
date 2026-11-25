@@ -45,7 +45,7 @@ export function createApp(db: DatabaseSync, appConfig: AppConfig, options: Creat
 
   const app = express();
   app.set('x-powered-by', false);
-  app.set('trust proxy', appConfig.trustProxy);
+  app.set('trust proxy', appConfig.trustProxy > 0 ? appConfig.trustProxy : false);
 
   const hostAllowed = createHostAllowedFn(appConfig.allowHosts);
   app.use(requestIdMiddleware);

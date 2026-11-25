@@ -16,8 +16,11 @@ const ForecastPage = {
         const r = await api.get('/report/stock-forecast', { teamId: store.teamId, days: days.value });
         if (!guard.isCurrent(my)) return;
         rows.value = r.rows || [];
-      } catch (e) { if (guard.isCurrent(my)) toast(e.message, 'error'); }
-      finally { if (guard.isCurrent(my)) loading.value = false; }
+      } catch (e) {
+        if (guard.isCurrent(my)) toast(e.message, 'error');
+      } finally {
+        if (guard.isCurrent(my)) loading.value = false;
+      }
     }
 
     const shown = computed(() => {
@@ -33,18 +36,33 @@ const ForecastPage = {
 
     function doExport() {
       if (!shown.value.length) return toast('没有可导出的数据', 'warning');
-      exportCsv(`库存预估_${days.value}天.csv`,
+      exportCsv(
+        `库存预估_${days.value}天.csv`,
         shown.value.map((r) => ({
-          商品: r.prodName, 规格: r.spec || '', 单位: r.unit || '',
-          当前库存: r.qty, 统计期出库: r.outQty, 日均出库: r.avgDailyOut,
-          可售天数: fmtDays(r.saleableDays), 单位成本: r.unitCost == null ? '' : (r.unitCost / 100).toFixed(2),
-          库存金额: r.amount == null ? '' : (r.amount / 100).toFixed(2), 建议补货: r.suggestQty,
-        })), [
-          { key: '商品', label: '商品' }, { key: '规格', label: '规格' }, { key: '单位', label: '单位' },
-          { key: '当前库存', label: '当前库存' }, { key: '统计期出库', label: '统计期出库' }, { key: '日均出库', label: '日均出库' },
-          { key: '可售天数', label: '可售天数' }, { key: '单位成本', label: '单位成本(元)' },
-          { key: '库存金额', label: '库存金额(元)' }, { key: '建议补货', label: '建议补货' },
-        ]);
+          商品: r.prodName,
+          规格: r.spec || '',
+          单位: r.unit || '',
+          当前库存: r.qty,
+          统计期出库: r.outQty,
+          日均出库: r.avgDailyOut,
+          可售天数: fmtDays(r.saleableDays),
+          单位成本: r.unitCost == null ? '' : (r.unitCost / 100).toFixed(2),
+          库存金额: r.amount == null ? '' : (r.amount / 100).toFixed(2),
+          建议补货: r.suggestQty,
+        })),
+        [
+          { key: '商品', label: '商品' },
+          { key: '规格', label: '规格' },
+          { key: '单位', label: '单位' },
+          { key: '当前库存', label: '当前库存' },
+          { key: '统计期出库', label: '统计期出库' },
+          { key: '日均出库', label: '日均出库' },
+          { key: '可售天数', label: '可售天数' },
+          { key: '单位成本', label: '单位成本(元)' },
+          { key: '库存金额', label: '库存金额(元)' },
+          { key: '建议补货', label: '建议补货' },
+        ],
+      );
     }
 
     onMounted(load);
@@ -99,4 +117,3 @@ const ForecastPage = {
     </div>
   </div>`,
 };
-

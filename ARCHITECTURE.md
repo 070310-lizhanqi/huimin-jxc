@@ -124,7 +124,7 @@
 | 现象 | 可能原因 | 排查与处理 |
 | --- | --- | --- |
 | 启动报 `ConfigError` 立刻退出 | `production` 环境 / 公网绑定 / `ORANGE_REQUIRE_SECRET=1` 下未设置强 `ORANGE_JWT_SECRET`，或端口/保留份数越界 | 按提示生成 ≥32 位高熵密钥并写入 `.env` 或容器环境变量；核对 `ORANGE_BIND`、`PORT`、`BACKUP_KEEP_COUNT` |
-| 反向代理或域名访问返回 `421` | `Host` 头不在默认回环白名单内 | 将实际访问域名加入 `ORANGE_ALLOW_HOSTS`（逗号分隔）；若走 HTTPS 反代，同步设 `ORANGE_TRUST_PROXY=1` 与 `ORANGE_COOKIE_SECURE=auto` |
+| 反向代理或域名访问返回 `421` | `Host` 头不在默认回环白名单内 | 将实际访问域名加入 `ORANGE_ALLOW_HOSTS`（逗号分隔）；若走单层 HTTPS 反代，同步设 `ORANGE_TRUST_PROXY=1`（多级反代填实际跳数 `1..20`）与 `ORANGE_COOKIE_SECURE=auto` |
 | 登录后刷新即掉线或写操作报 `403 跨站写请求已被拒绝` | HTTPS 反代但未开 `ORANGE_TRUST_PROXY=1`，或前端访问域名未加入 `ORANGE_ALLOW_HOSTS` | 确认反代透传 `Host` 与 `X-Forwarded-Proto`，并对齐 `ORANGE_ALLOW_HOSTS` |
 | `/ready` 返回 `503` 或并发写入偶发 `503 SERVICE_UNAVAILABLE` | 数据库被占用或处于恢复退出流程 / 外部长连接锁定 WAL | 查看结构化日志 `requestId` 对应告警；若为恢复重启，等待重启助手完成替换即可自动恢复 |
 | `备份已取消` (`WAL 检查点未完成`) | 外部进程持有长读或写事务导致 WAL 无法 truncate | 关闭外部直连 SQLite 工具（如 DB Browser）后重试备份 |

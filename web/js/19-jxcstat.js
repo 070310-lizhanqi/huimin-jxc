@@ -15,9 +15,17 @@ const JxcStatPage = {
     const guard = seqGuard();
 
     const TYPE_LABEL = {
-      stockin: '采购入库', pin: '采购退货', stockout: '销售出库', sret: '销售退货',
-      otherin: '其它入库', otherout: '其它出库', transfer: '转仓调拨', adjust: '库存调整',
-      stocktake: '库存盘点', assembly: '生产组装', stockinit: '期初库存',
+      stockin: '采购入库',
+      pin: '采购退货',
+      stockout: '销售出库',
+      sret: '销售退货',
+      otherin: '其它入库',
+      otherout: '其它出库',
+      transfer: '转仓调拨',
+      adjust: '库存调整',
+      stocktake: '库存盘点',
+      assembly: '生产组装',
+      stockinit: '期初库存',
     };
     const IN_SET = new Set(['stockin', 'otherin', 'sret', 'stockinit']);
     const OUT_SET = new Set(['stockout', 'otherout', 'pin']);
@@ -36,8 +44,11 @@ const JxcStatPage = {
         }));
         rows.value = r.rows || [];
         totals.value = r.totals || { inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 };
-      } catch (e) { if (guard.isCurrent(my)) toast(e.message, 'error'); }
-      finally { if (guard.isCurrent(my)) loading.value = false; }
+      } catch (e) {
+        if (guard.isCurrent(my)) toast(e.message, 'error');
+      } finally {
+        if (guard.isCurrent(my)) loading.value = false;
+      }
     }
 
     const cards = computed(() => [
@@ -49,30 +60,50 @@ const JxcStatPage = {
 
     function doExport() {
       if (!rows.value.length) return toast('没有可导出的数据，请先查询', 'warning');
-      exportCsv(`进销存统计_${range[0]}_${range[1]}.csv`,
+      exportCsv(
+        `进销存统计_${range[0]}_${range[1]}.csv`,
         rows.value.map((r) => ({
-          商品: r.prodName, 规格: r.spec || '', 单位: r.unit || '',
-          入库数量: r.inQty, 入库金额: r.inAmount == null ? '' : (r.inAmount / 100).toFixed(2),
-          出库数量: r.outQty, 出库金额: r.outAmount == null ? '' : (r.outAmount / 100).toFixed(2),
+          商品: r.prodName,
+          规格: r.spec || '',
+          单位: r.unit || '',
+          入库数量: r.inQty,
+          入库金额: r.inAmount == null ? '' : (r.inAmount / 100).toFixed(2),
+          出库数量: r.outQty,
+          出库金额: r.outAmount == null ? '' : (r.outAmount / 100).toFixed(2),
           当前库存: r.stockQty,
-        })), [
-          { key: '商品', label: '商品' }, { key: '规格', label: '规格' }, { key: '单位', label: '单位' },
-          { key: '入库数量', label: '入库数量' }, { key: '入库金额', label: '入库金额(元)' },
-          { key: '出库数量', label: '出库数量' }, { key: '出库金额', label: '出库金额(元)' },
+        })),
+        [
+          { key: '商品', label: '商品' },
+          { key: '规格', label: '规格' },
+          { key: '单位', label: '单位' },
+          { key: '入库数量', label: '入库数量' },
+          { key: '入库金额', label: '入库金额(元)' },
+          { key: '出库数量', label: '出库数量' },
+          { key: '出库金额', label: '出库金额(元)' },
           { key: '当前库存', label: '当前库存' },
-        ]);
+        ],
+      );
     }
 
     function doExportTypes() {
       if (!byType.value.length) return toast('没有可导出的数据，请先查询', 'warning');
-      exportCsv(`进销存类型汇总_${range[0]}_${range[1]}.csv`,
+      exportCsv(
+        `进销存类型汇总_${range[0]}_${range[1]}.csv`,
         byType.value.map((b) => ({
-          类型: b.label, 方向: b.dir, 单数: b.count, 数量: b.qty,
+          类型: b.label,
+          方向: b.dir,
+          单数: b.count,
+          数量: b.qty,
           金额: b.amount == null ? '' : (b.amount / 100).toFixed(2),
-        })), [
-          { key: '类型', label: '单据类型' }, { key: '方向', label: '方向' },
-          { key: '单数', label: '单数' }, { key: '数量', label: '数量' }, { key: '金额', label: '金额(元)' },
-        ]);
+        })),
+        [
+          { key: '类型', label: '单据类型' },
+          { key: '方向', label: '方向' },
+          { key: '单数', label: '单数' },
+          { key: '数量', label: '数量' },
+          { key: '金额', label: '金额(元)' },
+        ],
+      );
     }
 
     onMounted(load);
@@ -138,4 +169,3 @@ const JxcStatPage = {
     </div>
   </div>`,
 };
-

@@ -16,15 +16,15 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import express from 'express';
 import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
-import { localDate, validBizDate, createWindowLimiter, tryCheckpoint } from './db';
+import { localDate, validBizDate, createWindowLimiter } from './db';
 import { nextBillNo, loadBillNoConfig } from './bill-no';
 import { FIELD_LIMITS, PRICE_CENTS_MAX, QTY_MAX } from './crud';
-import { recordAuditFromRequest } from './infra/audit-log';
-import { sendError } from './infra/errors';
+import { recordAuditTxFromRequest } from './infra/audit-log';
+import { AppError, BusyError, sendError, ValidationError } from './infra/errors';
 import { logger } from './infra/logger';
-import { safeRollback } from './infra/tx';
+import { withImmediateTx } from './infra/tx';
 import { parsePositiveInt } from './infra/validate';
-import { lineAmount, roundQty, sumQty } from './shared/money';
+import { lineAmount, MAX_TOTAL_AMOUNT_CENTS, roundQty, sumQty } from './shared/money';
 import type { SheetData } from './xlsxlite';
 
 /** 与 docs.ts 的上限保持一致（与 crud.ts 共用同一份常量） */
@@ -105,11 +105,7 @@ const FIELD_SYNONYMS: Record<string, { exact: string[]; contains?: string[] }> =
 
 /** 归一化表头：去所有空白字符、统一括号，便于宽松匹配 */
 function normHeader(s: string): string {
-  return s
-    .replace(/\s+/g, '')
-    .replace(/（/g, '(')
-    .replace(/）/g, ')')
-    .trim();
+  return s.replace(/\s+/g, '').replace(/（/g, '(').replace(/）/g, ')').trim();
 }
 
 /** 表头 → 字段映射：先精确匹配（长同义词优先），再包含匹配 */
@@ -125,11 +121,17 @@ function mapHeaders(header: string[]): { fieldOf: Array<string | null>; headerMa
     if (!h) continue;
     let hit: string | null = null;
     for (const [field, syn] of fields) {
-      if (syn.exact.includes(h)) { hit = field; break; }
+      if (syn.exact.includes(h)) {
+        hit = field;
+        break;
+      }
     }
     if (!hit) {
       for (const [field, syn] of fields) {
-        if (syn.contains && syn.contains.some((s) => h.includes(s))) { hit = field; break; }
+        if (syn.contains && syn.contains.some((s) => h.includes(s))) {
+          hit = field;
+          break;
+        }
       }
     }
     if (hit) {
@@ -243,217 +245,250 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
    *  仍可拦住失控循环。 */
   const docImportLimit = createWindowLimiter(100, 60_000);
   // 原始字节体（xlsx/CSV）：json 解析器会跳过非 JSON Content-Type，这里用 raw 接住
-  router.post(
-    '/doc/import',
-    express.raw({ type: () => true, limit: '12mb' }),
-    (req: Request, res: Response) => {
-      const teamRes = parsePositiveInt(req.query.teamId, 'teamId');
-      const dryRun = String(req.query.dryRun ?? '') === '1';
-      const autoCreate = String(req.query.autoCreate ?? '') === '1';
-      const body = req.body as unknown;
-      if (!teamRes.ok) {
-        return sendError(
-          req,
-          res,
-          400,
-          req.query.teamId === undefined || req.query.teamId === '' || req.query.teamId === '0'
-            ? 'teamId 不能为空'
-            : teamRes.error,
-          'VALIDATION_ERROR',
-        );
-      }
-      const teamId = teamRes.value;
-      if (!Buffer.isBuffer(body) || body.length === 0) {
-        return sendError(req, res, 400, '请上传文件内容（xlsx 或 CSV）', 'VALIDATION_ERROR');
-      }
-      if (!docImportLimit(`team:${teamId}`)) {
-        return sendError(req, res, 429, '导入过于频繁，请稍后再试', 'RATE_LIMITED');
-      }
+  router.post('/doc/import', express.raw({ type: () => true, limit: '12mb' }), (req: Request, res: Response) => {
+    const teamRes = parsePositiveInt(req.query.teamId, 'teamId');
+    const dryRun = String(req.query.dryRun ?? '') === '1';
+    const autoCreate = String(req.query.autoCreate ?? '') === '1';
+    const body = req.body as unknown;
+    if (!teamRes.ok) {
+      return sendError(
+        req,
+        res,
+        400,
+        req.query.teamId === undefined || req.query.teamId === '' || req.query.teamId === '0'
+          ? 'teamId 不能为空'
+          : teamRes.error,
+        'VALIDATION_ERROR',
+      );
+    }
+    const teamId = teamRes.value;
+    if (autoCreate && req.auth?.role !== 'admin') {
+      return sendError(req, res, 403, '仅管理员可使用自动建档导入', 'FORBIDDEN');
+    }
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return sendError(req, res, 400, '请上传文件内容（xlsx 或 CSV）', 'VALIDATION_ERROR');
+    }
+    if (!docImportLimit(`team:${teamId}`)) {
+      return sendError(req, res, 429, '导入过于频繁，请稍后再试', 'RATE_LIMITED');
+    }
 
-      // ---------- 1) 解析文件 ----------
-      let kind: 'xlsx' | 'csv';
-      let sheets: SheetData[];
-      try {
-        // B-安9：只解析第一表（docimport 只用 sheets[0]），数据行超 2000 时解析层提前停
-        const parsed = readSpreadsheet(body, { maxRows: MAX_ROWS, firstSheetOnly: true });
-        kind = parsed.kind;
-        sheets = parsed.sheets;
-      } catch (e) {
-        // 行数超限是解析层提前抛出的可预期错误，返回与解析后检查同一口径的友好文案
-        if (e instanceof Error && e.message.startsWith('行数超出上限')) {
-          return sendError(req, res, 400, `单次最多导入 ${MAX_ROWS} 行`, 'VALIDATION_ERROR');
-        }
-        // A-安4：解析失败不回吐原始文案（可能含解析器内部细节），只返回通用文案，详情写服务端日志
-        logger.warn('Document import spreadsheet parse failed', { err: e });
-        return sendError(req, res, 400, '文件解析失败，请检查文件格式后重试', 'VALIDATION_ERROR');
+    // ---------- 1) 解析文件 ----------
+    let kind: 'xlsx' | 'csv';
+    let sheets: SheetData[];
+    try {
+      // B-安9：只解析第一表（docimport 只用 sheets[0]），数据行超 2000 时解析层提前停
+      const parsed = readSpreadsheet(body, { maxRows: MAX_ROWS, firstSheetOnly: true });
+      kind = parsed.kind;
+      sheets = parsed.sheets;
+    } catch (e) {
+      // 行数超限是解析层提前抛出的可预期错误，返回与解析后检查同一口径的友好文案
+      if (e instanceof Error && e.message.startsWith('行数超出上限')) {
+        return sendError(req, res, 400, `单次最多导入 ${MAX_ROWS} 行`, 'VALIDATION_ERROR');
       }
-      const sheet = sheets[0]; // 默认第一个工作表
-      const rows = sheet.rows;
-      if (rows.length < 2) {
-        return sendError(req, res, 400, '表格没有数据行（至少需要表头 + 1 行数据）', 'VALIDATION_ERROR');
-      }
-      const dataRows = rows.slice(1).filter((r) => r.some((c) => String(c ?? '').trim() !== ''));
-      if (dataRows.length === 0) {
-        return sendError(req, res, 400, '表格没有数据行（只有表头）', 'VALIDATION_ERROR');
-      }
-      if (dataRows.length > MAX_ROWS) {
-        return sendError(req, res, 400, `单次最多导入 ${MAX_ROWS} 行，当前 ${dataRows.length} 行`, 'VALIDATION_ERROR');
-      }
+      // A-安4：解析失败不回吐原始文案（可能含解析器内部细节），只返回通用文案，详情写服务端日志
+      logger.warn('Document import spreadsheet parse failed', { err: e });
+      return sendError(req, res, 400, '文件解析失败，请检查文件格式后重试', 'VALIDATION_ERROR');
+    }
+    const sheet = sheets[0]; // 默认第一个工作表
+    const rows = sheet.rows;
+    if (rows.length < 2) {
+      return sendError(req, res, 400, '表格没有数据行（至少需要表头 + 1 行数据）', 'VALIDATION_ERROR');
+    }
+    const dataRows = rows.slice(1).filter((r) => r.some((c) => String(c ?? '').trim() !== ''));
+    if (dataRows.length === 0) {
+      return sendError(req, res, 400, '表格没有数据行（只有表头）', 'VALIDATION_ERROR');
+    }
+    if (dataRows.length > MAX_ROWS) {
+      return sendError(req, res, 400, `单次最多导入 ${MAX_ROWS} 行，当前 ${dataRows.length} 行`, 'VALIDATION_ERROR');
+    }
 
-      // ---------- 2) 列识别 ----------
-      const { fieldOf, headerMap } = mapHeaders(rows[0].map((c) => String(c ?? '')));
-      const needQty = fieldOf.includes('qty');
-      const needProduct = fieldOf.includes('productName');
-      if (!needProduct || !needQty) {
-        return sendError(
-          req,
-          res,
-          400,
-          `未识别到必需列：${!needProduct ? '「商品」' : ''}${!needQty ? '「数量」' : ''}。请确认表头命名（支持：商品/品名/货品、数量、单价、日期、客户/供应商等）`,
-          'VALIDATION_ERROR',
-          { headerMap },
-        );
+    // ---------- 2) 列识别 ----------
+    const { fieldOf, headerMap } = mapHeaders(rows[0].map((c) => String(c ?? '')));
+    const needQty = fieldOf.includes('qty');
+    const needProduct = fieldOf.includes('productName');
+    if (!needProduct || !needQty) {
+      return sendError(
+        req,
+        res,
+        400,
+        `未识别到必需列：${!needProduct ? '「商品」' : ''}${!needQty ? '「数量」' : ''}。请确认表头命名（支持：商品/品名/货品、数量、单价、日期、客户/供应商等）`,
+        'VALIDATION_ERROR',
+        { headerMap },
+      );
+    }
+
+    const col = (field: string): number => fieldOf.indexOf(field);
+
+    // ---------- 3) 逐行解析 ----------
+    const rowErrors: RowError[] = [];
+    const parsed: ParsedRow[] = [];
+    rows.slice(1).forEach((r, idx) => {
+      const cells = r.map((c) => String(c ?? '').trim());
+      if (!cells.some(Boolean)) return; // 空行跳过
+      const rowNo = idx + 2; // 表头是第 1 行，数据从第 2 行计（空行也占行号）
+      const get = (field: string): string => {
+        const ci = col(field);
+        return ci >= 0 ? (cells[ci] ?? '') : '';
+      };
+      const pr: ParsedRow = {
+        rowNo,
+        type: get('type') ? detectTypeByText(get('type')) : null,
+        srcBillNo: get('billNo') || null,
+        date: null,
+        productName: get('productName'),
+        barcode: get('barcode'),
+        qty: null,
+        price: null,
+        amount: null,
+        partnerCus: get('customer'),
+        partnerVen: get('vendor'),
+        warehouseName: get('warehouse'),
+        remark: get('remark'),
+        clerkName: get('clerk'),
+        unit: get('unit'),
+      };
+      // 必填与长度校验（错误行跳过，不中断整体）
+      const fail2 = (msg: string): void => {
+        rowErrors.push({ row: rowNo, msg });
+      };
+      if (!pr.productName) {
+        fail2('商品名称为空');
+        return;
       }
-
-      const col = (field: string): number => fieldOf.indexOf(field);
-
-      // ---------- 3) 逐行解析 ----------
-      const rowErrors: RowError[] = [];
-      const parsed: ParsedRow[] = [];
-      rows.slice(1).forEach((r, idx) => {
-        const cells = r.map((c) => String(c ?? '').trim());
-        if (!cells.some(Boolean)) return; // 空行跳过
-        const rowNo = idx + 2; // 表头是第 1 行，数据从第 2 行计（空行也占行号）
-        const get = (field: string): string => {
-          const ci = col(field);
-          return ci >= 0 ? (cells[ci] ?? '') : '';
-        };
-        const pr: ParsedRow = {
-          rowNo,
-          type: get('type') ? detectTypeByText(get('type')) : null,
-          srcBillNo: get('billNo') || null,
-          date: null,
-          productName: get('productName'),
-          barcode: get('barcode'),
-          qty: null,
-          price: null,
-          amount: null,
-          partnerCus: get('customer'),
-          partnerVen: get('vendor'),
-          warehouseName: get('warehouse'),
-          remark: get('remark'),
-          clerkName: get('clerk'),
-          unit: get('unit'),
-        };
-        // 必填与长度校验（错误行跳过，不中断整体）
-        const fail2 = (msg: string): void => { rowErrors.push({ row: rowNo, msg }); };
-        if (!pr.productName) { fail2('商品名称为空'); return; }
-        if (pr.productName.length > FIELD_LIMITS.name) {
-          fail2(`商品名称不能超过 ${FIELD_LIMITS.name} 个字符`);
+      if (pr.productName.length > FIELD_LIMITS.name) {
+        fail2(`商品名称不能超过 ${FIELD_LIMITS.name} 个字符`);
+        return;
+      }
+      if (pr.barcode.length > FIELD_LIMITS.barcode) {
+        fail2(`条码不能超过 ${FIELD_LIMITS.barcode} 个字符`);
+        return;
+      }
+      if (pr.unit.length > FIELD_LIMITS.unit) {
+        fail2(`单位不能超过 ${FIELD_LIMITS.unit} 个字符`);
+        return;
+      }
+      if (pr.partnerCus.length > FIELD_LIMITS.name || pr.partnerVen.length > FIELD_LIMITS.name) {
+        fail2(`往来单位名称不能超过 ${FIELD_LIMITS.name} 个字符`);
+        return;
+      }
+      if (pr.remark.length > FIELD_LIMITS.remark) {
+        fail2(`备注不能超过 ${FIELD_LIMITS.remark} 个字符`);
+        return;
+      }
+      const qty = parseQty(get('qty'));
+      if (qty == null || qty === 0) {
+        fail2(`数量无效：「${get('qty') || '空'}」`);
+        return;
+      }
+      if (Math.abs(qty) > MAX_QTY) {
+        fail2(`数量超出上限 ${MAX_QTY}`);
+        return;
+      }
+      if (qty < 0) {
+        fail2('导入不支持负数数量（请使用库存调整单）');
+        return;
+      }
+      pr.qty = qty;
+      const priceRaw = get('price');
+      const priceCents = priceRaw === '' ? 0 : parseCents(priceRaw);
+      if (priceCents == null) {
+        fail2(`单价无效：「${priceRaw}」`);
+        return;
+      }
+      if (priceCents > MAX_PRICE_CENTS) {
+        fail2(`单价超出上限 ${MAX_PRICE_CENTS / 100} 元`);
+        return;
+      }
+      pr.price = priceCents;
+      const amountRaw = get('amount');
+      pr.amount = amountRaw === '' ? null : parseCents(amountRaw);
+      const dateRaw = get('date');
+      if (dateRaw !== '') {
+        const d = parseDate(dateRaw);
+        if (!d) {
+          fail2(`日期无效：「${dateRaw}」`);
           return;
         }
-        if (pr.barcode.length > FIELD_LIMITS.barcode) {
-          fail2(`条码不能超过 ${FIELD_LIMITS.barcode} 个字符`);
+        pr.date = d;
+      }
+      // 类型：显式列 > 往来单位推断
+      if (!pr.type) {
+        if (pr.partnerCus && pr.partnerVen) {
+          fail2('同时出现客户与供应商列，无法判断单据方向（请增加「类型」列）');
           return;
         }
-        if (pr.unit.length > FIELD_LIMITS.unit) {
-          fail2(`单位不能超过 ${FIELD_LIMITS.unit} 个字符`);
-          return;
-        }
-        if (pr.partnerCus.length > FIELD_LIMITS.name || pr.partnerVen.length > FIELD_LIMITS.name) {
-          fail2(`往来单位名称不能超过 ${FIELD_LIMITS.name} 个字符`);
-          return;
-        }
-        if (pr.remark.length > FIELD_LIMITS.remark) {
-          fail2(`备注不能超过 ${FIELD_LIMITS.remark} 个字符`);
-          return;
-        }
-        const qty = parseQty(get('qty'));
-        if (qty == null || qty === 0) { fail2(`数量无效：「${get('qty') || '空'}」`); return; }
-        if (Math.abs(qty) > MAX_QTY) { fail2(`数量超出上限 ${MAX_QTY}`); return; }
-        if (qty < 0) { fail2('导入不支持负数数量（请使用库存调整单）'); return; }
-        pr.qty = qty;
-        const priceRaw = get('price');
-        const priceCents = priceRaw === '' ? 0 : parseCents(priceRaw);
-        if (priceCents == null) { fail2(`单价无效：「${priceRaw}」`); return; }
-        if (priceCents > MAX_PRICE_CENTS) { fail2(`单价超出上限 ${MAX_PRICE_CENTS / 100} 元`); return; }
-        pr.price = priceCents;
-        const amountRaw = get('amount');
-        pr.amount = amountRaw === '' ? null : parseCents(amountRaw);
-        const dateRaw = get('date');
-        if (dateRaw !== '') {
-          const d = parseDate(dateRaw);
-          if (!d) { fail2(`日期无效：「${dateRaw}」`); return; }
-          pr.date = d;
-        }
-        // 类型：显式列 > 往来单位推断
-        if (!pr.type) {
-          if (pr.partnerCus && pr.partnerVen) {
-            fail2('同时出现客户与供应商列，无法判断单据方向（请增加「类型」列）');
-            return;
-          }
-          if (pr.partnerCus) pr.type = 'stockout';
-          else if (pr.partnerVen) pr.type = 'stockin';
-        }
-        parsed.push(pr);
-      });
+        if (pr.partnerCus) pr.type = 'stockout';
+        else if (pr.partnerVen) pr.type = 'stockin';
+      }
+      parsed.push(pr);
+    });
 
-      // ---------- 4) 分组聚合 ----------
-      // 有单号列 → 按单号分组；否则按 类型+日期+往来单位 分组（同日同人合并一单）
-      const hasBillNoCol = col('billNo') >= 0;
-      const groups = new Map<string, ParsedRow[]>();
-      const order: string[] = [];
-      for (const pr of parsed) {
-        if (!pr.type) {
-          rowErrors.push({ row: pr.rowNo, msg: '无法识别单据类型（无类型列，且无客户/供应商列）' });
-          continue;
-        }
-        const key = hasBillNoCol && pr.srcBillNo
+    // ---------- 4) 分组聚合 ----------
+    // 有单号列 → 按单号分组；否则按 类型+日期+往来单位 分组（同日同人合并一单）
+    const hasBillNoCol = col('billNo') >= 0;
+    const groups = new Map<string, ParsedRow[]>();
+    const order: string[] = [];
+    for (const pr of parsed) {
+      if (!pr.type) {
+        rowErrors.push({ row: pr.rowNo, msg: '无法识别单据类型（无类型列，且无客户/供应商列）' });
+        continue;
+      }
+      const key =
+        hasBillNoCol && pr.srcBillNo
           ? JSON.stringify([pr.type, pr.srcBillNo])
           : JSON.stringify([pr.type, pr.date ?? '', pr.partnerCus || pr.partnerVen]);
-        if (!groups.has(key)) { groups.set(key, []); order.push(key); }
-        groups.get(key)!.push(pr);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+        order.push(key);
       }
+      groups.get(key)!.push(pr);
+    }
 
-      // ---------- 5) 档案匹配 ----------
-      const prods = db.prepare(`SELECT id, name, barcode FROM product WHERE teamId = ?`).all(teamId) as Array<
-        { id: number; name: string; barcode: string | null }
-      >;
+    // ---------- 5) 档案匹配与原子落库 ----------
+    // B-安10①：预编译可复用 SQL 语句（非 dryRun 时全部在 withImmediateTx 写锁内执行，保证与建档完全原子）
+    const getCusStmt = db.prepare(`SELECT id FROM customer WHERE teamId = ? AND name = ?`);
+    const getVenStmt = db.prepare(`SELECT id FROM vendor WHERE teamId = ? AND name = ?`);
+    const getPartner = (ptype: 'cus' | 'ven', name: string) =>
+      (ptype === 'cus' ? getCusStmt : getVenStmt).get(teamId, name) as { id: number } | undefined;
+    const existsDocStmt = db.prepare(`SELECT id FROM doc WHERE teamId = ? AND type = ? AND srcBillNo = ? LIMIT 1`);
+    const insCusStmt = db.prepare(`INSERT INTO customer (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`);
+    const insVenStmt = db.prepare(`INSERT INTO vendor (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`);
+    const insProdStmt = db.prepare(
+      `INSERT INTO product (teamId, name, barcode, unit, salePrice, purchasePrice, remark)
+         VALUES (?, ?, ?, ?, ?, ?, 'Excel导入自动建档')`,
+    );
+    const insDoc = db.prepare(
+      `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, srcBillNo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, NULL, ?)`,
+    );
+    const insItem = db.prepare(
+      `INSERT INTO doc_item (docId, productId, qty, price, amount, remark) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+
+    const bills: BillOut[] = [];
+    const skipped: SkippedBill[] = [];
+    const created: CreatedDoc[] = [];
+
+    const runImportPass = (persist: boolean): void => {
+      const prods = db.prepare(`SELECT id, name, barcode FROM product WHERE teamId = ?`).all(teamId) as Array<{
+        id: number;
+        name: string;
+        barcode: string | null;
+      }>;
       const prodByName = new Map(prods.map((p) => [p.name, p]));
       const prodByBarcode = new Map(prods.filter((p) => p.barcode).map((p) => [p.barcode as string, p]));
-      // B-安10①：分组循环内逐次 db.prepare 的语句全部提到循环外预编译一次。
-      // getPartner 原每次调用都编译一条 SELECT，分组数一多即重复编译数百次；
-      // 幂等检查与自动建档的 INSERT 同样按分组重复编译，一并提到外面。
-      const getCusStmt = db.prepare(`SELECT id FROM customer WHERE teamId = ? AND name = ?`);
-      const getVenStmt = db.prepare(`SELECT id FROM vendor WHERE teamId = ? AND name = ?`);
-      const getPartner = (ptype: 'cus' | 'ven', name: string) =>
-        (ptype === 'cus' ? getCusStmt : getVenStmt).get(teamId, name) as { id: number } | undefined;
-      const existsDocStmt = db.prepare(
-        `SELECT id FROM doc WHERE teamId = ? AND type = ? AND srcBillNo = ? LIMIT 1`,
-      );
-      const insCusStmt = db.prepare(
-        `INSERT INTO customer (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`,
-      );
-      const insVenStmt = db.prepare(
-        `INSERT INTO vendor (teamId, name, remark) VALUES (?, ?, 'Excel导入自动建档')`,
-      );
-      const insProdStmt = db.prepare(
-        `INSERT INTO product (teamId, name, barcode, unit, salePrice, purchasePrice, remark)
-         VALUES (?, ?, ?, ?, ?, ?, 'Excel导入自动建档')`,
-      );
-      const warehouses = db.prepare(`SELECT id, name FROM warehouse WHERE teamId = ? ORDER BY id`).all(teamId) as Array<
-        { id: number; name: string }
-      >;
-      const clerks = db.prepare(`SELECT id, name FROM clerk WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>;
-
-      const bills: BillOut[] = [];
-      const skipped: SkippedBill[] = [];
-      const created: CreatedDoc[] = [];
-      // 本次落库已建单据引用的往来单位 id（供落库后孤儿核对用）
-      const createdPartnerIds = new Set<number>();
-      // 自动建档的孤儿追踪：落库失败 ROLLBACK 后，事务外已插入的 customer/vendor/product 需要一并清理
-      const pendingPartnerCreates: Array<{ table: string; id: number | null }> = [];
-      const pendingProductCreates: number[] = [];
+      const warehouses = db
+        .prepare(`SELECT id, name FROM warehouse WHERE teamId = ? ORDER BY id`)
+        .all(teamId) as Array<{ id: number; name: string }>;
+      const clerks = db.prepare(`SELECT id, name FROM clerk WHERE teamId = ?`).all(teamId) as Array<{
+        id: number;
+        name: string;
+      }>;
+      // B-安10②：单号配置（prefix/noMode）在导入开始时一次读出，按单据复用
+      const billNoCfg = persist ? loadBillNoConfig(db, teamId) : null;
+      const createdCusIds = new Set<number>();
+      const createdVenIds = new Set<number>();
+      const seenSrcBills = new Set<string>();
 
       for (const key of order) {
         const rowsIn = groups.get(key)!;
@@ -464,22 +499,20 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         // 类型对应的往来单位
         const isCus = first.type === 'stockout' || first.type === 'sret' || first.type === 'sorder';
         const partnerName = isCus ? first.partnerCus : first.partnerVen;
-        if (isCus && first.partnerVen && !first.partnerCus) warnings.push('数据带供应商列但单据为销售方向，已忽略供应商');
+        if (isCus && first.partnerVen && !first.partnerCus)
+          warnings.push('数据带供应商列但单据为销售方向，已忽略供应商');
         if (!isCus && first.partnerCus && !first.partnerVen) warnings.push('数据带客户列但单据为采购方向，已忽略客户');
 
-        // 幂等：同 srcBillNo + type 已存在 → 跳过整组
+        // 幂等：同 srcBillNo + type 已存在 → 跳过整组（在写锁内检查，防并发重复导入）
         if (first.srcBillNo) {
-          const exists = existsDocStmt.get(teamId, first.type, first.srcBillNo);
-          if (exists) {
+          const srcKey = `${first.type}\0${first.srcBillNo}`;
+          if (seenSrcBills.has(srcKey) || existsDocStmt.get(teamId, first.type, first.srcBillNo)) {
             skipped.push({ srcBillNo: srcLabel, type: first.type, reason: '该外部单号已导入过' });
             continue;
           }
         }
 
-        // 仓库：列值匹配 > 第一个仓库。
-        // 必须放在往来单位/商品自动建档**之前**：自动建档发生在事务外（autocommit），
-        // 若先建档再因仓库无效跳单，档案没有对应的单据，也不会被 ROLLBACK 清理——
-        // 用户会得到一个自己没录过的「幽灵客户」
+        // 仓库：列值匹配 > 第一个仓库（跳过单不触发自动建档）
         let warehouseId: number;
         let warehouseName: string;
         if (first.warehouseName) {
@@ -507,31 +540,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           continue;
         }
 
-        // 往来单位匹配
-        let partnerId: number | null = null;
-        let partnerNewlyCreated = false;
-        if (partnerName) {
-          const hit = getPartner(isCus ? 'cus' : 'ven', partnerName);
-          if (hit) partnerId = hit.id;
-          else if (autoCreate && !dryRun) {
-            if (isCus) {
-              partnerId = Number(insCusStmt.run(teamId, partnerName).lastInsertRowid);
-            } else {
-              partnerId = Number(insVenStmt.run(teamId, partnerName).lastInsertRowid);
-            }
-            partnerNewlyCreated = true;
-            warnings.push(`往来单位「${partnerName}」不存在，已自动建档`);
-          } else if (autoCreate && dryRun) {
-            warnings.push(`往来单位「${partnerName}」不存在，导入时将自动建档`);
-          } else {
-            skipped.push({
-              srcBillNo: srcLabel,
-              type: first.type,
-              reason: `往来单位「${partnerName}」不存在（可勾选自动建档）`,
-            });
-            continue;
-          }
-        } else {
+        // 往来单位预校验（先确认本单不会因往来单位/商品缺失而被跳过，再执行写库建档）
+        if (!partnerName) {
           skipped.push({
             srcBillNo: srcLabel,
             type: first.type,
@@ -539,57 +549,88 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           });
           continue;
         }
-        // 本单自动建档的档案在落库失败 ROLLBACK 后清理（只清本次新建的）：
-        // 误把「匹配到的既有档案」也记进来，回滚会把历史导入建的、
-        // 已被真实单据引用的往来单位连档删掉，历史单据 partnerId 悬挂
-        if (partnerNewlyCreated) {
-          pendingPartnerCreates.push({ table: isCus ? 'customer' : 'vendor', id: partnerId });
+        const partnerHit = getPartner(isCus ? 'cus' : 'ven', partnerName);
+        if (!partnerHit && !autoCreate) {
+          skipped.push({
+            srcBillNo: srcLabel,
+            type: first.type,
+            reason: `往来单位「${partnerName}」不存在（可勾选自动建档）`,
+          });
+          continue;
         }
 
-        // 明细行
-        const items: BillItemOut[] = [];
+        // 商品与单据总金额预校验（先收集缺失商品报错；有缺失则整单跳过，不建任何自动档案）
         let bad = false;
+        for (const pr of rowsIn) {
+          let prod = prodByName.get(pr.productName);
+          if (!prod && pr.barcode) prod = prodByBarcode.get(pr.barcode);
+          if (!prod && !autoCreate) {
+            rowErrors.push({ row: pr.rowNo, msg: `商品「${pr.productName}」不存在（可勾选自动建档）` });
+            bad = true;
+          }
+        }
+        if (bad || !rowsIn.length) continue;
+
+        const billTotalAmount = rowsIn.reduce((s, pr) => s + lineAmount(pr.qty!, pr.price ?? 0), 0);
+        if (!Number.isFinite(billTotalAmount) || Math.abs(billTotalAmount) > MAX_TOTAL_AMOUNT_CENTS) {
+          throw new ValidationError('单据总金额超出上限（10 亿元），请核对后重试');
+        }
+
+        // 往来单位落库（事务内）
+        let partnerId: number | null = partnerHit ? partnerHit.id : null;
+        if (!partnerHit) {
+          if (autoCreate && persist) {
+            if (isCus) {
+              partnerId = Number(insCusStmt.run(teamId, partnerName).lastInsertRowid);
+              createdCusIds.add(partnerId);
+            } else {
+              partnerId = Number(insVenStmt.run(teamId, partnerName).lastInsertRowid);
+              createdVenIds.add(partnerId);
+            }
+            warnings.push(`往来单位「${partnerName}」不存在，已自动建档`);
+          } else if (autoCreate && !persist) {
+            warnings.push(`往来单位「${partnerName}」不存在，导入时将自动建档`);
+          }
+        }
+
+        // 明细行解析与商品自动建档（事务内）
+        const items: BillItemOut[] = [];
         for (const pr of rowsIn) {
           let prod = prodByName.get(pr.productName);
           if (!prod && pr.barcode) prod = prodByBarcode.get(pr.barcode);
           let productId: number | null = prod ? prod.id : null;
           let itemWarning: string | undefined;
           if (!prod) {
-            if (autoCreate && !dryRun) {
+            if (autoCreate && persist) {
               productId = Number(
-                insProdStmt
-                  .run(
-                    teamId,
-                    pr.productName,
-                    pr.barcode || null,
-                    pr.unit || '件',
-                    isCus ? pr.price ?? 0 : 0,
-                    isCus ? 0 : pr.price ?? 0,
-                  ).lastInsertRowid,
+                insProdStmt.run(
+                  teamId,
+                  pr.productName,
+                  pr.barcode || null,
+                  pr.unit || '件',
+                  isCus ? (pr.price ?? 0) : 0,
+                  isCus ? 0 : (pr.price ?? 0),
+                ).lastInsertRowid,
               );
-              prodByName.set(pr.productName, {
+              const createdProd = {
                 id: productId,
                 name: pr.productName,
                 barcode: pr.barcode || null,
-              });
-              // 商品建档同样可能成孤儿，收集之（失败时清理）
-              pendingProductCreates.push(productId);
+              };
+              prodByName.set(pr.productName, createdProd);
+              if (pr.barcode) {
+                prodByBarcode.set(pr.barcode, createdProd);
+              }
               itemWarning = `商品「${pr.productName}」不存在，已自动建档`;
-            } else if (autoCreate && dryRun) {
+            } else if (autoCreate && !persist) {
               itemWarning = `商品「${pr.productName}」不存在，导入时将自动建档`;
-            } else {
-              rowErrors.push({ row: pr.rowNo, msg: `商品「${pr.productName}」不存在（可勾选自动建档）` });
-              bad = true;
-              continue;
             }
           }
-          // 金额交叉核对：|qty×price − amount| > 2 分则提示（不影响导入）。
-          // 用整数运算：qty 是 4 位小数浮点，直接 qty*price 在大额分时浮点误差会超 2 分阈值误报。
-          // 与 docs.ts 的 lineAmount 口径一致：qty 先转"万分"整数再乘。
           if (pr.amount != null && pr.price != null) {
             const lineAmt = lineAmount(roundQty(pr.qty!), pr.price);
             if (Math.abs(lineAmt - pr.amount) > 2) {
-              itemWarning = (itemWarning ? itemWarning + '；' : '') +
+              itemWarning =
+                (itemWarning ? itemWarning + '；' : '') +
                 `金额 ${pr.amount / 100} 与 数量×单价 ${lineAmt / 100} 不一致，已按数量×单价入账`;
             }
           }
@@ -603,7 +644,6 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             warning: itemWarning,
           });
         }
-        if (bad || !items.length) continue;
 
         // 业务员：名称匹配不到仅提示
         let clerkId: number | null = null;
@@ -613,9 +653,10 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           else warnings.push(`业务员「${first.clerkName}」不存在，已忽略`);
         }
 
-        bills.push({
+        const billDate = first.date ?? localDate();
+        const billOut: BillOut & { clerkId?: number | null; remarks?: string } = {
           type: first.type!,
-          date: first.date ?? localDate(),
+          date: billDate,
           srcBillNo: first.srcBillNo,
           partnerName,
           partnerId,
@@ -623,145 +664,111 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           warehouseId,
           items,
           warnings: [...warnings, ...(hasBillNoCol ? [] : ['无单号列，按 日期+往来单位 聚合'])],
-        });
-        // 供创建阶段使用（bills 数组元素在 dryRun 下也复用）
-        (bills[bills.length - 1] as BillOut & { clerkId?: number | null }).clerkId = clerkId;
-        (bills[bills.length - 1] as BillOut & { remarks?: string }).remarks = first.remark;
-      }
-
-      // ---------- 6) 落库（非 dryRun） ----------
-      if (!dryRun) {
-        // B-安10②：单号配置（prefix/noMode）在导入开始时一次读出，按单据复用；
-        // 原每生成一个单号都调一次 nextBillNo、其内重复查两次 setting 表
-        const billNoCfg = loadBillNoConfig(db, teamId);
-        const insDoc = db.prepare(
-          `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, clerkId, warehouseId, status, remark, totalAmount, totalQty, userId, srcBillNo)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, NULL, ?)`,
-        );
-        const insItem = db.prepare(
-          `INSERT INTO doc_item (docId, productId, qty, price, amount, remark) VALUES (?, ?, ?, ?, ?, ?)`,
-        );
-        const cleanupAutoCreates = (): void => {
-          for (const p of pendingPartnerCreates) {
-            if (p.id == null) continue;
-            try {
-              db.prepare(`DELETE FROM ${p.table} WHERE id = ? AND remark = 'Excel导入自动建档'`).run(p.id);
-            } catch { /* 清理失败不掩盖原始错误 */ }
-          }
-          for (const pid of pendingProductCreates) {
-            try {
-              db.prepare(`DELETE FROM product WHERE id = ? AND remark = 'Excel导入自动建档'`).run(pid);
-            } catch { /* 同上 */ }
-          }
+          clerkId,
+          remarks: first.remark,
         };
-        // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-        // BEGIN IMMEDIATE：批量导入立刻取写锁，避免与其它写事务交叉时 SQLITE_BUSY
-        try {
-          db.exec('BEGIN IMMEDIATE');
-        } catch (e) {
-          cleanupAutoCreates();
-          logger.warn('Document import BEGIN IMMEDIATE failed (busy)', { teamId, err: e });
-          return sendError(req, res, 503, '数据库繁忙，请稍后重试', 'SERVICE_UNAVAILABLE');
-        }
-        try {
-          for (const b of bills) {
-            const ext = b as BillOut & { clerkId?: number | null; remarks?: string };
-            const totalQty = sumQty(b.items.map((i) => i.qty));
-            const totalAmount = b.items.reduce((s, i) => s + lineAmount(i.qty, i.price), 0);
-            const billNo = nextBillNo(db, teamId, b.type, billNoCfg);
-            const remarkParts = ['Excel导入'];
-            if (ext.remarks) remarkParts.push(ext.remarks);
-            const info = insDoc.run(
-              teamId,
-              billNo,
-              b.type,
-              b.date,
-              b.type === 'stockout' || b.type === 'sret' || b.type === 'sorder' ? 'cus' : 'ven',
-              b.partnerId,
-              ext.clerkId ?? null,
-              b.warehouseId,
-              remarkParts.join('：'),
-              totalAmount,
-              totalQty,
-              b.srcBillNo,
-            );
-            const docId = Number(info.lastInsertRowid);
-            for (const it of b.items) {
-              insItem.run(docId, it.productId, it.qty, it.price, lineAmount(it.qty, it.price), null);
-            }
-            created.push({ id: docId, billNo, type: b.type, srcBillNo: b.srcBillNo, itemCount: b.items.length });
-            if (b.partnerId != null) createdPartnerIds.add(b.partnerId);
+        bills.push(billOut);
+
+        if (persist) {
+          const totalQty = sumQty(items.map((i) => i.qty));
+          const totalAmount = items.reduce((s, i) => s + lineAmount(i.qty, i.price), 0);
+          const billNo = nextBillNo(db, teamId, billOut.type, billNoCfg!);
+          const remarkParts = ['Excel导入'];
+          if (first.remark) remarkParts.push(first.remark);
+          const info = insDoc.run(
+            teamId,
+            billNo,
+            billOut.type,
+            billDate,
+            isCus ? 'cus' : 'ven',
+            partnerId,
+            clerkId,
+            warehouseId,
+            remarkParts.join('：'),
+            totalAmount,
+            totalQty,
+            billOut.srcBillNo,
+          );
+          const docId = Number(info.lastInsertRowid);
+          for (const it of items) {
+            insItem.run(docId, it.productId, it.qty, it.price, lineAmount(it.qty, it.price), null);
           }
-          db.exec('COMMIT');
-          // B-安16③：孤儿清理从“仅异常分支”改为“落库后按 created 清单核对”——
-          // 本次新建但未被任何已建单据引用的档案即删。引用判断按 doc/doc_item 的引用关系：
-          // 往来单位须出现在已建单据的 partnerId 里，商品须出现在已建单据的 doc_item 里；
-          // 被后续单据引用的合法新建档案保留。清理失败不影响本次导入结果。
-          try {
-            const usedProductIds = new Set<number>();
-            if (created.length) {
-              const placeholders = created.map(() => '?').join(',');
-              const used = db.prepare(
-                `SELECT DISTINCT productId FROM doc_item WHERE docId IN (${placeholders})`,
-              ).all(...created.map((c) => c.id)) as Array<{ productId: number }>;
-              for (const u of used) usedProductIds.add(u.productId);
-            }
-            for (const p of pendingPartnerCreates) {
-              if (p.id == null || createdPartnerIds.has(p.id)) continue;
-              try {
-                db.prepare(`DELETE FROM ${p.table} WHERE id = ? AND remark = 'Excel导入自动建档'`).run(p.id);
-              } catch { /* 清理失败不掩盖导入结果 */ }
-            }
-            for (const pid of pendingProductCreates) {
-              if (usedProductIds.has(pid)) continue;
-              try {
-                db.prepare(`DELETE FROM product WHERE id = ? AND remark = 'Excel导入自动建档'`).run(pid);
-              } catch { /* 同上 */ }
-            }
-          } catch { /* 核对本身失败时不影响导入结果 */ }
-          // B-安17 折中：导入是批量写操作，落库后显式检查点，把 WAL 落盘（见 db.ts 注释的实测数据）
-          tryCheckpoint(db);
-        } catch (e) {
-          safeRollback(db);
-          // 落库失败：事务外的自动建档已成孤儿，按「无单据引用」清理（doc 未生成，id 安全）
-          cleanupAutoCreates();
-          // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名），只写服务端日志
-          logger.error('Document import persistence failed', { teamId, err: e });
-          return sendError(req, res, 500, '导入失败，请稍后重试', 'INTERNAL_ERROR');
+          if (billOut.srcBillNo) seenSrcBills.add(`${billOut.type}\0${billOut.srcBillNo}`);
+          created.push({
+            id: docId,
+            billNo,
+            type: billOut.type,
+            srcBillNo: billOut.srcBillNo,
+            itemCount: items.length,
+          });
         }
       }
 
-      if (!dryRun && created.length > 0) {
-        recordAuditFromRequest(db, req, {
+      if (persist && created.length > 0) {
+        recordAuditTxFromRequest(db, req, {
           teamId,
           action: 'doc.import',
           entityType: 'doc',
-          detail: { imported: created.length, skipped: skipped.length, rowErrors: rowErrors.length },
+          detail: {
+            imported: created.length,
+            skipped: skipped.length,
+            rowErrors: rowErrors.length,
+            autoCreatedCustomers: createdCusIds.size,
+            autoCreatedVendors: createdVenIds.size,
+          },
         });
       }
-      // 响应里去掉内部字段
-      const billsOut = bills.map((b) => {
-        const { clerkId: _c, remarks: _r, ...rest } = b as BillOut & { clerkId?: number | null; remarks?: string };
-        return rest;
-      });
-      return res.json({
-        ok: true,
-        file: { kind, sheet: sheet.name, sheets: sheets.map((s) => s.name), rows: dataRows.length },
-        headerMap,
-        bills: billsOut,
-        rowErrors,
-        skipped,
-        created,
-        summary: {
-          totalRows: dataRows.length,
-          billCount: billsOut.length,
-          itemCount: billsOut.reduce((s, b) => s + b.items.length, 0),
-          errorCount: rowErrors.length,
-          skipCount: skipped.length,
-          imported: created.length,
-        },
-      });
-    },
-  );
-}
+    };
 
+    if (dryRun) {
+      try {
+        runImportPass(false);
+      } catch (e) {
+        if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+        logger.error('Document import dryRun failed', { teamId, err: e });
+        return sendError(req, res, 500, '导入预览失败，请稍后重试', 'INTERNAL_ERROR');
+      }
+    } else {
+      try {
+        withImmediateTx(
+          db,
+          () => {
+            runImportPass(true);
+          },
+          { checkpoint: true },
+        );
+      } catch (e) {
+        if (e instanceof BusyError) {
+          logger.warn('Document import BEGIN IMMEDIATE failed (busy)', { teamId, err: e });
+          return sendError(req, res, 503, '数据库繁忙，请稍后重试', 'SERVICE_UNAVAILABLE');
+        }
+        if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+        logger.error('Document import persistence failed', { teamId, err: e });
+        return sendError(req, res, 500, '导入失败，请稍后重试', 'INTERNAL_ERROR');
+      }
+    }
+
+    // 响应里去掉内部字段
+    const billsOut = bills.map((b) => {
+      const { clerkId: _c, remarks: _r, ...rest } = b as BillOut & { clerkId?: number | null; remarks?: string };
+      return rest;
+    });
+    return res.json({
+      ok: true,
+      file: { kind, sheet: sheet.name, sheets: sheets.map((s) => s.name), rows: dataRows.length },
+      headerMap,
+      bills: billsOut,
+      rowErrors,
+      skipped,
+      created,
+      summary: {
+        totalRows: dataRows.length,
+        billCount: billsOut.length,
+        itemCount: billsOut.reduce((s, b) => s + b.items.length, 0),
+        errorCount: rowErrors.length,
+        skipCount: skipped.length,
+        imported: created.length,
+      },
+    });
+  });
+}

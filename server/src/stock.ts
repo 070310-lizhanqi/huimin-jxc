@@ -54,7 +54,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     if (kw) {
       // 名称/条码/规格任一命中（扫码查库存时手上只有条码）
       const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      conds.push(`(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`);
+      conds.push(
+        `(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`,
+      );
       args.push(like, like, like);
     }
     if (hideZero) {
@@ -80,7 +82,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     }
     if (kw) {
       const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      lowConds.push(`(p2.name LIKE ? ESCAPE '\\' OR IFNULL(p2.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p2.spec,'') LIKE ? ESCAPE '\\')`);
+      lowConds.push(
+        `(p2.name LIKE ? ESCAPE '\\' OR IFNULL(p2.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p2.spec,'') LIKE ? ESCAPE '\\')`,
+      );
       lowArgs.push(like, like, like);
     }
     const lowHaving = hideZero
@@ -132,7 +136,8 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       const list = db.prepare(`${baseSelect}${orderBy}`).all(...allArgs) as Array<Record<string, unknown>>;
       if (groupProd) {
         // 汇总行自带 isLow（导出/全量模式用，与分页口径一致）
-        for (const r of list) r.isLow = (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0) ? 1 : 0;
+        for (const r of list)
+          r.isLow = (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0) ? 1 : 0;
       }
       return res.json(list);
     }
@@ -141,27 +146,25 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     const agg = (
       groupProd
         ? db
-          .prepare(
-            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty, COALESCE(SUM(value), 0) AS totalValue,
+            .prepare(
+              `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty, COALESCE(SUM(value), 0) AS totalValue,
                     COALESCE(SUM(CASE WHEN lowQty > 0 AND qty <= lowQty THEN 1 ELSE 0 END), 0) AS lowCount
              FROM (${baseSelect})`,
-          )
-          .get(...allArgs)
+            )
+            .get(...allArgs)
         : db
-          .prepare(
-            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty,
+            .prepare(
+              `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty,
                     COALESCE(SUM(qty * estUnitCost), 0) AS totalValue
              FROM (${baseSelect})`,
-          )
-          .get(...allArgs)
+            )
+            .get(...allArgs)
     ) as { total: number; totalQty: number; totalValue: number; lowCount?: number };
     // 明细口径的 lowCount 是商品级（不能从分组行直接加总），单独取低库存商品 id 集
     let lowCount = agg.lowCount ?? 0;
     let lowSet = new Set<number>();
     if (!groupProd) {
-      lowSet = new Set(
-        (db.prepare(lowSql).all(...lowArgs) as Array<{ productId: number }>).map((r) => r.productId),
-      );
+      lowSet = new Set((db.prepare(lowSql).all(...lowArgs) as Array<{ productId: number }>).map((r) => r.productId));
       lowCount = lowSet.size;
     }
     const pageRows = db
@@ -432,7 +435,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
     res.setHeader('X-Export-Total', String(total.c));
     res.write(
-      '\ufeff' + ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'].map(csvCell).join(',') + '\r\n',
+      '\ufeff' +
+        ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'].map(csvCell).join(',') +
+        '\r\n',
     );
     for (const r of rows) {
       res.write(
@@ -462,9 +467,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     const sku = db
       .prepare(`SELECT COUNT(DISTINCT productId) AS c FROM stock WHERE teamId=? AND qty != 0`)
       .get(teamId) as { c: number };
-    const total = db
-      .prepare(`SELECT SUM(qty) AS q FROM stock WHERE teamId=? AND qty != 0`)
-      .get(teamId) as { q: number | null };
+    const total = db.prepare(`SELECT SUM(qty) AS q FROM stock WHERE teamId=? AND qty != 0`).get(teamId) as {
+      q: number | null;
+    };
     const value = db
       .prepare(
         `SELECT SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},

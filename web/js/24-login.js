@@ -17,8 +17,13 @@ const LoginPage = {
       try {
         const s = await api.get('/auth/status');
         initialized.value = !!s.initialized;
-        if (!s.initialized) { mode.value = 'register'; firstRun.value = true; }
-      } catch { /* 探测失败就按登录处理 */ }
+        if (!s.initialized) {
+          mode.value = 'register';
+          firstRun.value = true;
+        }
+      } catch {
+        /* 探测失败就按登录处理 */
+      }
     });
 
     function switchMode() {
@@ -28,24 +33,40 @@ const LoginPage = {
 
     async function submit() {
       err.value = '';
-      if (!form.username.trim()) { err.value = '请输入用户名'; return; }
-      if (!form.password) { err.value = '请输入密码'; return; }
+      if (!form.username.trim()) {
+        err.value = '请输入用户名';
+        return;
+      }
+      if (!form.password) {
+        err.value = '请输入密码';
+        return;
+      }
       if (mode.value === 'register') {
-        if (form.password.length < 8) { err.value = '密码至少 8 位'; return; }
-        if (form.password !== form.password2) { err.value = '两次输入的密码不一致'; return; }
-        if (initialized.value && !form.inviteCode.trim()) { err.value = '请输入管理员提供的邀请码'; return; }
+        if (form.password.length < 8) {
+          err.value = '密码至少 8 位';
+          return;
+        }
+        if (form.password !== form.password2) {
+          err.value = '两次输入的密码不一致';
+          return;
+        }
+        if (initialized.value && !form.inviteCode.trim()) {
+          err.value = '请输入管理员提供的邀请码';
+          return;
+        }
       }
       busy.value = true;
       try {
         const path = mode.value === 'login' ? '/auth/login' : '/auth/register';
-        const body = mode.value === 'login'
-          ? { username: form.username.trim(), password: form.password }
-          : {
-              username: form.username.trim(),
-              password: form.password,
-              teamName: form.teamName.trim() || '我的账套',
-              ...(initialized.value ? { inviteCode: form.inviteCode.trim() } : {}),
-            };
+        const body =
+          mode.value === 'login'
+            ? { username: form.username.trim(), password: form.password }
+            : {
+                username: form.username.trim(),
+                password: form.password,
+                teamName: form.teamName.trim() || '我的账套',
+                ...(initialized.value ? { inviteCode: form.inviteCode.trim() } : {}),
+              };
         const r = await api.post(path, body);
         // B-前5：令牌由服务端经 Set-Cookie 下发，body 里的 token 前端直接忽略
         // （只供 API 客户端用）；登录态改以 auth.user 为准，不再读 localStorage。
@@ -60,7 +81,8 @@ const LoginPage = {
         // 仅允许本站已知路由前缀，防止跳到伪协议/站外。
         const back = sessionStorage.getItem(RETURN_KEY);
         sessionStorage.removeItem(RETURN_KEY);
-        const ALLOW = /^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings|approval|product|partner|jxcstat)(\/|$|\?)/;
+        const ALLOW =
+          /^#\/(dashboard|doc|report|stock|finance|base|price|statement|ledger|jxc|forecast|aging|help|settings|approval|product|partner|jxcstat)(\/|$|\?)/;
         const target = back && !back.startsWith('#/login') && ALLOW.test(back) ? back : '#/dashboard';
         location.hash = target;
       } catch (e) {
@@ -141,14 +163,19 @@ const App = {
     /* 顶栏激活项滑动指示条：测量 .nav-link.on 相对 .topnav 的位置并移动下划线 */
     const navInd = ref(null);
     function moveNavInd() {
-      nextTick(() => requestAnimationFrame(() => {
-        const bar = document.querySelector('.topnav');
-        const el = bar && bar.querySelector('.nav-link.on');
-        if (!bar || !el) { navInd.value = { opacity: 0 }; return; }
-        const b = bar.getBoundingClientRect();
-        const r = el.getBoundingClientRect();
-        navInd.value = { opacity: 1, width: r.width + 'px', transform: `translateX(${r.left - b.left}px)` };
-      }));
+      nextTick(() =>
+        requestAnimationFrame(() => {
+          const bar = document.querySelector('.topnav');
+          const el = bar && bar.querySelector('.nav-link.on');
+          if (!bar || !el) {
+            navInd.value = { opacity: 0 };
+            return;
+          }
+          const b = bar.getBoundingClientRect();
+          const r = el.getBoundingClientRect();
+          navInd.value = { opacity: 1, width: r.width + 'px', transform: `translateX(${r.left - b.left}px)` };
+        }),
+      );
     }
 
     async function boot() {
@@ -167,7 +194,8 @@ const App = {
           ready.value = true;
         } else {
           ready.value = false;
-          auth.user = null; auth.team = null;
+          auth.user = null;
+          auth.team = null;
           if (location.hash !== '#/login') location.hash = '#/login';
         }
       } catch (e) {
@@ -176,7 +204,8 @@ const App = {
         const msg = String((e && e.message) || '');
         toast('登录状态校验失败：' + msg, 'error');
         ready.value = false;
-        auth.user = null; auth.team = null;
+        auth.user = null;
+        auth.team = null;
         if (location.hash !== '#/login') location.hash = '#/login';
       } finally {
         auth.ready = true;
@@ -187,9 +216,15 @@ const App = {
     onMounted(boot);
 
     // 登录页登录成功后触发重新引导（登录态信号：auth.user）
-    watch(() => auth.user, (u, old) => {
-      if (u && !old) { ready.value = false; boot(); }
-    });
+    watch(
+      () => auth.user,
+      (u, old) => {
+        if (u && !old) {
+          ready.value = false;
+          boot();
+        }
+      },
+    );
 
     /* 当前页面标识（含 query 里的 type） */
     const curKey = computed(() => {
@@ -221,29 +256,43 @@ const App = {
     });
     const pageKey = computed(() => `${store.teamId}:${route.page}:${route.sub}:${JSON.stringify(route.q)}`);
     // 浏览器标签页标题跟随页面：多开标签页可区分
-    watch(pageTitle, (t) => {
-      document.title = (t && t !== '工作台') ? `${t} · 展惠进销存` : '展惠进销存';
-    }, { immediate: true });
+    watch(
+      pageTitle,
+      (t) => {
+        document.title = t && t !== '工作台' ? `${t} · 展惠进销存` : '展惠进销存';
+      },
+      { immediate: true },
+    );
 
     function go(menuPage) {
       openMenu.value = -1;
       nav('#/' + menuPage);
     }
     function onNavClick(i, g) {
-      if (g.page && !g.items) { nav('#/' + g.page); openMenu.value = -1; return; }
+      if (g.page && !g.items) {
+        nav('#/' + g.page);
+        openMenu.value = -1;
+        return;
+      }
       openMenu.value = openMenu.value === i ? -1 : i;
     }
 
     /* ===== Ctrl+K 命令面板：全部菜单项一键跳转 ===== */
     const cmdOpen = ref(false);
     const cmdKw = ref('');
-    const CMD_ITEMS = MENU.flatMap((g) => (g.items || []).map((m) => ({ label: m.label, group: g.label, page: m.page })));
+    const CMD_ITEMS = MENU.flatMap((g) =>
+      (g.items || []).map((m) => ({ label: m.label, group: g.label, page: m.page })),
+    );
     const cmdList = computed(() => {
       const kw = cmdKw.value.trim().toLowerCase();
       if (!kw) return CMD_ITEMS;
       return CMD_ITEMS.filter((m) => (m.label + m.group).toLowerCase().includes(kw));
     });
-    function cmdGo(m) { cmdOpen.value = false; cmdKw.value = ''; go(m.page); }
+    function cmdGo(m) {
+      cmdOpen.value = false;
+      cmdKw.value = '';
+      go(m.page);
+    }
     function onCmdKey(e) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
@@ -257,7 +306,9 @@ const App = {
     onBeforeUnmount(() => window.removeEventListener('keydown', onCmdKey));
 
     /* 低库存铃铛：点击跳库存查询 */
-    function goLowStock() { nav('#/stock'); }
+    function goLowStock() {
+      nav('#/stock');
+    }
     function onDocClick(e) {
       if (!e.target.closest('.nav-item')) openMenu.value = -1;
     }
@@ -279,8 +330,33 @@ const App = {
       toast('已退出登录');
     }
 
-    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, activeNav, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, navInd, tipbarOn,
-      cmdOpen, cmdKw, cmdList, cmdGo, goLowStock };
+    return {
+      ready,
+      booting,
+      switchTo,
+      store,
+      route,
+      pageComp,
+      pageTitle,
+      pageKey,
+      curKey,
+      activeNav,
+      onSwitchTeam,
+      MENU,
+      nav,
+      go,
+      openMenu,
+      onNavClick,
+      auth,
+      onLogout,
+      navInd,
+      tipbarOn,
+      cmdOpen,
+      cmdKw,
+      cmdList,
+      cmdGo,
+      goLowStock,
+    };
   },
   template: `
   <login-page v-if="auth.ready && !auth.user"/>
@@ -352,4 +428,3 @@ const App = {
     </div>
   </div>`,
 };
-

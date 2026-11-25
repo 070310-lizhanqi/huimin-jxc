@@ -110,10 +110,21 @@ export const DOC_STATUS_TEXT: Record<string, string> = {
   void: '已作废',
 };
 
+export const EXPECTED_PARTNER_TYPE: Partial<Record<DocInput['type'], 'cus' | 'ven'>> = {
+  quo: 'cus',
+  sorder: 'cus',
+  stockout: 'cus',
+  sret: 'cus',
+  outapply: 'cus',
+  porder: 'ven',
+  stockin: 'ven',
+  pin: 'ven',
+};
+
 export function docListFilter(
   req: Request,
   teamId: number,
-): { conds: string[]; args: SQLInputValue[]; statusArgIndex: number } {
+): { conds: string[]; args: SQLInputValue[]; statusArgIndex: number; error?: string } {
   const conds: string[] = ['d.teamId = ?'];
   const args: SQLInputValue[] = [teamId];
   let statusArgIndex = -1;
@@ -136,9 +147,13 @@ export function docListFilter(
     conds.push('d.status = ?');
     args.push(String(req.query.status));
   }
-  if (req.query.partnerId) {
+  const partnerRes = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
+  if (!partnerRes.ok) {
+    return { conds, args, statusArgIndex, error: partnerRes.error };
+  }
+  if (partnerRes.value !== null) {
     conds.push('d.partnerId = ?');
-    args.push(Number(req.query.partnerId));
+    args.push(partnerRes.value);
   }
   if (req.query.from) {
     conds.push('d.date >= ?');
@@ -176,7 +191,7 @@ export function computeDocFinancials(
   input: DocInput,
 ): { ok: true; value: ComputedDocFinancials } | { ok: false; error: string } {
   const totalQty = sumQty(input.items.map((i) => i.qty));
-  const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Number(i.price ?? 0)), 0);
+  const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Math.round(Number(i.price ?? 0))), 0);
   const discount = Math.max(0, Math.round(Number(input.discount ?? 0)));
   if (discount > 0 && discount > grossAmount) {
     return { ok: false, error: `整单折扣 ${discount / 100} 元超过单据金额` };
@@ -334,6 +349,15 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
       .get(clerkParsed.value, input.teamId) as { id: number } | undefined;
     if (!clerk) return '业务员不存在';
   }
+  const expectedPartnerType = EXPECTED_PARTNER_TYPE[input.type];
+  const hasPartnerType =
+    input.partnerType !== undefined && input.partnerType !== null && String(input.partnerType).trim().length > 0;
+  if (hasPartnerType || partnerParsed.value !== null) {
+    if (!expectedPartnerType) return '该单据类型不支持关联往来单位';
+    if (input.partnerType !== expectedPartnerType) {
+      return `往来单位类型非法：${input.type} 仅允许关联${expectedPartnerType === 'cus' ? '客户' : '供应商'}`;
+    }
+  }
   if (partnerParsed.value !== null) {
     if (!['cus', 'ven'].includes(input.partnerType ?? '')) return '往来单位类型非法';
     const partnerTable = input.partnerType === 'cus' ? 'customer' : 'vendor';
@@ -445,6 +469,9 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
     if (!Number.isFinite(it.qty) || (it.price !== undefined && !Number.isFinite(it.price))) {
       return `第 ${i + 1} 行数量或单价必须是有限数值`;
     }
+    if (it.price !== undefined && !Number.isInteger(it.price)) {
+      return `第 ${i + 1} 行单价必须为整数分`;
+    }
     const allowNegative = input.type === 'adjust' || input.type === 'assembly';
     const allowZero = input.type === 'stocktake';
     const roundedQty = roundQty(it.qty);
@@ -455,15 +482,17 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
     if (it.price > PRICE_CENTS_MAX) return `第 ${i + 1} 行单价超出上限 ${PRICE_CENTS_MAX / 100} 元`;
   }
 
-  const discountRaw = Number(input.discount ?? 0);
-  if (!Number.isFinite(discountRaw)) return '整单折扣必须是有限数值';
-  if (discountRaw < 0) return '整单折扣不能为负数';
-  const paidRaw = Number(input.paidAmount ?? 0);
-  if (!Number.isFinite(paidRaw)) return '本次收款必须是有限数值';
-  if (paidRaw < 0) return '本次收款不能为负数';
-  const depRaw = Number(input.deposit ?? 0);
-  if (!Number.isFinite(depRaw)) return '抵扣订金必须是有限数值';
-  if (depRaw < 0) return '抵扣订金不能为负数';
+  for (const [label, raw] of [
+    ['整单折扣', input.discount],
+    ['本次收款', input.paidAmount],
+    ['抵扣订金', input.deposit],
+  ] as const) {
+    if (raw !== undefined && raw !== null) {
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) return `${label}必须是有限数值`;
+      if (raw < 0) return `${label}不能为负数`;
+      if (!Number.isInteger(raw)) return `${label}必须为整数分`;
+    }
+  }
 
   if (input.refOrderId != null && input.refOrderId !== undefined && Number(input.refOrderId) !== 0) {
     const refParsed = parsePositiveInt(input.refOrderId, '来源订单');
@@ -478,7 +507,7 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
     if (ref.status !== 'audit') return '来源订单尚未审核，不能转单';
   }
 
-  const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Number(i.price ?? 0)), 0);
+  const grossAmount = input.items.reduce((s, i) => s + lineAmount(i.qty, Math.round(Number(i.price ?? 0))), 0);
   const totalAmount = grossAmount - Math.max(0, Math.round(Number(input.discount ?? 0)));
   if (!Number.isFinite(totalAmount) || Math.abs(totalAmount) > MAX_TOTAL_AMOUNT_CENTS) {
     return '单据总金额超出上限（10 亿元），请核对后重试';
@@ -536,6 +565,10 @@ export function settleOnAudit(
   const moneyType = MONEY_FLOW[doc.type];
   if (!moneyType) return;
   if (!doc.partnerType || !doc.partnerId) throw new StockError('填写了收款/订金，但单据没有关联往来单位');
+  const expectedPartner = EXPECTED_PARTNER_TYPE[doc.type as DocInput['type']];
+  if (expectedPartner && doc.partnerType !== expectedPartner) {
+    throw new StockError('单据往来单位类型与单据类型不匹配');
+  }
   const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
   if (doc.accountId && paid > 0) {
     const acc = db.prepare(`SELECT id, balance FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as

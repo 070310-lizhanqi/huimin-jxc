@@ -18,12 +18,15 @@ function toCents(v) {
 }
 /** HTML 转义：拼打印页/弹窗 HTML 时必须包一层，防用户输入的名称/备注注入脚本 */
 function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  return String(s ?? '').replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
 }
 /** 商品规格 */
-const specOf = (id) => (byId(store.products, id)?.spec || '—');
+const specOf = (id) => byId(store.products, id)?.spec || '—';
 /** 商品单位 */
-const unitOf = (id) => (byId(store.products, id)?.unit || '—');
+const unitOf = (id) => byId(store.products, id)?.unit || '—';
 
 /* 名称解析：byId 是 O(n) 线性 find，在模板每行都被调用（prodLabel/whLabel/partnerLabel 等），
  * 列表 1000 行 × 每行 6 次 find = 6000 次线性扫，直接卡 UI 线程。
@@ -62,4 +65,3 @@ const catLabel = (id) => (id ? (byId(store.cats, id)?.name ?? '') : '');
 const AGING_COLORS = ['#f26f21', '#ff8a3d', '#ffa864', '#ffc08a', '#ffd9bd', '#ffe7d6', '#e85656'];
 const AGING_LABELS = ['30天内', '60天内', '90天内', '180天内', '360天内', '720天内', '超过720天'];
 const AGING_KEYS = ['d30', 'd60', 'd90', 'd180', 'd360', 'd720', 'over720'];
-

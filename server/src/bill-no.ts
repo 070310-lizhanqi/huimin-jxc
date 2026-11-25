@@ -25,7 +25,9 @@ const stmtCache = new WeakMap<DatabaseSync, StatementSync>();
 export function nextBillNo(db: DatabaseSync, teamId: number, type: string, cfg?: BillNoConfig): string {
   // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）；
   // 调用方已一次读出配置时直接复用，不再逐单查库
-  const prefix = cfg ? (cfg.prefix[type] ?? BILL_NO_PREFIXES[type] ?? 'NO') : (loadPrefix(db, teamId)[type] ?? BILL_NO_PREFIXES[type] ?? 'NO');
+  const prefix = cfg
+    ? (cfg.prefix[type] ?? BILL_NO_PREFIXES[type] ?? 'NO')
+    : (loadPrefix(db, teamId)[type] ?? BILL_NO_PREFIXES[type] ?? 'NO');
   const mode = cfg ? cfg.noMode : loadNoMode(db, teamId);
   const full = localDate().replace(/-/g, '');
   const datePart = mode === 'none' ? '' : mode === 'month' ? full.slice(0, 6) : full;

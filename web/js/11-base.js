@@ -5,7 +5,14 @@ const BasePage = {
   setup() {
     const BASE_TABS = ['warehouse', 'reservoir', 'cat', 'unit', 'clerk', 'account'];
     /** 档案接口名 → store 集合名（B-前1 局部刷新用） */
-    const BASE_KEY = { warehouse: 'warehouses', reservoir: 'reservoirs', cat: 'cats', unit: 'units', clerk: 'clerks', account: 'accounts' };
+    const BASE_KEY = {
+      warehouse: 'warehouses',
+      reservoir: 'reservoirs',
+      cat: 'cats',
+      unit: 'units',
+      clerk: 'clerks',
+      account: 'accounts',
+    };
     const baseTabParam = route.q.tab;
     const tab = ref(BASE_TABS.includes(baseTabParam) ? baseTabParam : 'warehouse');
     // 页内切换回写路由：F5 / 分享链接不丢当前页签（?tab=account 深链本来就支持）
@@ -26,13 +33,20 @@ const BasePage = {
 
     const list = computed(() => {
       switch (tab.value) {
-        case 'warehouse': return store.warehouses;
-        case 'reservoir': return store.reservoirs;
-        case 'cat': return store.cats;
-        case 'clerk': return store.clerks;
-        case 'account': return store.accounts;
-        case 'unit': return store.units;
-        default: return [];
+        case 'warehouse':
+          return store.warehouses;
+        case 'reservoir':
+          return store.reservoirs;
+        case 'cat':
+          return store.cats;
+        case 'clerk':
+          return store.clerks;
+        case 'account':
+          return store.accounts;
+        case 'unit':
+          return store.units;
+        default:
+          return [];
       }
     });
 
@@ -70,20 +84,33 @@ const BasePage = {
     function openNew() {
       const k = tab.value;
       editor.kind = k;
-      crud.openNew(k === 'reservoir' ? { warehouseId: null, name: '' }
-        : k === 'cat' ? { parentId: null, name: '' }
-        : k === 'clerk' ? { name: '', mobile: '' }
-        : k === 'account' ? { name: '', type: 'cash', balance: 0 }
-        : { name: '', remark: '' });
+      crud.openNew(
+        k === 'reservoir'
+          ? { warehouseId: null, name: '' }
+          : k === 'cat'
+            ? { parentId: null, name: '' }
+            : k === 'clerk'
+              ? { name: '', mobile: '' }
+              : k === 'account'
+                ? { name: '', type: 'cash', balance: 0 }
+                : { name: '', remark: '' },
+      );
     }
+    const normAccountType = (t) => (t === 'wx' ? 'wechat' : t || 'cash');
     function openEdit(row) {
       const k = tab.value;
       editor.kind = k;
-      crud.openEdit(row, (r) => (k === 'reservoir' ? { warehouseId: r.warehouseId, name: r.name }
-        : k === 'cat' ? { parentId: r.parentId, name: r.name }
-        : k === 'clerk' ? { name: r.name, mobile: r.mobile || '' }
-        : k === 'account' ? { name: r.name, type: r.type || 'cash', balance: (r.balance || 0) / 100 }
-        : { name: r.name, remark: r.remark || '' }));
+      crud.openEdit(row, (r) =>
+        k === 'reservoir'
+          ? { warehouseId: r.warehouseId, name: r.name }
+          : k === 'cat'
+            ? { parentId: r.parentId, name: r.name }
+            : k === 'clerk'
+              ? { name: r.name, mobile: r.mobile || '' }
+              : k === 'account'
+                ? { name: r.name, type: normAccountType(r.type), balance: (r.balance || 0) / 100 }
+                : { name: r.name, remark: r.remark || '' },
+      );
     }
     const save = crud.save;
     const del = crud.del;
@@ -95,15 +122,37 @@ const BasePage = {
       while (grew) {
         grew = false;
         for (const c of store.cats) {
-          if (c.parentId && banned.has(c.parentId) && !banned.has(c.id)) { banned.add(c.id); grew = true; }
+          if (c.parentId && banned.has(c.parentId) && !banned.has(c.id)) {
+            banned.add(c.id);
+            grew = true;
+          }
         }
       }
       return store.cats.filter((c) => !banned.has(c.id));
     });
     const whName = (id) => byId(store.warehouses, id)?.name || `#${id}`;
     const catName = (id) => byId(store.cats, id)?.name || '';
-    const typeText = { cash: '现金', bank: '银行', wechat: '微信', alipay: '支付宝' };
-    return { tab, tabs, list, editor, openNew, openEdit, save, del, whName, catName, typeText, fmtMoney, store, busy, busyDel, catOptions, switchTab };
+    const typeText = { cash: '现金', bank: '银行', wechat: '微信', alipay: '支付宝', other: '其它' };
+    return {
+      tab,
+      tabs,
+      list,
+      editor,
+      openNew,
+      openEdit,
+      save,
+      del,
+      whName,
+      catName,
+      typeText,
+      normAccountType,
+      fmtMoney,
+      store,
+      busy,
+      busyDel,
+      catOptions,
+      switchTab,
+    };
   },
   template: `
   <div>
@@ -160,7 +209,7 @@ const BasePage = {
         <thead><tr><th style="width:38%">账户名称</th><th>类型</th><th class="r">余额</th><th style="width:130px">操作</th></tr></thead>
         <tbody>
           <tr v-if="!list.length"><td colspan="4"><div class="empty">暂无账户</div></td></tr>
-          <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td>{{ typeText[r.type] || r.type }}</td><td class="r money">{{ fmtMoney(r.balance) }}</td>
+          <tr v-for="r in list" :key="r.id"><td style="font-weight:500">{{ r.name }}</td><td>{{ typeText[normAccountType(r.type)] || r.type }}</td><td class="r money">{{ fmtMoney(r.balance) }}</td>
             <td><button class="btn sm" @click="openEdit(r)">编辑</button><button class="btn sm danger" style="margin-left:6px" :disabled="busyDel === r.id" @click="del(r)">{{ busyDel === r.id ? '删除中…' : '删除' }}</button></td></tr>
         </tbody>
       </table>
@@ -199,4 +248,3 @@ const BasePage = {
     </div>
   </div>`,
 };
-

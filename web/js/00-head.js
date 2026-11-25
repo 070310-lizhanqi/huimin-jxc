@@ -28,21 +28,26 @@ const { ElMessage, ElMessageBox } = ElementPlus;
     }
     try {
       ElMessage({ message: '页面出错：' + text.slice(0, 160), type: 'error', duration: 5000, showClose: true });
-    } catch { /* ElMessage 自身不可用时静默 */ }
+    } catch {
+      /* ElMessage 自身不可用时静默 */
+    }
   }
   if (typeof window !== 'undefined') {
-    window.addEventListener('error', (e) => {
-      // 资源加载失败（img/script）无 error 详情，用 target 信息兜底
-      if (e && e.target && e.target !== window && e.target.tagName) {
-        report('资源加载失败', `${e.target.tagName} ${e.target.src || e.target.href || ''}`);
-      } else {
-        report('页面错误', (e && (e.message || e.error)) || '');
-      }
-    }, true);
+    window.addEventListener(
+      'error',
+      (e) => {
+        // 资源加载失败（img/script）无 error 详情，用 target 信息兜底
+        if (e && e.target && e.target !== window && e.target.tagName) {
+          report('资源加载失败', `${e.target.tagName} ${e.target.src || e.target.href || ''}`);
+        } else {
+          report('页面错误', (e && (e.message || e.error)) || '');
+        }
+      },
+      true,
+    );
     window.addEventListener('unhandledrejection', (e) => {
       const r = e && e.reason;
       report('未处理的异步错误', (r && (r.message || r)) || '');
     });
   }
 })();
-

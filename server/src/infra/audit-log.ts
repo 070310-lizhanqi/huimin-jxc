@@ -80,9 +80,9 @@ export function recordAudit(db: DatabaseSync, entry: AuditEntryInput): void {
 }
 
 export function extractClientIp(req: Request): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (req.app?.get('trust proxy') && typeof xff === 'string' && xff.trim()) {
-    return xff.split(',')[0].trim();
+  const trustProxy = req.app?.get('trust proxy');
+  if (trustProxy && req.ip) {
+    return req.ip;
   }
   return req.socket?.remoteAddress ?? req.ip ?? 'unknown';
 }

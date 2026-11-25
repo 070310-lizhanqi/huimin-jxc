@@ -656,4 +656,645 @@ describe('Phase 3 Integration Tests: Security, Validation, Concurrency, Idempote
     assert.equal(badStatement.json.code, 'VALIDATION_ERROR');
     assert.ok(badStatement.json.requestId);
   });
+
+  it('enforces atomic /doc/import RBAC, rollback, barcode dedup, and concurrent duplicate protection', async () => {
+    const csvRollback = [
+      '单据类型,单号,日期,客户,商品,条码,数量,单价',
+      '销售出库,EXT-RB-1,2026-10-15,回滚客户X,回滚商品Y,BC-RB-1,2,100',
+      '销售出库,EXT-RB-2,2026-10-15,甲客户,测试大米,,2000000,600',
+    ].join('\n');
+
+    // Re-login clerk after earlier password change incremented tokenVer
+    const clerkRelogin = await req<{ token: string }>('/api/auth/login', {
+      method: 'POST',
+      body: { username: 'clerk01', password: 'ClerkPassNew!2026' },
+    });
+    assert.equal(clerkRelogin.status, 200);
+    const activeClerkToken = clerkRelogin.json.token;
+
+    // Clerk cannot autoCreate=1
+    const clerkAttempt = await req(`/api/doc/import?teamId=${teamId}&dryRun=0&autoCreate=1`, {
+      method: 'POST',
+      token: activeClerkToken,
+      headers: { 'content-type': 'application/octet-stream' },
+      rawBody: csvRollback,
+    });
+    assert.equal(clerkAttempt.status, 403);
+    assert.equal(clerkAttempt.json.code, 'FORBIDDEN');
+
+    // Admin hitting MAX_TOTAL_AMOUNT_CENTS on bill 2 rolls back bill 1's auto-created customer/product/doc
+    const failImport = await req(`/api/doc/import?teamId=${teamId}&dryRun=0&autoCreate=1`, {
+      method: 'POST',
+      token: adminToken,
+      headers: { 'content-type': 'application/octet-stream' },
+      rawBody: csvRollback,
+    });
+    assert.equal(failImport.status, 400);
+    assert.equal(failImport.json.code, 'VALIDATION_ERROR');
+
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS c FROM customer WHERE teamId = ? AND name = '回滚客户X'").get(teamId)
+        ? (
+            db.prepare("SELECT COUNT(*) AS c FROM customer WHERE teamId = ? AND name = '回滚客户X'").get(teamId) as {
+              c: number;
+            }
+          ).c
+        : -1,
+      0,
+    );
+    assert.equal(
+      (
+        db.prepare("SELECT COUNT(*) AS c FROM product WHERE teamId = ? AND name = '回滚商品Y'").get(teamId) as {
+          c: number;
+        }
+      ).c,
+      0,
+    );
+    assert.equal(
+      (
+        db.prepare("SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND srcBillNo = 'EXT-RB-1'").get(teamId) as {
+          c: number;
+        }
+      ).c,
+      0,
+    );
+
+    // Barcode auto-create updates prodByBarcode inside import transaction + concurrent duplicate srcBillNo blocked
+    const csvBarcode = [
+      '单据类型,单号,日期,客户,商品,条码,数量,单价',
+      '销售出库,EXT-BC-1,2026-10-15,甲客户,条码自建品,BC-AUTOCREATE-9,1,50',
+      '销售出库,EXT-BC-1,2026-10-15,甲客户,条码自建品_别名,BC-AUTOCREATE-9,2,50',
+    ].join('\n');
+    const [imp1, imp2] = await Promise.all([
+      req<{ summary?: { imported?: number }; skippedBills?: unknown[] }>(
+        `/api/doc/import?teamId=${teamId}&dryRun=0&autoCreate=1`,
+        {
+          method: 'POST',
+          token: adminToken,
+          headers: { 'content-type': 'application/octet-stream' },
+          rawBody: csvBarcode,
+        },
+      ),
+      req<{ summary?: { imported?: number }; skippedBills?: unknown[] }>(
+        `/api/doc/import?teamId=${teamId}&dryRun=0&autoCreate=1`,
+        {
+          method: 'POST',
+          token: adminToken,
+          headers: { 'content-type': 'application/octet-stream' },
+          rawBody: csvBarcode,
+        },
+      ),
+    ]);
+    assert.deepEqual([imp1.status, imp2.status], [200, 200]);
+    const totalImported = (imp1.json.summary?.imported ?? 0) + (imp2.json.summary?.imported ?? 0);
+    assert.equal(totalImported, 1);
+    assert.equal(
+      (
+        db
+          .prepare("SELECT COUNT(*) AS c FROM product WHERE teamId = ? AND barcode = 'BC-AUTOCREATE-9'")
+          .get(teamId) as { c: number }
+      ).c,
+      1,
+    );
+    assert.equal(
+      (
+        db.prepare("SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND srcBillNo = 'EXT-BC-1'").get(teamId) as {
+          c: number;
+        }
+      ).c,
+      1,
+    );
+  });
+
+  it('isolates null-batch stocktake deductions and allows voiding zero-diff audited stocktake', async () => {
+    const pM1 = (
+      await req<{ id: number }>('/api/product', {
+        method: 'POST',
+        token: adminToken,
+        body: { name: '盘点批次测试品', unit: '箱', purchasePrice: 1000, salePrice: 2000 },
+      })
+    ).json.id;
+
+    // Inbound batch 'BATCH-A' (10) and null batch (5)
+    const inDoc = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockin',
+        date: '2026-10-10',
+        partnerType: 'ven',
+        partnerId: venId,
+        warehouseId: whId,
+        items: [
+          { productId: pM1, qty: 10, price: 1000, batchNo: 'BATCH-A' },
+          { productId: pM1, qty: 5, price: 1000, batchNo: null },
+        ],
+      },
+    });
+    assert.equal(inDoc.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: inDoc.json.id, teamId } })).status,
+      200,
+    );
+
+    // Regular stockout without batchNo still uses wildcard FIFO across batches (consumes 2 from oldest BATCH-A)
+    const outDoc = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockout',
+        date: '2026-10-11',
+        partnerType: 'cus',
+        partnerId: cusId,
+        warehouseId: whId,
+        items: [{ productId: pM1, qty: 2, price: 2000, batchNo: null }],
+      },
+    });
+    assert.equal(outDoc.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: outDoc.json.id, teamId } })).status,
+      200,
+    );
+
+    // Stocktake count 0 on null batch must ONLY deduct null batch (5 -> 0), NOT touch BATCH-A (still 8)
+    const stZero = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stocktake',
+        date: '2026-10-12',
+        warehouseId: whId,
+        items: [{ productId: pM1, qty: 0, price: 0, batchNo: null }],
+      },
+    });
+    assert.equal(stZero.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: stZero.json.id, teamId } })).status,
+      200,
+    );
+
+    const batchA = db
+      .prepare(
+        `SELECT COALESCE(SUM(qty), 0) AS q FROM stock WHERE teamId = ? AND productId = ? AND warehouseId = ? AND batchNo = 'BATCH-A'`,
+      )
+      .get(teamId, pM1, whId) as { q: number };
+    const batchNull = db
+      .prepare(
+        `SELECT COALESCE(SUM(qty), 0) AS q FROM stock WHERE teamId = ? AND productId = ? AND warehouseId = ? AND batchNo IS NULL`,
+      )
+      .get(teamId, pM1, whId) as { q: number };
+    assert.equal(batchA.q, 8);
+    assert.equal(batchNull.q, 0);
+
+    // Zero-diff stocktake (qty === 8 matching BATCH-A book qty 8) audits & voids cleanly
+    const stEq = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stocktake',
+        date: '2026-10-13',
+        warehouseId: whId,
+        items: [{ productId: pM1, qty: 8, price: 0, batchNo: 'BATCH-A' }],
+      },
+    });
+    assert.equal(stEq.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: stEq.json.id, teamId } })).status,
+      200,
+    );
+    const voidEq = await req('/api/doc/void', {
+      method: 'POST',
+      token: adminToken,
+      body: { id: stEq.json.id, teamId },
+    });
+    assert.equal(voidEq.status, 200);
+    const stEqRow = db.prepare('SELECT status FROM doc WHERE id = ?').get(stEq.json.id) as { status: string };
+    assert.equal(stEqRow.status, 'void');
+  });
+
+  it('enforces doc.type<->partnerType pairing, integer cents, strict types, and partnerType report isolation', async () => {
+    // Mismatched partnerType or partner on non-partner doc rejected with 400
+    for (const badBody of [
+      {
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+      {
+        teamId,
+        type: 'pin',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+      {
+        teamId,
+        type: 'outapply',
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+      {
+        teamId,
+        type: 'transfer',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [{ productId: prodId, qty: 1, price: 0, toWarehouseId: wh2Id }],
+      },
+      // Fractional float price and boolean amounts rejected
+      {
+        teamId,
+        type: 'sorder',
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [{ productId: prodId, qty: 1, price: 100.4 }],
+      },
+      {
+        teamId,
+        type: 'sorder',
+        partnerType: 'cus',
+        partnerId: cusId,
+        discount: true,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+      {
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        paidAmount: true,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+      {
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        deposit: 10.5,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    ]) {
+      const r = await req('/api/doc/create', { method: 'POST', token: adminToken, body: badBody });
+      assert.equal(r.status, 400);
+      assert.equal(r.json.code, 'VALIDATION_ERROR');
+    }
+
+    // Settlement type-strict amounts & query IDs
+    const badSettleBool = await req('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, type: 'receipt', partnerType: 'cus', partnerId: cusId, amount: true },
+    });
+    assert.equal(badSettleBool.status, 400);
+    const badSettleFloat = await req('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, type: 'receipt', partnerType: 'cus', partnerId: cusId, amount: 10.5 },
+    });
+    assert.equal(badSettleFloat.status, 400);
+
+    const validSettle = await req<{ id: number }>('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, type: 'receipt', partnerType: 'cus', partnerId: cusId, amount: 500 },
+    });
+    assert.equal(validSettle.status, 200);
+    const badSettlePutBool = await req(`/api/settlement/${validSettle.json.id}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, amount: true },
+    });
+    assert.equal(badSettlePutBool.status, 400);
+    const badSettlePutFloat = await req(`/api/settlement/${validSettle.json.id}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, amount: 50.5 },
+    });
+    assert.equal(badSettlePutFloat.status, 400);
+    assert.equal(
+      (await req(`/api/settlement/${validSettle.json.id}`, { method: 'DELETE', token: adminToken })).status,
+      200,
+    );
+
+    for (const badQueryUrl of [
+      `/api/doc/list?teamId=${teamId}&partnerId=abc`,
+      `/api/doc/export?teamId=${teamId}&partnerId=abc`,
+      `/api/settlement/list?teamId=${teamId}&partnerId=abc`,
+      `/api/settlement/list?teamId=${teamId}&refDocId=abc`,
+    ]) {
+      const r = await req(badQueryUrl, { token: adminToken });
+      assert.equal(r.status, 400);
+      assert.equal(r.json.code, 'VALIDATION_ERROR');
+    }
+
+    // Also reject mismatched partnerType on /doc/edit
+    const draftForEdit = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    });
+    assert.equal(draftForEdit.status, 200);
+    const badEditPartner = await req('/api/doc/edit', {
+      method: 'PUT',
+      token: adminToken,
+      body: {
+        id: draftForEdit.json.id,
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    });
+    assert.equal(badEditPartner.status, 400);
+    assert.equal(badEditPartner.json.code, 'VALIDATION_ERROR');
+
+    // /report/statement & /report/aging isolate by partnerType even when customer.id === vendor.id
+    assert.equal(cusId, venId);
+    const todayIso = new Date().toISOString().slice(0, 10);
+    // Simulate a legacy anomalous doc row with stockout + partnerType='ven' on colliding id
+    db.prepare(
+      `INSERT INTO doc (teamId, billNo, type, date, partnerType, partnerId, warehouseId, status, totalAmount, totalQty)
+       VALUES (?, 'CK-LEGACY-MISMATCH', 'stockout', ?, 'ven', ?, ?, 'audit', 99900, 1)`,
+    ).run(teamId, todayIso, venId, whId);
+    const stAr = await req<{ lines: Array<{ billNo?: string }> }>(
+      `/api/report/statement?teamId=${teamId}&partnerId=${cusId}&mode=ar&from=2000-01-01&to=2099-12-31`,
+      { token: adminToken },
+    );
+    assert.equal(stAr.status, 200);
+    assert.equal(
+      stAr.json.lines.some((r) => r.billNo === 'CK-LEGACY-MISMATCH'),
+      false,
+    );
+    const agingAr = await req<{ rows: Array<{ partnerId: number; total: number }> }>(
+      `/api/report/aging?teamId=${teamId}&mode=ar`,
+      { token: adminToken },
+    );
+    assert.equal(agingAr.status, 200);
+    db.prepare(`DELETE FROM doc WHERE billNo = 'CK-LEGACY-MISMATCH'`).run();
+  });
+
+  it('allows updating legacy wx/whole/retail archive rows and preserves duplicate-product order fulfillment & copy precision', async () => {
+    const legAccId = Number(
+      db.prepare("INSERT INTO account (teamId, name, type, balance) VALUES (?, '旧微信账户', 'wx', 0)").run(teamId)
+        .lastInsertRowid,
+    );
+    const legCusId = Number(
+      db.prepare("INSERT INTO customer (teamId, name, priceLevel) VALUES (?, '旧批发客户', 'whole')").run(teamId)
+        .lastInsertRowid,
+    );
+
+    const putAcc = await req(`/api/account/${legAccId}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, name: '新微信账户', type: 'wechat' },
+    });
+    assert.equal(putAcc.status, 200);
+    const putCus = await req(`/api/customer/${legCusId}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, name: '新批发客户', priceLevel: 'wholePrice' },
+    });
+    assert.equal(putCus.status, 200);
+
+    // Ensure enough stock exists for duplicate-product partial conversion
+    const inStock = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockin',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 30, price: 3000 }],
+      },
+    });
+    assert.equal(inStock.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: inStock.json.id, teamId } }))
+        .status,
+      200,
+    );
+
+    const sorder = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'sorder',
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [
+          { productId: prodId, qty: 10, price: 5000 },
+          { productId: prodId, qty: 5, price: 4800 },
+        ],
+      },
+    });
+    assert.equal(sorder.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: sorder.json.id, teamId } })).status,
+      200,
+    );
+
+    const partialOut = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockout',
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        refOrderId: sorder.json.id,
+        items: [{ productId: prodId, qty: 12, price: 5000 }],
+      },
+    });
+    assert.equal(partialOut.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: partialOut.json.id, teamId } }))
+        .status,
+      200,
+    );
+
+    const infoRes = await req<{ fulfillment: Array<{ ordered: number; converted: number; remain: number }> }>(
+      `/api/doc/info?id=${sorder.json.id}&teamId=${teamId}`,
+      { token: adminToken },
+    );
+    assert.equal(infoRes.status, 200);
+    assert.deepEqual(
+      infoRes.json.fulfillment.map((f) => f.remain),
+      [0, 3],
+    );
+
+    const convRes = await req<{ id: number; doc?: { totalQty: number } }>('/api/doc/convert', {
+      method: 'POST',
+      token: adminToken,
+      body: { id: sorder.json.id, teamId, toType: 'stockout', warehouseId: whId },
+    });
+    assert.equal(convRes.status, 200);
+    const convInfo = await req<{ doc: { totalQty: number }; items: Array<{ qty: number }> }>(
+      `/api/doc/info?id=${convRes.json.id}&teamId=${teamId}`,
+      { token: adminToken },
+    );
+    assert.equal(convInfo.status, 200);
+    assert.equal(convInfo.json.doc.totalQty, 3);
+    assert.equal(convInfo.json.items.length, 1);
+    assert.equal(convInfo.json.items[0].qty, 3);
+
+    // /doc/copy float precision: 0.1 + 0.2 -> 0.3
+    const floatDraft = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'quo',
+        partnerType: 'cus',
+        partnerId: cusId,
+        items: [
+          { productId: prodId, qty: 0.1, price: 1000 },
+          { productId: prodId, qty: 0.2, price: 1000 },
+        ],
+      },
+    });
+    assert.equal(floatDraft.status, 200);
+    const copied = await req<{ id: number }>('/api/doc/copy', {
+      method: 'POST',
+      token: adminToken,
+      body: { id: floatDraft.json.id, teamId },
+    });
+    assert.equal(copied.status, 200);
+    const copiedRow = db.prepare('SELECT totalQty FROM doc WHERE id = ?').get(copied.json.id) as { totalQty: number };
+    assert.equal(copiedRow.totalQty, 0.3);
+  });
+
+  it('rejects backup symlinks on restore/delete and resists X-Forwarded-For spoofing under ORANGE_TRUST_PROXY=1', async () => {
+    // 1) Backup symlink guard on restore and delete
+    const bDir = path.join(tmpDir, 'backups');
+    fs.mkdirSync(bDir, { recursive: true });
+    const outsideTarget = path.join(tmpDir, 'outside-secret.txt');
+    fs.writeFileSync(outsideTarget, 'keep-me', 'utf8');
+    const symName = 'backup-20261015-120000-sym1.db';
+    fs.symlinkSync(outsideTarget, path.join(bDir, symName));
+
+    const restoreSym = await req('/api/backup/restore', {
+      method: 'POST',
+      token: adminToken,
+      body: { file: symName, password: 'StrongAdmin!2026' },
+    });
+    assert.equal(restoreSym.status, 400);
+    assert.equal(restoreSym.json.code, 'VALIDATION_ERROR');
+
+    const delSym = await req(`/api/backup/${symName}`, {
+      method: 'DELETE',
+      token: adminToken,
+    });
+    assert.equal(delSym.status, 400);
+    assert.equal(delSym.json.code, 'VALIDATION_ERROR');
+    assert.equal(fs.readFileSync(outsideTarget, 'utf8'), 'keep-me');
+
+    // 2) ORANGE_TRUST_PROXY=0 ignores X-Forwarded-Proto=https when ORANGE_COOKIE_SECURE=auto
+    const proxyTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jxc-tp-int-'));
+    let proxyServer: http.Server | null = null;
+    let proxyDb: ReturnType<typeof openDb> | null = null;
+    try {
+      process.env.ORANGE_DATA_DIR = proxyTmp;
+      process.env.ORANGE_COOKIE_SECURE = 'auto';
+      process.env.ORANGE_TRUST_PROXY = '0';
+      resetConfigForTest();
+      const cfgNoTrust = initConfig({ persistSecret: false });
+      proxyDb = openDb(cfgNoTrust.dbPath);
+      migrate(proxyDb);
+      const appNoTrust = createApp(proxyDb, cfgNoTrust);
+      const srvNoTrust = await new Promise<http.Server>((resolve) => {
+        const s = appNoTrust.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      proxyServer = srvNoTrust;
+      const pPort = (srvNoTrust.address() as AddressInfo).port;
+      const regRes = await fetch(`http://127.0.0.1:${pPort}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+        body: JSON.stringify({ username: 'tpadmin', password: 'StrongProxy!2026', teamName: '代理测试' }),
+      });
+      assert.equal(regRes.status, 200);
+      assert.equal((regRes.headers.get('set-cookie') ?? '').includes('; Secure'), false);
+      await new Promise<void>((resolve) => srvNoTrust.close(() => resolve()));
+      proxyServer = null;
+
+      // 3) ORANGE_TRUST_PROXY=1 uses rightmost proxy hop (anti-spoofing) for rate limiter & audit_log.ip
+      process.env.ORANGE_TRUST_PROXY = '1';
+      resetConfigForTest();
+      const cfgTrust = initConfig({ persistSecret: false });
+      const appTrust = createApp(proxyDb, cfgTrust);
+      const srvTrust = await new Promise<http.Server>((resolve) => {
+        const s = appTrust.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      proxyServer = srvTrust;
+      const tPort = (srvTrust.address() as AddressInfo).port;
+
+      // Success login with spoofed left XFF records rightmost 198.51.100.77 in audit_log
+      const okLogin = await fetch(`http://127.0.0.1:${tPort}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '10.0.0.99, 198.51.100.77',
+          'x-forwarded-proto': 'https',
+        },
+        body: JSON.stringify({ username: 'tpadmin', password: 'StrongProxy!2026' }),
+      });
+      assert.equal(okLogin.status, 200);
+      assert.equal((okLogin.headers.get('set-cookie') ?? '').includes('; Secure'), true);
+      const lastAudit = proxyDb
+        .prepare("SELECT ip FROM audit_log WHERE action = 'auth.login' ORDER BY id DESC LIMIT 1")
+        .get() as { ip: string };
+      assert.equal(lastAudit.ip, '198.51.100.77');
+
+      // 15 failed logins rotating left-most spoofed IP still share rightmost 198.51.100.77 bucket -> 16th returns 429
+      let hit429 = false;
+      for (let i = 1; i <= 17; i++) {
+        const r = await fetch(`http://127.0.0.1:${tPort}/api/auth/login`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': `10.0.0.${i}, 198.51.100.77`,
+          },
+          body: JSON.stringify({ username: 'tpadmin', password: 'WrongPassword!1' }),
+        });
+        if (r.status === 429) {
+          hit429 = true;
+          break;
+        }
+        assert.equal(r.status, 401);
+      }
+      assert.equal(hit429, true);
+    } finally {
+      if (proxyServer) await new Promise<void>((resolve) => proxyServer!.close(() => resolve()));
+      if (proxyDb) proxyDb.close();
+      fs.rmSync(proxyTmp, { recursive: true, force: true });
+      process.env.ORANGE_DATA_DIR = tmpDir;
+      delete process.env.ORANGE_COOKIE_SECURE;
+      delete process.env.ORANGE_TRUST_PROXY;
+      resetConfigForTest();
+      initConfig({ persistSecret: false });
+    }
+  });
 });

@@ -9,10 +9,22 @@ import { parsePositiveInt } from './infra/validate';
 
 /** 默认单据前缀（可被 team 配置覆盖） */
 export const DEFAULT_PREFIX: Record<string, string> = {
-  stockin: 'RK', stockout: 'CK', transfer: 'DB', adjust: 'TZ', stocktake: 'PD',
-  porder: 'CG', sorder: 'XS', pin: 'CT', sret: 'XT',
-  otherin: 'QR', otherout: 'QC', assembly: 'ZZ', stockinit: 'QCQ', quo: 'BJ',
-  outapply: 'SQ', prodtask: 'SC',
+  stockin: 'RK',
+  stockout: 'CK',
+  transfer: 'DB',
+  adjust: 'TZ',
+  stocktake: 'PD',
+  porder: 'CG',
+  sorder: 'XS',
+  pin: 'CT',
+  sret: 'XT',
+  otherin: 'QR',
+  otherout: 'QC',
+  assembly: 'ZZ',
+  stockinit: 'QCQ',
+  quo: 'BJ',
+  outapply: 'SQ',
+  prodtask: 'SC',
 };
 
 /**
@@ -34,15 +46,18 @@ export interface PrintConf {
 }
 
 export const DEFAULT_PRINT: PrintConf = {
-  company: '', address: '', phone: '', footer: '本单为业务往来凭证，如有疑问请及时联系。', showLogo: true,
+  company: '',
+  address: '',
+  phone: '',
+  footer: '本单为业务往来凭证，如有疑问请及时联系。',
+  showLogo: true,
 };
 
 const PRINT_KEY = 'print';
 
 function getSetting(db: DatabaseSync, teamId: number, key: string): string | null {
   const row = db.prepare(`SELECT value FROM setting WHERE teamId = ? AND key = ?`).get(teamId, key) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   return row ? row.value : null;
 }
 
@@ -306,15 +321,23 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       return sendError(req, res, 400, 'scope 格式无效', 'VALIDATION_ERROR');
     }
     const scope = typeof body.scope === 'string' ? body.scope : 'all';
-    if (scope === 'all' || scope === 'prefix') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'prefix'`).run(teamId);
-    if (scope === 'all' || scope === PRINT_KEY) db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = ?`).run(teamId, PRINT_KEY);
-    if (scope === 'all' || scope === 'noMode') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'noMode'`).run(teamId);
+    if (scope === 'all' || scope === 'prefix')
+      db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'prefix'`).run(teamId);
+    if (scope === 'all' || scope === PRINT_KEY)
+      db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = ?`).run(teamId, PRINT_KEY);
+    if (scope === 'all' || scope === 'noMode')
+      db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'noMode'`).run(teamId);
     recordAuditFromRequest(db, req, {
       teamId,
       action: 'setting.reset',
       entityType: 'setting',
       entityId: scope,
     });
-    return res.json({ ok: true, prefix: loadPrefix(db, teamId), noMode: loadNoMode(db, teamId), print: loadPrint(db, teamId) });
+    return res.json({
+      ok: true,
+      prefix: loadPrefix(db, teamId),
+      noMode: loadNoMode(db, teamId),
+      print: loadPrint(db, teamId),
+    });
   });
 }

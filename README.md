@@ -63,7 +63,7 @@
 | `ORANGE_REQUIRE_SECRET` | `0` | 设为 `1` 强制要求显式传入 `ORANGE_JWT_SECRET` |
 | `ORANGE_ALLOW_HOSTS` | 空 | 允许访问的额外 Host 域名（逗号分隔，用于反代域名/内网穿透，如 `jxc.example.com`） |
 | `ORANGE_COOKIE_SECURE` | `0` | Cookie `Secure` 标志：`0` \| `1` \| `auto`（`auto` 按 `X-Forwarded-Proto=https` 自动开启） |
-| `ORANGE_TRUST_PROXY` | `0` | 是否信任反向代理头（`X-Forwarded-For` / `X-Forwarded-Proto`）；置于 Nginx/Caddy 后需设为 `1` |
+| `ORANGE_TRUST_PROXY` | `0` | 反向代理跳数（`0`=关闭；`1..20`=受信任代理跳数，也可兼容 `false`/`true`）；置于 Nginx/Caddy 后建议设为 `1` |
 | `LOG_LEVEL` | `info` | 日志输出级别：`debug` \| `info` \| `warn` \| `error` |
 | `LOG_FORMAT` | `pretty`（`production` 下默认 `json`） | 日志格式：`pretty` \| `json` |
 | `BACKUP_KEEP_COUNT` | `30` | 自动保留最新备份份数（1–365 整数） |
@@ -87,7 +87,7 @@ cp .env.example .env
 # 编译后端 TypeScript -> dist/
 pnpm run build
 
-# （可选）初始化/迁移数据库并写入初始账号（默认随机密码；可通过 SEED_ADMIN_PASS 指定 >=8 位强密码）
+# （可选）初始化/迁移数据库并写入初始账号（CLI 不要求 ORANGE_JWT_SECRET；production 需提供符合强度要求的 SEED_ADMIN_PASS）
 pnpm run db:migrate
 SEED_ADMIN_PASS='YourStrongPass!2026' pnpm run db:seed
 
