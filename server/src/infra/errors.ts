@@ -5,6 +5,7 @@
  * - 兜底未知错误统一返回 500，绝不把内部异常栈或 SQLite 细节泄露给客户端
  */
 import type { NextFunction, Request, Response } from 'express';
+import { logger } from './logger';
 
 export type ErrorCode =
   | 'VALIDATION_ERROR'
@@ -150,6 +151,11 @@ export function expressErrorMiddleware(err: unknown, req: Request, res: Response
     sendError(req, res, err.statusCode, err.message, err.code, err.details);
     return;
   }
-  console.error('[express-error]', { requestId: getRequestId(req), path: req.originalUrl, err });
+  logger.error('Unhandled express error', {
+    requestId: getRequestId(req),
+    method: req.method,
+    path: req.originalUrl,
+    err,
+  });
   sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
 }

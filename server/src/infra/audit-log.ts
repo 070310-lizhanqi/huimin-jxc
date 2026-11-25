@@ -6,6 +6,7 @@
 import type { Request } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 import { getRequestId } from './errors';
+import { logger } from './logger';
 
 export interface AuditEntryInput {
   teamId: number;
@@ -71,7 +72,10 @@ export function recordAudit(db: DatabaseSync, entry: AuditEntryInput): void {
     recordAuditTx(db, entry);
   } catch (err) {
     // 非事务外围审计写失败只告警不中断业务请求（若在事务内强一致记账请使用 recordAuditTx）
-    console.warn('[audit-log] 写入审计日志失败:', err instanceof Error ? err.message : String(err));
+    logger.warn('Failed to persist audit log entry', {
+      err: err instanceof Error ? err.message : String(err),
+      action: entry.action,
+    });
   }
 }
 

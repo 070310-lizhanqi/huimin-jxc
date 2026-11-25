@@ -234,7 +234,7 @@ export function loadDotEnv(options: { envPath?: string; targetEnv?: NodeJS.Proce
 
 export function validateConfig(rawEnv: NodeJS.ProcessEnv, options: ValidateConfigOptions = {}): AppConfig {
   const errors: string[] = [];
-  const warn = options.warn ?? ((msg: string) => console.warn(msg));
+  const warn = options.warn ?? ((msg: string) => process.stderr.write(`${msg}\n`));
 
   const rawNodeEnv = (rawEnv.NODE_ENV ?? 'development').trim() || 'development';
   if (!VALID_NODE_ENVS.has(rawNodeEnv)) {

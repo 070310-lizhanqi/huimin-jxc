@@ -20,6 +20,7 @@ import { localDate, validBizDate, createWindowLimiter, tryCheckpoint } from './d
 import { nextBillNo, loadBillNoConfig } from './bill-no';
 import { PRICE_CENTS_MAX, QTY_MAX } from './crud';
 import { recordAuditFromRequest } from './infra/audit-log';
+import { logger } from './infra/logger';
 import { safeRollback } from './infra/tx';
 import { lineAmount, sumQty } from './shared/money';
 import type { SheetData } from './xlsxlite';
@@ -270,7 +271,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           return res.status(400).json({ error: `单次最多导入 ${MAX_ROWS} 行` });
         }
         // A-安4：解析失败不回吐原始文案（可能含解析器内部细节），只返回通用文案，详情写服务端日志
-        console.error('[docimport] 文件解析失败:', e);
+        logger.warn('Document import spreadsheet parse failed', { err: e });
         return res.status(400).json({ error: '文件解析失败，请检查文件格式后重试' });
       }
       const sheet = sheets[0]; // 默认第一个工作表
@@ -680,7 +681,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             } catch { /* 同上 */ }
           }
           // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名），只写服务端日志
-          console.error('[docimport] 导入落库失败:', e);
+          logger.error('Document import persistence failed', { teamId, err: e });
           return res.status(500).json({ error: '导入失败，请稍后重试' });
         }
       }

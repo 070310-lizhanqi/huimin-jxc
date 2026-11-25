@@ -7,6 +7,7 @@ import { mountCrud } from '../crud';
 import { createWindowLimiter } from '../db';
 import { recordAuditFromRequest } from '../infra/audit-log';
 import { BusyError, sendError } from '../infra/errors';
+import { logger } from '../infra/logger';
 import { parseEnum, parseOptionalPositiveInt, parsePositiveInt } from '../infra/validate';
 import { requireAdmin } from '../middleware/rbac';
 import { importProducts } from '../services/product-import-service';
@@ -257,7 +258,7 @@ export function mountArchiveRoutes(api: Router, db: DatabaseSync): void {
       if (e instanceof BusyError) {
         return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
       }
-      console.error('[product-import] 导入失败:', e);
+      logger.error('Product batch import failed', { teamId, err: e });
       return sendError(req, res, 500, '导入失败，请稍后重试', 'INTERNAL_ERROR');
     }
   });

@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { sendError } from '../infra/errors';
+import { runWithLogContext } from '../infra/logger';
 
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const UNSAFE_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -14,7 +15,7 @@ export const requestIdMiddleware: RequestHandler = (req: Request, res: Response,
   const requestId = raw && SAFE_REQUEST_ID_RE.test(raw.trim()) ? raw.trim() : crypto.randomUUID();
   (req as Request & { requestId?: string }).requestId = requestId;
   res.setHeader('X-Request-Id', requestId);
-  next();
+  runWithLogContext({ requestId }, () => next());
 };
 
 export function createHostAllowedFn(extraAllowHosts: readonly string[]): (hostHeader: string) => boolean {

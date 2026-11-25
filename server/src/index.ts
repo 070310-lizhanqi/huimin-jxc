@@ -12,16 +12,18 @@ import type { AppConfig } from './config/env';
 import { dataDir, migrate, openDb, tryCheckpoint } from './db';
 import { recordAuditFromRequest } from './infra/audit-log';
 import { sendError } from './infra/errors';
+import { configureLogger, logger } from './infra/logger';
 import { requireAdmin } from './middleware/rbac';
 
 let appConfig: AppConfig;
 try {
-  appConfig = initConfig();
+  appConfig = initConfig({ warn: (msg) => logger.warn(msg) });
+  configureLogger({ level: appConfig.logLevel, format: appConfig.logFormat });
 } catch (err) {
   if (err instanceof ConfigError) {
-    console.error(`[启动失败] ${err.message}`);
+    logger.error('Startup failed due to invalid configuration', { message: err.message });
   } else {
-    console.error('[启动失败] 初始化配置失败：', err);
+    logger.error('Startup failed during config initialization', { err });
   }
   process.exit(1);
 }
@@ -118,7 +120,7 @@ function createGzipMiddleware(): RequestHandler {
         chunks.length = 0;
         zlib.gzip(body, { level: 6 }, (err, gzipped) => {
           if (err || !gzipped) {
-            console.error('[gzip] 压缩失败，回落明文:', err);
+            logger.error('Gzip compression failed; falling back to plain response', { path: reqPath, err });
             usingGzip = false;
             origWrite(body);
             origEnd();
@@ -269,15 +271,20 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
 
 (async () => {
   if (!acquireLock()) {
-    console.log('[单实例] 已有一个展惠进销存实例在运行（锁文件指向存活进程），本次启动退出。');
+    logger.info('Another zhanhui-jxc instance is already running; exiting', { dataDir: dataDir() });
     process.exit(0);
   }
   const firstPort = PORT;
   const { server, port } = await listenOn(firstPort, 20);
   writePortFile(port);
-  console.log(`zhanhui-jxc server listening on http://127.0.0.1:${port}`);
+  logger.info('zhanhui-jxc server listening', {
+    port,
+    bindHost: appConfig.bindHost,
+    nodeEnv: appConfig.nodeEnv,
+    url: `http://${appConfig.bindHost === '0.0.0.0' ? '127.0.0.1' : appConfig.bindHost}:${port}`,
+  });
   if (port !== firstPort) {
-    console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${port}（port.txt 已更新）。`);
+    logger.warn('Preferred port unavailable; shifted to fallback port', { preferredPort: firstPort, actualPort: port });
   }
   try {
     const runtimeDir = path.join(__dirname, '..', '..', '.tools');
@@ -291,7 +298,7 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
   const gracefulShutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[停机] 收到 ${signal}，开始优雅停机……`);
+    logger.info('Graceful shutdown initiated', { signal });
     try {
       await Promise.race([
         new Promise<void>((resolve) => server.close(() => resolve())),
@@ -306,7 +313,7 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
     } catch {
       /* ignore */
     }
-    console.log('[停机] 数据库已关闭，进程退出。');
+    logger.info('Database closed cleanly; process exiting', { signal });
     process.exit(0);
   };
   shutdownHandler = gracefulShutdown;

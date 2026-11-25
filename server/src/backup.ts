@@ -22,6 +22,7 @@ import { verifyPassword } from './auth';
 import { safeHandler as safe } from './safe-handler';
 import { getConfig } from './config/env';
 import { recordAuditFromRequest } from './infra/audit-log';
+import { logger } from './infra/logger';
 
 const NAME_RE = /^backup-\d{8}-\d{6}(?:-[a-z0-9]{4})?\.db$/;
 
@@ -216,7 +217,7 @@ function scheduleRestore(source: string, db: DatabaseSync): void {
   // raw fd to the live DB file in the same PID clears all POSIX fcntl advisory locks held
   // by SQLite, which tricks other processes closing their DB handles into unlinking -wal/-shm.
   db.prepare('VACUUM INTO ?').run(path.join(backupDir(), preName));
-  console.log(`[恢复] 当前库已备份为 ${preName}，再写入恢复标记。`);
+  logger.info('Created pre-restore backup and queued restore marker', { preName });
   fs.copyFileSync(source, target);
   // 服务入口：编译产物 dist/server/index.js 相对 server/src 为 ../../dist/server/index.js
   const entry = path.join(__dirname, '..', '..', 'dist', 'server', 'index.js');
@@ -230,16 +231,18 @@ function scheduleRestore(source: string, db: DatabaseSync): void {
         env: process.env,
       });
       c.unref();
-      console.log(`[恢复] 已安排重启助手（pid ${c.pid}），本进程退出后由它拉起服务。`);
+      logger.info('Scheduled restart helper for restore', { helperPid: c.pid });
     } else {
-      console.warn(`[恢复] 未找到服务入口 ${entry}，请手动重启服务以应用恢复。`);
+      logger.warn('Server entrypoint missing; manual restart required after restore', { entry });
     }
   } catch (e) {
-    console.warn(`[恢复] 重启助手启动失败（${(e as Error).message}），请手动重启服务。`);
+    logger.warn('Failed to spawn restart helper; manual restart required after restore', {
+      err: (e as Error).message,
+    });
   }
   // 响应写完后退出：让 HTTP 响应先落到客户端
   setTimeout(() => {
-    console.log('[恢复] 数据库备份已排队，进程退出以应用恢复……');
+    logger.info('Exiting process to apply queued database restore');
     // B-安18：恢复退出前先关库，再退出（重启助手等父进程退出后拉起）
     try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
     process.exit(0);
@@ -318,7 +321,9 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       db.prepare('VACUUM INTO ?').run(path.join(dir, name));
       // 保留策略：新建后立即裁剪，避免目录无限增长（显式豁免刚创建的这份）
       const removed = pruneBackups(dir, name);
-      if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${keepBackupsCount()} 份）的旧备份`);
+      if (removed.length) {
+        logger.info('Pruned expired backups', { removedCount: removed.length, keepCount: keepBackupsCount() });
+      }
       recordAuditFromRequest(db, req, {
         action: 'backup.create',
         entityType: 'backup',
@@ -328,7 +333,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)), pruned: removed.length });
     } catch (e) {
       // A-安4：不把 err.message 回吐给客户端，只写服务端日志
-      console.error('[backup] 创建备份失败:', e);
+      logger.error('Failed to create backup', { err: e });
       return res.status(500).json({ error: '备份失败，请稍后重试' });
     }
   });
@@ -368,7 +373,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       assertSQLiteFile(full);
     } catch (e) {
       // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
-      console.error('[backup] 恢复前校验备份文件失败:', e);
+      logger.error('Restore validation failed (invalid SQLite header)', { file, err: e });
       return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
     }
     // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
@@ -398,7 +403,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       validation = validateRestoreFile(full);
     } catch (e) {
       // A-安4：校验失败的原始错误不回吐，只返回通用文案，详情写服务端日志
-      console.error('[backup] 恢复前完整性校验失败:', e);
+      logger.error('Restore integrity verification failed', { file, err: e });
       return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
     }
     try {
@@ -414,7 +419,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       return res.json({ ok: true, message: `恢复已排队：服务即将重启，重启后数据回到所选备份时点。（恢复前完整性校验已通过，耗时 ${validation.seconds.toFixed(1)} 秒；当前库已备份，恢复失败可回滚。）` });
     } catch (e) {
       // A-安4：不把 err.message 回吐给客户端，只写服务端日志
-      console.error('[backup] 恢复排队失败:', e);
+      logger.error('Failed to queue restore', { file, err: e });
       return res.status(500).json({ error: '恢复失败，请稍后重试' });
     }
   }));

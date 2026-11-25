@@ -1,0 +1,39 @@
+services:
+  zhanhui-jxc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zhanhui-jxc
+    restart: unless-stopped
+    ports:
+      - "${PORT:-7741}:7741"
+    environment:
+      NODE_ENV: production
+      PORT: 7741
+      ORANGE_BIND: 0.0.0.0
+      ORANGE_DATA_DIR: /app/data
+      ORANGE_JWT_SECRET: "${ORANGE_JWT_SECRET:?请先设置至少 32 位强随机 ORANGE_JWT_SECRET}"
+      ORANGE_REQUIRE_SECRET: "1"
+      ORANGE_ALLOW_HOSTS: "${ORANGE_ALLOW_HOSTS:-localhost,127.0.0.1}"
+      ORANGE_COOKIE_SECURE: "${ORANGE_COOKIE_SECURE:-auto}"
+      ORANGE_TRUST_PROXY: "${ORANGE_TRUST_PROXY:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      BACKUP_KEEP_COUNT: "${BACKUP_KEEP_COUNT:-30}"
+    volumes:
+      - zhanhui_data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:7741/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  zhanhui_data:

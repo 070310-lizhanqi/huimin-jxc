@@ -4,6 +4,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { logger } from './infra/logger';
 
 export type DB = DatabaseSync;
 
@@ -112,12 +113,12 @@ function applyPendingRestore(dbPath: string): void {
     for (const [from, to] of moved.reverse()) {
       try { fs.renameSync(to, from); } catch { /* 尽力回退 */ }
     }
-    console.error('[恢复] 替换库文件失败，已回滚到恢复前状态，本次启动继续使用当前库:', e);
+    logger.error('Failed to apply pending restore; rolled back to previous DB', { err: e });
     return;
   }
   // 成功：旧库已是 backups/pre-restore-<时间戳>.db（与 scheduleRestore 事先复制的那份互为冗余，
   // 均保留，用户确认恢复无误后可手工删除旧份）；-wal/-shm 副产物随旧库一并保留
-  console.log(`[恢复] 已从备份文件还原数据库（旧库已备份为 ${backupName}），服务以恢复后的数据启动。`);
+  logger.info('Database restored from pending backup', { backupName });
 }
 
 export function openDb(dbPath?: string): DB {

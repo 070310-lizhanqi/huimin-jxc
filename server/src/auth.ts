@@ -15,6 +15,7 @@ import { localDate } from './db';
 import { safeHandler } from './safe-handler';
 import { getConfig } from './config/env';
 import { recordAudit, recordAuditFromRequest } from './infra/audit-log';
+import { logger } from './infra/logger';
 import { parsePositiveInt } from './infra/validate';
 
 /** 令牌有效期（秒）：7 天 */
@@ -172,7 +173,7 @@ function persistRevoked(): void {
       )
       .run(GLOBAL_TEAM, REVOKED_KEY, JSON.stringify([...revoked]));
   } catch (e) {
-    console.error('[auth] 吊销持久化失败（注销本身仍生效于当前进程）:', e);
+    logger.error('Failed to persist revoked tokens (revocation active in memory)', { err: e });
   }
 }
 
@@ -194,7 +195,7 @@ function loadRevoked(db: DatabaseSync): void {
       if (Number(m[2]) > now) revoked.add(m[3] === undefined ? `${m[1]}:${m[2]}:` : k);
     }
   } catch (e) {
-    console.error('[auth] 加载吊销表失败（按空表启动）:', e);
+    logger.error('Failed to load revoked tokens table; starting empty', { err: e });
   }
 }
 
@@ -475,7 +476,7 @@ async function loadRegisterConfMigrated(db: DatabaseSync): Promise<RegisterConf>
       saveRegisterConf(db, { enabled: conf.enabled, inviteCodeHash: hash });
       return { enabled: conf.enabled, inviteCodeHash: hash, inviteCode: '' };
     } catch (e) {
-      console.error('[auth] 邀请码明文转哈希失败（本次仍用明文校验）:', e);
+      logger.warn('Failed to migrate invite code to hash; falling back to constant-time verification', { err: e });
     }
   }
   return conf;
@@ -705,7 +706,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         // teamCount 不变，可重新注册首个管理员
         return fail(400, '该用户名已被使用');
       }
-      console.error('[auth] 注册事务失败:', e);
+      logger.error('Registration transaction failed', { err: e });
       return res.status(500).json({ error: '服务器内部错误' });
     }
     const user: AuthUser = { userId, teamId, role: 'admin', name: username, ver: 0 };

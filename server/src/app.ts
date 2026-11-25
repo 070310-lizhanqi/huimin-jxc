@@ -13,6 +13,7 @@ import type { AppConfig } from './config/env';
 import { mountDashboard } from './dashboard';
 import { mountDocImport } from './docimport';
 import { expressErrorMiddleware, sendError } from './infra/errors';
+import { configureLogger, requestLoggingMiddleware } from './infra/logger';
 import { mountJxcReports } from './jxc-report';
 import {
   corsMiddleware,
@@ -27,6 +28,7 @@ import { mountReports } from './report';
 import { mountArchiveRoutes } from './routes/archives';
 import { mountAuditRoutes } from './routes/audit';
 import { mountDocs } from './routes/docs';
+import { mountHealthRoutes } from './routes/health';
 import { mountSettings } from './settings';
 import { mountSettlements } from './settlement';
 import { mountStockQueries } from './stock';
@@ -35,15 +37,19 @@ export interface CreateAppOptions {
   beforeRoutes?: (app: Express) => void;
   mountApiExtra?: (api: Router) => void;
   gzipMiddleware?: RequestHandler;
+  checkReady?: () => boolean;
 }
 
 export function createApp(db: DatabaseSync, appConfig: AppConfig, options: CreateAppOptions = {}): Express {
+  configureLogger({ level: appConfig.logLevel, format: appConfig.logFormat });
+
   const app = express();
   app.set('x-powered-by', false);
   app.set('trust proxy', appConfig.trustProxy);
 
   const hostAllowed = createHostAllowedFn(appConfig.allowHosts);
   app.use(requestIdMiddleware);
+  app.use(requestLoggingMiddleware);
   // A-安5：Host 白名单检查必须在 CORS 之前，防止任意 Host 通过 OPTIONS 预检
   app.use(hostGuardMiddleware(hostAllowed));
   app.use(corsMiddleware(appConfig.port, appConfig.allowHosts));
@@ -57,6 +63,8 @@ export function createApp(db: DatabaseSync, appConfig: AppConfig, options: Creat
   if (options.beforeRoutes) {
     options.beforeRoutes(app);
   }
+
+  mountHealthRoutes(app, db, { checkReady: options.checkReady });
 
   const api: Router = express.Router();
 
