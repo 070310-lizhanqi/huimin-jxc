@@ -19,8 +19,8 @@ const DATA_DIR = '/tmp/huimin-b2-a';
 const BASE = `http://127.0.0.1:${PORT}/api`;
 const ENTRY = path.join(ROOT, 'dist', 'server', 'index.js');
 const DB_PATH = path.join(DATA_DIR, 'huimin-clone.db');
-/** 默认 JWT 密钥（服务端未设 ORANGE_JWT_SECRET 时的回落值，仅用于伪造令牌测试） */
-const DEFAULT_SECRET = 'huimin-clone-local-secret-v1';
+/** 测试专用动态 JWT 密钥：传给子进程并通过 forgeToken 同源签名，确保 B-安15 真正命中载荷类型校验 */
+const TEST_JWT_SECRET = crypto.randomBytes(32).toString('hex');
 
 const results = [];
 let pass = 0, fail = 0;
@@ -65,7 +65,7 @@ function hashSync(plain) {
 
 function forgeToken(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', DEFAULT_SECRET).update(body).digest().toString('base64url');
+  const sig = crypto.createHmac('sha256', TEST_JWT_SECRET).update(body).digest().toString('base64url');
   return `${body}.${sig}`;
 }
 
@@ -93,8 +93,8 @@ function spawnServer() {
     ORANGE_ENV_FILE: '',
     PORT: String(PORT),
     ORANGE_DATA_DIR: DATA_DIR,
+    ORANGE_JWT_SECRET: TEST_JWT_SECRET,
   };
-  delete env.ORANGE_JWT_SECRET; // 伪造令牌测试依赖默认密钥
   delete env.ORANGE_REQUIRE_SECRET;
   childOut = '';
   child = spawn(process.execPath, [ENTRY], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -222,17 +222,32 @@ async function loginAs(username, password) {
     /* ===== Phase 3：B-安15 令牌载荷类型校验 ===== */
     {
       const exp = Math.floor(Date.now() / 1000) + 3600;
+      const adminPayload = decodePayload(adminToken);
+      const validControl = await req(
+        'GET',
+        '/product',
+        null,
+        forgeToken({
+          userId: adminPayload.userId,
+          teamId: adminPayload.teamId,
+          role: 'admin',
+          name: 'clashuser',
+          ver: adminPayload.ver ?? 0,
+          exp,
+        }),
+      );
+      check('B-安15 对照组：同密钥签发合规载荷返回 200（证明签名验过）', validControl.status === 200, `status=${validControl.status}`);
       const forged = [
-        ['userId:true', { userId: true, teamId: 1, role: 'admin', name: 'x', ver: 0, exp }],
-        ['userId:{}', { userId: {}, teamId: 1, role: 'admin', name: 'x', ver: 0, exp }],
-        ['userId:1.5', { userId: 1.5, teamId: 1, role: 'admin', name: 'x', ver: 0, exp }],
-        ["userId:'1'", { userId: '1', teamId: 1, role: 'admin', name: 'x', ver: 0, exp }],
-        ['userId:null', { userId: null, teamId: 1, role: 'admin', name: 'x', ver: 0, exp }],
-        ["teamId:'1'", { userId: 1, teamId: '1', role: 'admin', name: 'x', ver: 0, exp }],
-        ['teamId:1.5', { userId: 1, teamId: 1.5, role: 'admin', name: 'x', ver: 0, exp }],
-        ['role:123', { userId: 1, teamId: 1, role: 123, name: 'x', ver: 0, exp }],
-        ['role 缺失', { userId: 1, teamId: 1, name: 'x', ver: 0, exp }],
-        ['ver 不匹配', { userId: 1, teamId: 1, role: 'admin', name: 'x', ver: 99, exp }],
+        ['userId:true', { userId: true, teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 0, exp }],
+        ['userId:{}', { userId: {}, teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 0, exp }],
+        ['userId:1.5', { userId: 1.5, teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 0, exp }],
+        ["userId:'1'", { userId: '1', teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 0, exp }],
+        ['userId:null', { userId: null, teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 0, exp }],
+        ["teamId:'1'", { userId: adminPayload.userId, teamId: '1', role: 'admin', name: 'x', ver: 0, exp }],
+        ['teamId:1.5', { userId: adminPayload.userId, teamId: 1.5, role: 'admin', name: 'x', ver: 0, exp }],
+        ['role:123', { userId: adminPayload.userId, teamId: adminPayload.teamId, role: 123, name: 'x', ver: 0, exp }],
+        ['role 缺失', { userId: adminPayload.userId, teamId: adminPayload.teamId, name: 'x', ver: 0, exp }],
+        ['ver 不匹配', { userId: adminPayload.userId, teamId: adminPayload.teamId, role: 'admin', name: 'x', ver: 99, exp }],
       ];
       for (const [label, payload] of forged) {
         const rr = await req('GET', '/product', null, forgeToken(payload));

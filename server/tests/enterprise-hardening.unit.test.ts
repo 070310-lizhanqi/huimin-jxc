@@ -2,12 +2,16 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import type http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
+import express from 'express';
 import { initConfig, resetConfigForTest, resolveStoragePaths, validateConfig } from '../src/config/env';
+import { checkField, mountCrud } from '../src/crud';
 import { getSchemaVersion, listAppliedMigrations, migrate, openDb } from '../src/db';
-import { BusyError } from '../src/infra/errors';
+import { BusyError, expressErrorMiddleware } from '../src/infra/errors';
 import { safeRollback, withImmediateTx } from '../src/infra/tx';
 import {
   parseBizDateOptional,
@@ -335,6 +339,153 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
       });
       assert.equal(paths.dataDir, path.resolve(tmp));
       assert.equal(paths.dbPath, path.join(path.resolve(tmp), 'huimin-clone.db'));
+    });
+  });
+
+  describe('crud checkField strict typing & DB error mapping', () => {
+    it('rejects booleans, objects, arrays, and non-finite numbers while preserving null/empty clearing', () => {
+      assert.deepEqual(checkField('salePrice', undefined), { value: null });
+      assert.deepEqual(checkField('salePrice', null), { value: null });
+      assert.deepEqual(checkField('salePrice', ''), { value: null });
+      assert.deepEqual(checkField('remark', ''), { value: null });
+      assert.deepEqual(checkField('salePrice', 10800), { value: 10800 });
+      assert.deepEqual(checkField('catId', '12'), { value: 12 });
+      assert.deepEqual(checkField('archived', 1), { value: 1 });
+      assert.deepEqual(checkField('archived', '0'), { value: 0 });
+
+      for (const [field, bad] of [
+        ['salePrice', true],
+        ['salePrice', false],
+        ['catId', false],
+        ['priceLevel', {}],
+        ['remark', []],
+        ['lowQty', { qty: 1 }],
+        ['archived', true],
+        ['archived', 2],
+        ['salePrice', Number.NaN],
+        ['salePrice', Number.POSITIVE_INFINITY],
+      ] as const) {
+        const res = checkField(field, bad);
+        assert.equal('error' in res, true, `Expected ${field}=${JSON.stringify(bad)} to fail validation`);
+      }
+    });
+
+    it('maps UNIQUE to 400, SQLITE_BUSY to 503, and NOT NULL/FK to 500 without leaking raw SQLite messages', async () => {
+      const tmp = mkTmp('jxc-crud-err-');
+      const dbPath = path.join(tmp, 'crud.db');
+      const db1 = openDb(dbPath);
+      const db2 = new DatabaseSync(dbPath);
+      let server: http.Server | null = null;
+      try {
+        db1.exec(`
+          CREATE TABLE parent_item (id INTEGER PRIMARY KEY, teamId INTEGER NOT NULL, name TEXT NOT NULL UNIQUE);
+          CREATE TABLE child_item (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teamId INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            requiredNote TEXT NOT NULL,
+            parentId INTEGER REFERENCES parent_item(id)
+          );
+          INSERT INTO parent_item (id, teamId, name) VALUES (1, 1, 'P1');
+        `);
+        const app = express();
+        app.use(express.json());
+        const router = express.Router();
+        mountCrud(router, db1, { table: 'child_item', fields: ['name', 'requiredNote', 'parentId'] });
+        app.use('/api', router);
+        app.use(expressErrorMiddleware);
+        const srv = await new Promise<http.Server>((resolve) => {
+          const s = app.listen(0, '127.0.0.1', () => resolve(s));
+        });
+        server = srv;
+        const port = (srv.address() as AddressInfo).port;
+        const url = `http://127.0.0.1:${port}/api/child_item`;
+
+        const okCreate = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ teamId: 1, name: 'C1', requiredNote: 'ok', parentId: 1 }),
+        });
+        assert.equal(okCreate.status, 200);
+        const created = (await okCreate.json()) as { id: number };
+
+        // UNIQUE -> 400 VALIDATION_ERROR
+        const dupRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ teamId: 1, name: 'C1', requiredNote: 'ok', parentId: 1 }),
+        });
+        assert.equal(dupRes.status, 400);
+        const dupJson = (await dupRes.json()) as { code: string; error: string };
+        assert.equal(dupJson.code, 'VALIDATION_ERROR');
+
+        // NOT NULL violation (unvalidated requiredNote=null) -> 500 INTERNAL_ERROR (no raw SQLite leak)
+        const notNullRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ teamId: 1, name: 'C2', requiredNote: null, parentId: 1 }),
+        });
+        assert.equal(notNullRes.status, 500);
+        const notNullJson = (await notNullRes.json()) as { code: string; error: string };
+        assert.equal(notNullJson.code, 'INTERNAL_ERROR');
+        assert.equal(notNullJson.error.includes('NOT NULL'), false);
+        assert.equal(notNullJson.error.includes('名称可能已存在'), false);
+
+        // FOREIGN KEY violation on PUT -> 500 INTERNAL_ERROR (no raw SQLite leak)
+        const fkRes = await fetch(`${url}/${created.id}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ teamId: 1, parentId: 9999 }),
+        });
+        assert.equal(fkRes.status, 500);
+        const fkJson = (await fkRes.json()) as { code: string; error: string };
+        assert.equal(fkJson.code, 'INTERNAL_ERROR');
+        assert.equal(fkJson.error.includes('FOREIGN KEY'), false);
+        assert.equal(fkJson.error.includes('名称可能已存在'), false);
+
+        // SQLITE_BUSY -> 503 SERVICE_UNAVAILABLE
+        db1.exec('PRAGMA busy_timeout = 10;');
+        db2.exec("BEGIN IMMEDIATE; INSERT INTO parent_item (id, teamId, name) VALUES (2, 1, 'P2');");
+        try {
+          const busyRes = await fetch(`${url}/${created.id}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ teamId: 1, requiredNote: 'updated' }),
+          });
+          assert.equal(busyRes.status, 503);
+          const busyJson = (await busyRes.json()) as { code: string };
+          assert.equal(busyJson.code, 'SERVICE_UNAVAILABLE');
+        } finally {
+          db2.exec('ROLLBACK;');
+        }
+      } finally {
+        if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+        db2.close();
+        db1.close();
+      }
+    });
+
+    it('isolates importProducts snapshot reads inside withImmediateTx write lock', () => {
+      const tmp = mkTmp('jxc-imp-tx-');
+      const dbPath = path.join(tmp, 'imp.db');
+      const db1 = openDb(dbPath);
+      const db2 = new DatabaseSync(dbPath);
+      try {
+        migrate(db1);
+        const teamId = Number(
+          db1.prepare("INSERT INTO team (name, startPeriod) VALUES ('并发导入', '202611')").run().lastInsertRowid,
+        );
+        db1.exec('PRAGMA busy_timeout = 10;');
+        db2.exec('BEGIN IMMEDIATE;');
+        try {
+          assert.throws(() => importProducts(db1, teamId, [{ name: '锁冲突品' }]), BusyError);
+        } finally {
+          db2.exec('ROLLBACK;');
+        }
+      } finally {
+        db2.close();
+        db1.close();
+      }
     });
   });
 });

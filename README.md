@@ -33,7 +33,7 @@
 ## 核心特性与企业级能力
 
 - **精准账务与并发安全**：金额以整数**分**运算（杜绝 IEEE 754 浮点漂移），数量保留 4 位小数；单据审核/作废/调拨/盘点/收付款均运行在 `BEGIN IMMEDIATE` 事务中，支持 FIFO 批次扣减与作废原子回滚，防止并发超卖与状态错乱。
-- **高可靠接口与幂等保护**：统一异常码体系与 `{ error, code, requestId }` 响应契约；建单与结算支持 `Idempotency-Key` 24 小时持久化幂等重放与参数冲突检测（`409`）。
+- **高可靠接口与幂等保护**：统一异常码体系与 `{ error, code, requestId }` 响应契约；`POST /doc/create`、`POST /doc/audit`、`POST /doc/void` 与 `POST /settlement/create` 支持 `Idempotency-Key` 24 小时持久化幂等重放与参数冲突检测（`409`）。
 - **认证授权与审计追踪**：scrypt 密码哈希、HMAC-SHA256 会话令牌（`HttpOnly; SameSite=Lax` Cookie + Bearer）、持久化令牌吊销、多租户团队隔离、DNS Rebinding Host 守卫、Cookie CSRF Origin 核验、RBAC 角色控制与管理员操作审计日志（设置 → 操作审计）。
 - **版本化数据库与热备份**：内置 `schema_migrations`（V1–V3）、CLI 迁移/幂等种子脚本、基于 `VACUUM INTO` 的 WAL 在线热备份与恢复前完整性校验自动回滚。
 - **可观测性与易部署**：结构化 JSON/可读日志（`AsyncLocalStorage` `requestId` 全链路透传 + 敏感字段自动脱敏）、`/health` 与 `/ready` 无鉴权探针、多阶段非 root `Dockerfile` + `docker-compose.yml` 与 GitHub Actions CI。

@@ -1187,6 +1187,210 @@ describe('Phase 3 Integration Tests: Security, Validation, Concurrency, Idempote
     assert.equal(copiedRow.totalQty, 0.3);
   });
 
+  it('rejects boolean/object/array CRUD payloads, isolates settlement/list by partnerType, and rounds sale-rank product cents', async () => {
+    // 1. CRUD strict type check on PUT/POST preserves existing field values
+    const testCat = await req<{ id: number }>('/api/cat', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '类型校验分类' },
+    });
+    assert.equal(testCat.status, 200);
+    const pStrict = await req<{ id: number; salePrice: number; catId: number; remark: string | null }>('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        name: '类型守卫商品',
+        catId: testCat.json.id,
+        barcode: 'BC-STRICT-1',
+        salePrice: 10800,
+        remark: '保留备注',
+      },
+    });
+    assert.equal(pStrict.status, 200);
+    assert.equal(pStrict.json.salePrice, 10800);
+
+    for (const badBody of [
+      { teamId, salePrice: true },
+      { teamId, catId: false },
+      { teamId, remark: {} },
+      { teamId, barcode: ['x'] },
+      { teamId, archived: true },
+    ]) {
+      const putRes = await req(`/api/product/${pStrict.json.id}`, {
+        method: 'PUT',
+        token: adminToken,
+        body: badBody,
+      });
+      assert.equal(putRes.status, 400);
+      assert.equal(putRes.json.code, 'VALIDATION_ERROR');
+    }
+
+    const postBool = await req('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '布尔价格新品', salePrice: true },
+    });
+    assert.equal(postBool.status, 400);
+    assert.equal(postBool.json.code, 'VALIDATION_ERROR');
+
+    const badCustPut = await req(`/api/customer/${cusId}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, priceLevel: {} },
+    });
+    assert.equal(badCustPut.status, 400);
+    assert.equal(badCustPut.json.code, 'VALIDATION_ERROR');
+
+    const preserved = db
+      .prepare('SELECT salePrice, catId, barcode, remark FROM product WHERE id = ?')
+      .get(pStrict.json.id) as { salePrice: number; catId: number; barcode: string | null; remark: string | null };
+    assert.equal(preserved.salePrice, 10800);
+    assert.equal(preserved.catId, testCat.json.id);
+    assert.equal(preserved.barcode, 'BC-STRICT-1');
+    assert.equal(preserved.remark, '保留备注');
+
+    // Intentional clearing with null / '' still succeeds
+    const clearOpt = await req<{ barcode: string | null; remark: string | null }>(`/api/product/${pStrict.json.id}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, barcode: null, remark: '' },
+    });
+    assert.equal(clearOpt.status, 200);
+    assert.equal(clearOpt.json.barcode, null);
+    assert.equal(clearOpt.json.remark, null);
+
+    // 2. GET /api/settlement/list supports partnerType filter and isolates colliding customer/vendor IDs
+    assert.equal(cusId, venId);
+    const cusSettle = await req<{ id: number }>('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, type: 'receipt', partnerType: 'cus', partnerId: cusId, amount: 3100, remark: 'cus-only' },
+    });
+    const venSettle = await req<{ id: number }>('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, type: 'payment', partnerType: 'ven', partnerId: venId, amount: 4200, remark: 'ven-only' },
+    });
+    assert.equal(cusSettle.status, 200);
+    assert.equal(venSettle.status, 200);
+
+    const venOnly = await req<Array<{ id: number; partnerType: string; partnerId: number }>>(
+      `/api/settlement/list?teamId=${teamId}&partnerType=ven`,
+      { token: adminToken },
+    );
+    assert.equal(venOnly.status, 200);
+    const venRows = venOnly.json as unknown as Array<{ id: number; partnerType: string; partnerId: number }>;
+    assert.ok(venRows.some((r) => r.id === venSettle.json.id));
+    assert.equal(
+      venRows.every((r) => r.partnerType === 'ven'),
+      true,
+    );
+
+    const venOneOnly = await req<Array<{ id: number; partnerType: string; partnerId: number }>>(
+      `/api/settlement/list?teamId=${teamId}&partnerType=ven&partnerId=${venId}`,
+      { token: adminToken },
+    );
+    assert.equal(venOneOnly.status, 200);
+    const venOneRows = venOneOnly.json as unknown as Array<{ id: number; partnerType: string; partnerId: number }>;
+    assert.ok(venOneRows.some((r) => r.id === venSettle.json.id));
+    assert.equal(
+      venOneRows.some((r) => r.id === cusSettle.json.id),
+      false,
+    );
+
+    const cusOneOnly = await req<Array<{ id: number; partnerType: string; partnerId: number }>>(
+      `/api/settlement/list?teamId=${teamId}&partnerType=cus&partnerId=${cusId}`,
+      { token: adminToken },
+    );
+    assert.equal(cusOneOnly.status, 200);
+    const cusOneRows = cusOneOnly.json as unknown as Array<{ id: number; partnerType: string; partnerId: number }>;
+    assert.ok(cusOneRows.some((r) => r.id === cusSettle.json.id));
+    assert.equal(
+      cusOneRows.some((r) => r.id === venSettle.json.id),
+      false,
+    );
+
+    const badPtQuery = await req(`/api/settlement/list?teamId=${teamId}&partnerType=invalid`, { token: adminToken });
+    assert.equal(badPtQuery.status, 400);
+    assert.equal(badPtQuery.json.code, 'VALIDATION_ERROR');
+
+    // 3. /api/report/sale-rank?by=product rounds proportional discount allocations to integer cents
+    const rankP1 = await req<{ id: number }>('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '排行舍入品A', purchasePrice: 1000, salePrice: 3330 },
+    });
+    const rankP2 = await req<{ id: number }>('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '排行舍入品B', purchasePrice: 1000, salePrice: 3335 },
+    });
+    assert.equal(rankP1.status, 200);
+    assert.equal(rankP2.status, 200);
+    const nowLocal = new Date();
+    const today = `${nowLocal.getFullYear()}-${String(nowLocal.getMonth() + 1).padStart(2, '0')}-${String(nowLocal.getDate()).padStart(2, '0')}`;
+    const rankIn = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockin',
+        date: today,
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [
+          { productId: rankP1.json.id, qty: 10, price: 1000 },
+          { productId: rankP2.json.id, qty: 10, price: 1000 },
+        ],
+      },
+    });
+    assert.equal(rankIn.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: rankIn.json.id, teamId } })).status,
+      200,
+    );
+    // Gross: 333 + 667 = 1000, discount 100 -> 900; 333*900/1000 = 299.7 -> 300, 667*900/1000 = 600.3 -> 600
+    const rankOut = await req<{ id: number }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'stockout',
+        date: today,
+        warehouseId: whId,
+        partnerType: 'cus',
+        partnerId: cusId,
+        discount: 100,
+        items: [
+          { productId: rankP1.json.id, qty: 0.1, price: 3330 },
+          { productId: rankP2.json.id, qty: 0.2, price: 3335 },
+        ],
+      },
+    });
+    assert.equal(rankOut.status, 200);
+    assert.equal(
+      (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: rankOut.json.id, teamId } }))
+        .status,
+      200,
+    );
+    const prodRank = await req<{ rows: Array<{ key: number; amount: number; qty: number }> }>(
+      '/api/report/sale-rank?range=month&dimension=out&by=product&limit=50',
+      { token: adminToken },
+    );
+    assert.equal(prodRank.status, 200);
+    for (const r of prodRank.json.rows) {
+      assert.equal(Number.isInteger(r.amount), true, `Expected integer cents for product ${r.key}, got ${r.amount}`);
+    }
+    const rA = prodRank.json.rows.find((r) => r.key === rankP1.json.id);
+    const rB = prodRank.json.rows.find((r) => r.key === rankP2.json.id);
+    assert.equal(rA?.amount, 300);
+    assert.equal(rB?.amount, 600);
+    assert.equal(rA?.qty, 0.1);
+    assert.equal(rB?.qty, 0.2);
+  });
+
   it('rejects backup symlinks on restore/delete and resists X-Forwarded-For spoofing under ORANGE_TRUST_PROXY=1', async () => {
     // 1) Backup symlink guard on restore and delete
     const bDir = path.join(tmpDir, 'backups');

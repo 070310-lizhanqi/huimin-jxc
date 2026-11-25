@@ -47,7 +47,7 @@ docs/               # 用户手册与部署运维指南
    - 所有金额在数据库与 API 传输中一律使用**整数分（INTEGER cents）**；禁止对金额直接做未经整数化处理的浮点乘法或累加后不舍入。
    - 数量最多保留 4 位小数（`QTY_DECIMALS = 4`），行金额统一调用 `lineAmountCents(qty, priceCents)`（`qty * 10000 * price / 10000` 并使用对称舍入 `roundHalfAwayFromZero`）。
 2. **事务与并发一致性**：
-   - 任何涉及库存（`stock` / `stock_ledger`）、往来余额（`partner_balance`）、资金账户（`account`）、单据状态机（`doc`）的多步写操作，必须包在 `withTransaction(db, ...)`（`BEGIN IMMEDIATE`）内，且在锁内重读状态，出库扣减必须保留 `WHERE qty >= ?` 原子条件。
+   - 任何涉及库存（`stock` / `stock_ledger`）、往来余额（`partner_balance`）、资金账户（`account`）、单据状态机（`doc`）的多步写操作，必须包在 `withImmediateTx(db, ...)`（`BEGIN IMMEDIATE`）内，且在锁内重读状态，出库扣减必须保留 `WHERE qty >= ?` 原子条件。
    - 禁止在 `BEGIN IMMEDIATE` 事务内执行 `await` 异步操作（`node:sqlite` 为同步 API，异步挂起会长时间锁死写锁）。
 3. **团队隔离与 RBAC**：
    - `requireAuth` 会强制把请求 `query.teamId` / `body.teamId` 覆写为令牌所属 `teamId`，严禁绕过该隔离或信任客户端传来的跨团队外键 ID。

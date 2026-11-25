@@ -209,7 +209,14 @@ export function mountArchiveRoutes(api: Router, db: DatabaseSync): void {
     fields: ['name', 'type', 'balance'],
     createOnlyFields: ['balance'],
     validate: (body) => {
-      if (body.type !== undefined && body.type !== null && body.type !== '') {
+      const isEdit = Number(body.id) > 0;
+      if (!isEdit && (body.type === undefined || body.type === null || body.type === '')) {
+        return '账户类型不能为空';
+      }
+      if (isEdit && (body.type === null || body.type === '')) {
+        return '账户类型不能为空';
+      }
+      if (body.type !== undefined) {
         const parsed = parseEnum(body.type, ACCOUNT_TYPES, '账户类型');
         if (!parsed.ok) return parsed.error;
       }

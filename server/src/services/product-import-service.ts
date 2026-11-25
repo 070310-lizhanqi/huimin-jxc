@@ -41,24 +41,25 @@ export function importProducts(
   const errors: Array<{ row: number; msg: string }> = [];
   let success = 0;
 
-  const prodNames = new Set<string>(
-    (db.prepare(`SELECT name FROM product WHERE teamId = ?`).all(teamId) as Array<{ name: string }>).map((p) => p.name),
-  );
-  const catByName = new Map<string, number>(
-    (db.prepare(`SELECT id, name FROM cat WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>).map(
-      (c) => [c.name, c.id] as [string, number],
-    ),
-  );
-  const getCat = db.prepare(`SELECT id FROM cat WHERE teamId = ? AND name = ?`);
-  const insCat = db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, ?)`);
-  const ins = db.prepare(
-    `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-
   withImmediateTx(
     db,
     () => {
+      const prodNames = new Set<string>(
+        (db.prepare(`SELECT name FROM product WHERE teamId = ?`).all(teamId) as Array<{ name: string }>).map(
+          (p) => p.name,
+        ),
+      );
+      const catByName = new Map<string, number>(
+        (
+          db.prepare(`SELECT id, name FROM cat WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>
+        ).map((c) => [c.name, c.id] as [string, number]),
+      );
+      const getCat = db.prepare(`SELECT id FROM cat WHERE teamId = ? AND name = ?`);
+      const insCat = db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, ?)`);
+      const ins = db.prepare(
+        `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
       for (const [idx, r] of rows.entries()) {
         const rowNo = idx + 1;
         if (!r || typeof r !== 'object' || Array.isArray(r)) {

@@ -9,25 +9,29 @@ const FinancePage = {
     /* editor/busy/delBusy 由下方的 useCrudEditor（B-前6）提供；id 存在 form 内（原形态保留） */
     const viewerId = ref(null);
 
-    // 筛选条条件（服务端本来就支持 type/partnerId/from/to，前端此前没把条件传上去）
+    // 筛选条条件（服务端本来就支持 type/partnerType/partnerId/from/to，前端此前没把条件传上去）
     const fType = ref(''); // '' 全部 / receipt / payment
     const fPartnerType = ref(''); // '' 全部 / cus / ven
-    const fPartnerId = ref(null);
+    const fPartnerId = ref(''); // '' 全部 / 'cus:1' / 'ven:1'
     const fRange = ref([]); // [from, to]
     function resetFilter() {
       fType.value = '';
       fPartnerType.value = '';
-      fPartnerId.value = null;
+      fPartnerId.value = '';
       fRange.value = [];
       load();
     }
     const partnerFilterOpts = computed(() => {
-      if (fPartnerType.value === 'cus') return store.customers;
-      if (fPartnerType.value === 'ven') return store.vendors;
-      // 未选类型时客户+供应商一起给（加类型标记，避免同名混淆）
+      if (fPartnerType.value === 'cus') {
+        return store.customers.map((c) => ({ ...c, _pt: 'cus', _key: `cus:${c.id}` }));
+      }
+      if (fPartnerType.value === 'ven') {
+        return store.vendors.map((v) => ({ ...v, _pt: 'ven', _key: `ven:${v.id}` }));
+      }
+      // 未选类型时客户+供应商一起给（用复合键 cus:id / ven:id 避免双方 id 撞号）
       return [
-        ...store.customers.map((c) => ({ ...c, _pt: 'cus' })),
-        ...store.vendors.map((v) => ({ ...v, _pt: 'ven' })),
+        ...store.customers.map((c) => ({ ...c, _pt: 'cus', _key: `cus:${c.id}` })),
+        ...store.vendors.map((v) => ({ ...v, _pt: 'ven', _key: `ven:${v.id}` })),
       ];
     });
 
@@ -42,11 +46,22 @@ const FinancePage = {
         q.from = fRange.value[0];
         q.to = fRange.value[1];
       }
+      if (fPartnerType.value) q.partnerType = fPartnerType.value;
       if (fPartnerId.value) {
-        // 往来单位 id 在客户/供应商表里各自自增，会撞号：必须带 partnerType 才能唯一定位
-        const pt = fPartnerType.value || partnerFilterOpts.value.find((p) => p.id === fPartnerId.value)?._pt;
-        if (pt) q.partnerType = pt;
-        q.partnerId = fPartnerId.value;
+        // 往来单位 id 在客户/供应商表里各自自增，会撞号：用复合键 cus:1 / ven:1 唯一定位
+        const rawKey = String(fPartnerId.value);
+        const sep = rawKey.indexOf(':');
+        if (sep > 0) {
+          const pt = rawKey.slice(0, sep);
+          const pid = Number(rawKey.slice(sep + 1));
+          if ((pt === 'cus' || pt === 'ven') && (!q.partnerType || q.partnerType === pt)) {
+            q.partnerType = pt;
+            if (Number.isInteger(pid) && pid > 0) q.partnerId = pid;
+          }
+        } else {
+          const pid = Number(rawKey);
+          if (Number.isInteger(pid) && pid > 0) q.partnerId = pid;
+        }
       }
       loading.value = true;
       try {
@@ -204,14 +219,12 @@ const FinancePage = {
     /* save/openEdit 由上方的 useCrudEditor（B-前6）提供 */
 
     function watch1() {
-      // 切换往来单位时清掉已选的 id，避免类型不匹配
-      if (fPartnerType.value && fPartnerId.value) {
-        const pt = partnerFilterOpts.value.find((p) => p.id === fPartnerId.value)?._pt ?? fPartnerType.value;
-        if (pt !== fPartnerType.value) fPartnerId.value = null;
+      // 切换往来类型时同步清掉不匹配的往来单位，确保紧随其后的 @change="load" 不会带出旧 id
+      if (fPartnerType.value && fPartnerId.value && !String(fPartnerId.value).startsWith(`${fPartnerType.value}:`)) {
+        fPartnerId.value = '';
       }
-      load();
     }
-    watch(fPartnerType, watch1);
+    watch(fPartnerType, watch1, { flush: 'sync' });
 
     /* remove/delBusy 由上方的 useCrudEditor（B-前6）提供 */
     const filteredSum = computed(() => settlements.value.reduce((a, s) => a + (s.amount || 0), 0));
@@ -313,11 +326,14 @@ const FinancePage = {
         <el-select v-model="fType" clearable placeholder="全部类型" style="width:110px" @change="load">
           <el-option label="收款" value="receipt"/><el-option label="付款" value="payment"/>
         </el-select>
-        <el-select v-model="fPartnerType" clearable placeholder="全部往来类型" style="width:130px">
+        <el-select v-model="fPartnerType" clearable placeholder="全部往来类型" style="width:130px" @change="load">
           <el-option label="客户" value="cus"/><el-option label="供应商" value="ven"/>
         </el-select>
         <el-select v-model="fPartnerId" filterable clearable placeholder="全部往来单位" style="width:170px" @change="load">
-          <el-option v-for="p in partnerFilterOpts" :key="(p._pt || fPartnerType || 'x') + '_' + p.id" :label="p.name" :value="p.id"/>
+          <el-option v-for="p in partnerFilterOpts" :key="p._key" :label="p.name" :value="p._key">
+            <span>{{ p.name }}</span>
+            <span v-if="!fPartnerType" style="float:right;color:var(--muted);font-size:12px">{{ p._pt === 'cus' ? '客户' : '供应商' }}</span>
+          </el-option>
         </el-select>
         <el-date-picker v-model="fRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" class="finp" style="width:240px" @change="load"/>
         <button class="btn icon-only" title="重置" @click="resetFilter"><el-icon><RefreshLeft/></el-icon></button>

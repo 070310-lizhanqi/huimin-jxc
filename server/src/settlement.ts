@@ -15,7 +15,7 @@ import {
   saveIdempotencyKey,
 } from './infra/idempotency';
 import { withImmediateTx } from './infra/tx';
-import { parseOptionalPositiveInt, parseOptionalString, parsePositiveInt } from './infra/validate';
+import { parseEnum, parseOptionalPositiveInt, parseOptionalString, parsePositiveInt } from './infra/validate';
 import { MAX_TOTAL_AMOUNT_CENTS } from './shared/money';
 
 type Value = string | number | null;
@@ -40,6 +40,12 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     if (req.query.type) {
       conds.push('type = ?');
       args.push(String(req.query.type));
+    }
+    if (req.query.partnerType !== undefined && req.query.partnerType !== '') {
+      const ptParsed = parseEnum(req.query.partnerType, ['cus', 'ven'] as const, 'partnerType');
+      if (!ptParsed.ok) return sendError(req, res, 400, ptParsed.error, 'VALIDATION_ERROR');
+      conds.push('partnerType = ?');
+      args.push(ptParsed.value);
     }
     const partnerFilter = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
     if (!partnerFilter.ok) return sendError(req, res, 400, partnerFilter.error);

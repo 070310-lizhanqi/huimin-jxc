@@ -5,7 +5,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { recordAuditFromRequest } from './infra/audit-log';
-import { AppError, NotFoundError, sendError, ValidationError } from './infra/errors';
+import { AppError, BusyError, NotFoundError, sendError, ValidationError } from './infra/errors';
+import { logger } from './infra/logger';
 import { withImmediateTx } from './infra/tx';
 import { parsePositiveInt } from './infra/validate';
 import { PRICE_CENTS_MAX, QTY_MAX, roundQty } from './shared/money';
@@ -38,8 +39,11 @@ export const QTY_FIELDS = new Set(['lowQty']);
 /** 外键整数 ID 字段 */
 const INT_ID_FIELDS = new Set(['parentId', 'catId', 'warehouseId']);
 
-/** 校验 + 规整单个可写字段：返回 { value } 或 { error }（长度/整数分/数量上限） */
+/** 校验 + 规整单个可写字段：返回 { value } 或 { error }（长度/整数分/数量上限/拒绝布尔或对象） */
 export function checkField(field: string, v: unknown): { value: Value } | { error: string } {
+  if (v === undefined || v === null) {
+    return { value: null };
+  }
   if (typeof v === 'string') {
     if (v === '') return { value: null }; // 空串按旧 normalize 口径置 NULL（显式传 null/'' 才清空）
     const limit = FIELD_LIMITS[field];
@@ -75,10 +79,20 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       if (Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
       return { value: n };
     }
+    if (field === 'archived') {
+      const s = v.trim();
+      if (s === '') return { value: null };
+      if (s !== '0' && s !== '1') return { error: '「archived」必须是 0 或 1' };
+      return { value: Number(s) };
+    }
     return { value: v };
   }
   if (typeof v === 'number') {
-    if (!Number.isFinite(v)) return { value: null };
+    if (!Number.isFinite(v)) return { error: `「${field}」必须是有限数值` };
+    const limit = FIELD_LIMITS[field];
+    if (limit !== undefined && String(v).length > limit) {
+      return { error: `「${field}」长度不能超过 ${limit} 个字符` };
+    }
     if (INT_ID_FIELDS.has(field)) {
       if (!Number.isSafeInteger(v) || v <= 0) return { error: `「${field}」必须是正整数` };
       return { value: v };
@@ -96,9 +110,29 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       if (Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
       return { value: n };
     }
+    if (field === 'archived') {
+      if (v !== 0 && v !== 1) return { error: '「archived」必须是 0 或 1' };
+      return { value: v };
+    }
     return { value: v };
   }
-  return { value: normalize(v) };
+  return { error: `「${field}」参数类型无效` };
+}
+
+function mapCrudWriteError(err: unknown): AppError | null {
+  if (err instanceof AppError) return err;
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const errcode =
+    err && typeof err === 'object' && 'errcode' in err && typeof (err as { errcode?: unknown }).errcode === 'number'
+      ? (err as { errcode: number }).errcode
+      : -1;
+  if ((errcode & 0xff) === 5 || /SQLITE_BUSY|database(?: table)? is locked/i.test(msg)) {
+    return new BusyError('系统繁忙，请重试');
+  }
+  if (errcode === 2067 || errcode === 1555 || /UNIQUE constraint failed/i.test(msg)) {
+    return new ValidationError('保存失败：名称可能已存在');
+  }
+  return null;
 }
 
 /** LIKE 通配符转义：% _ 与 ESCAPE 字符本身按字面匹配（关键词含 % 时不再全表模糊） */
@@ -199,12 +233,9 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
           const err = cfg.validate(body);
           if (err) throw new ValidationError(err);
         }
-        let info: { lastInsertRowid: number | bigint };
-        try {
-          info = db.prepare(`INSERT INTO ${cfg.table} (teamId, ${cols}) VALUES (?, ${holders})`).run(teamId, ...values);
-        } catch {
-          throw new ValidationError('保存失败：名称可能已存在');
-        }
+        const info = db
+          .prepare(`INSERT INTO ${cfg.table} (teamId, ${cols}) VALUES (?, ${holders})`)
+          .run(teamId, ...values);
         const newId = Number(info.lastInsertRowid);
         return db.prepare(`SELECT * FROM ${cfg.table} WHERE id = ?`).get(newId) as Record<string, unknown>;
       });
@@ -218,8 +249,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       });
       return res.json(row);
     } catch (e) {
-      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
-      return sendError(req, res, 400, '保存失败：名称可能已存在', 'VALIDATION_ERROR');
+      const mapped = mapCrudWriteError(e);
+      if (mapped) return sendError(req, res, mapped.statusCode, mapped.message, mapped.code);
+      logger.error('CRUD create failed', { table: cfg.table, teamId, err: e });
+      return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
     }
   });
 
@@ -256,14 +289,9 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
           const err = cfg.validate({ ...body, id });
           if (err) throw new ValidationError(err);
         }
-        let info: { changes: number | bigint };
-        try {
-          info = db
-            .prepare(`UPDATE ${cfg.table} SET ${present.map((f) => `${f} = ?`).join(', ')} WHERE id = ? AND teamId = ?`)
-            .run(...values, id, teamId);
-        } catch {
-          throw new ValidationError('保存失败：名称可能已存在');
-        }
+        const info = db
+          .prepare(`UPDATE ${cfg.table} SET ${present.map((f) => `${f} = ?`).join(', ')} WHERE id = ? AND teamId = ?`)
+          .run(...values, id, teamId);
         if (info.changes === 0) throw new NotFoundError('记录不存在');
         return db.prepare(`SELECT * FROM ${cfg.table} WHERE id = ? AND teamId = ?`).get(id, teamId);
       });
@@ -276,8 +304,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       });
       return res.json(row);
     } catch (e) {
-      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
-      return sendError(req, res, 400, '保存失败：名称可能已存在');
+      const mapped = mapCrudWriteError(e);
+      if (mapped) return sendError(req, res, mapped.statusCode, mapped.message, mapped.code);
+      logger.error('CRUD update failed', { table: cfg.table, teamId, id, err: e });
+      return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
     }
   });
 
@@ -307,17 +337,10 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
       });
       return res.json({ ok: true });
     } catch (e) {
-      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
-      return sendError(req, res, 400, '删除失败');
+      const mapped = mapCrudWriteError(e);
+      if (mapped) return sendError(req, res, mapped.statusCode, mapped.message, mapped.code);
+      logger.error('CRUD delete failed', { table: cfg.table, teamId, id, err: e });
+      return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
     }
   });
-}
-
-function normalize(v: unknown): Value {
-  if (v === undefined || v === null || v === '') return null;
-  // number：NaN/Infinity 会被 better-sqlite3 拒绝或落 NULL，显式转 null 防怪数据
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  if (typeof v === 'string') return v;
-  // boolean/object 静默 String() 化会落库成 "true"/"[object Object]" 污染档案，显式置 null
-  return null;
 }

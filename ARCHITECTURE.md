@@ -70,7 +70,7 @@
 
 ### 3.1 进销存单据状态机与原子过账
 
-1. **草稿与待审**：`POST /api/doc/create` 支持 `Idempotency-Key`（24h 持久表 `idempotency_key` + canonical payload SHA-256 校验，载荷不一致返回 `409 CONFLICT`）及同内容防双击窗口保护；草稿 (`draft`) 与待审 (`pending`) **不修改库存表与往来余额**。
+1. **草稿与待审**：`POST /api/doc/create`（连同下述 `POST /api/doc/audit`、`POST /api/doc/void` 与 `POST /api/settlement/create` 共 4 个核心写接口）支持 `Idempotency-Key`（24h 持久表 `idempotency_key` + canonical payload SHA-256 校验，载荷不一致返回 `409 CONFLICT`）及同内容防双击窗口保护；草稿 (`draft`) 与待审 (`pending`) **不修改库存表与往来余额**。
 2. **原子审核 (`POST /api/doc/audit`)**：
    - 全部状态校验与过账动作包裹在 `BEGIN IMMEDIATE`（`withImmediateTx`）写锁事务内，杜绝并发双审、超卖竞态。
    - **出库类单据**先校验仓库总库存是否满足需求；对启用/存在批次的库存按入库时间先进先出（FIFO）扣减，并记录 `stock_ledger` 成本流水（报表按 `HIST_AVG_COST_SQL` 计算历史采购估算均价）；**盘点/调拨**原子更新源/目标仓库存并记录 `stock_ledger`。

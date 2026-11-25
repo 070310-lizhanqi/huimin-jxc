@@ -208,11 +208,11 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       // 因此按「该行金额 / 本单明细合计」比例把单据净额分摊到各商品行。
       // dt 派生表先按 (teamId,status,type,date) 过滤再聚合：原先全表扫 doc_item 再 JOIN，
       // 大团队卡死接口；NULLIF 防 sumAmt=0 除零（虽然 0 金额单罕见但导入数据可能存在）。
-      const rows = db
+      const rawRows = db
         .prepare(
           `SELECT i.productId AS key, p.name AS name,
-                  SUM(CASE WHEN dt.sumAmt IS NULL OR dt.sumAmt = 0 THEN 0
-                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / NULLIF(dt.sumAmt, 0) END) AS amount,
+                  CAST(ROUND(SUM(CASE WHEN dt.sumAmt IS NULL OR dt.sumAmt = 0 THEN 0
+                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / NULLIF(dt.sumAmt, 0) END), 0) AS INTEGER) AS amount,
                   SUM(CASE WHEN d.type = 'sret' THEN -i.qty ELSE i.qty END) AS qty,
                   COUNT(DISTINCT d.id) AS count
            FROM doc_item i
@@ -231,6 +231,11 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
            GROUP BY i.productId ORDER BY amount DESC LIMIT ?`,
         )
         .all(teamId, from, to, teamId, from, to, limit) as unknown as RankRow[];
+      const rows = rawRows.map((r) => ({
+        ...r,
+        amount: roundHalfAwayFromZero(Number(r.amount) || 0),
+        qty: roundQty(Number(r.qty) || 0),
+      }));
       res.json({ dimension, by, from, to, rows });
       return;
     }
