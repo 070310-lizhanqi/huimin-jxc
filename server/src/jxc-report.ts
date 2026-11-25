@@ -9,6 +9,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
+import { sendError } from './infra/errors';
 import { allocateDocDiscounts, lineAmount, roundQty, type DiscountableLine } from './shared/money';
 
 function rangeOf(req: Request): { from: string; to: string; error: string | null } {
@@ -33,13 +34,13 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/jxc-stat', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const range = rangeOf(req);
     if (range.error) {
-      res.status(400).json({ error: range.error });
+      sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = range;
@@ -166,8 +167,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/stock-forecast', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     // days 参数守护：Number('abc')=NaN 会让 Math.max(1,NaN)=NaN → startD 变 Invalid Date，
@@ -274,17 +275,17 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const teamId = Number(req.query.teamId);
     const partnerId = Number(req.query.partnerId);
     const mode = String(req.query.mode ?? 'ar') === 'ap' ? 'ap' : 'ar';
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
-    if (!partnerId) {
-      res.status(400).json({ error: 'partnerId 不能为空' });
+    if (!Number.isInteger(partnerId) || partnerId <= 0) {
+      sendError(req, res, 400, 'partnerId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const range = rangeOf(req);
     if (range.error) {
-      res.status(400).json({ error: range.error });
+      sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = range;

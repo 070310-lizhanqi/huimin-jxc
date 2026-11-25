@@ -3,9 +3,12 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
-RUN npm install -g pnpm@10.34.9
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-COPY package.json pnpm-lock.yaml ./
+RUN npm install -g pnpm@12.23.0
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile
 
 COPY server ./server

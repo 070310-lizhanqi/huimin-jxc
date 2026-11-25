@@ -15,6 +15,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { sendError } from './infra/errors';
 import { roundHalfAwayFromZero, roundQty } from './shared/money';
 
 /** 账龄分桶边界（天）。最后一段为「超过 720 天」。 */
@@ -291,8 +292,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
   router.get('/report/aging', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const mode = String(req.query.mode ?? 'ar') === 'ap' ? 'ap' : 'ar';
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { asOf, totals, rows } = computeAging(teamId, mode);
@@ -306,8 +307,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     // limit 守护：Number('abc')=NaN 时 slice(0, NaN) 静默返回空排行
     const rawLimit = Number(req.query.limit ?? 5);
     const limit = Number.isFinite(rawLimit) ? Math.min(20, Math.max(1, Math.floor(rawLimit))) : 5;
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { rows } = computeAging(teamId, mode);
@@ -320,8 +321,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/stock-aging', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const now = today();

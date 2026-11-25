@@ -43,7 +43,7 @@ An enterprise-hardened inventory, purchasing, sales, stock, and cash-settlement 
 ## Requirements
 
 - **Node.js >= 22.5** (Node 24 LTS recommended; uses built-in `node:sqlite`)
-- **pnpm 10.x** (`lockfileVersion 9.0`)
+- **pnpm 12.x** (`lockfileVersion 9.0`, configured via `pnpm-workspace.yaml`)
 - **Docker / Docker Compose** (optional, for containerized deployment)
 
 ---

@@ -61,6 +61,10 @@ export function importProducts(
     () => {
       for (const [idx, r] of rows.entries()) {
         const rowNo = idx + 1;
+        if (!r || typeof r !== 'object' || Array.isArray(r)) {
+          errors.push({ row: rowNo, msg: '行数据格式不正确' });
+          continue;
+        }
         const name = String(r.name ?? '').trim();
         if (!name) {
           errors.push({ row: rowNo, msg: '名称不能为空' });

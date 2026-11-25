@@ -7,10 +7,10 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate, validBizDate } from './db';
 import { recordAuditTxFromRequest } from './infra/audit-log';
-import { BusyError, ConflictError, sendError } from './infra/errors';
+import { AppError, ConflictError, NotFoundError, sendError, ValidationError } from './infra/errors';
 import { extractIdempotencyKey, hashRequestPayload, lookupIdempotencyKey, saveIdempotencyKey } from './infra/idempotency';
 import { withImmediateTx } from './infra/tx';
-import { parseOptionalPositiveInt, parsePositiveInt } from './infra/validate';
+import { parseOptionalPositiveInt, parseOptionalString, parsePositiveInt } from './infra/validate';
 import { MAX_TOTAL_AMOUNT_CENTS } from './shared/money';
 
 type Value = string | number | null;
@@ -29,7 +29,7 @@ function rememberSettle(key: string, id: number): void {
 export function mountSettlements(router: Router, db: DatabaseSync): void {
   router.get('/settlement/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
     const conds: string[] = ['teamId = ?'];
     const args: Value[] = [teamId];
     if (req.query.type) {
@@ -64,24 +64,35 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
 
   router.post('/settlement/create', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const type = String(req.body.type ?? '');
-    const partnerType = String(req.body.partnerType ?? '');
-    const partnerId = Number(req.body.partnerId);
+    const type = typeof req.body.type === 'string' ? req.body.type : '';
+    const partnerType = typeof req.body.partnerType === 'string' ? req.body.partnerType : '';
+    const partnerParsed = parsePositiveInt(req.body.partnerId, '往来单位');
     const amount = Math.round(Number(req.body.amount ?? 0));
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    if (!['receipt', 'payment'].includes(type)) return res.status(400).json({ error: 'type 非法' });
-    if (!['cus', 'ven'].includes(partnerType)) return res.status(400).json({ error: 'partnerType 非法' });
+    if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
+    if (!['receipt', 'payment'].includes(type)) return sendError(req, res, 400, 'type 非法');
+    if (!['cus', 'ven'].includes(partnerType)) return sendError(req, res, 400, 'partnerType 非法');
     // 配对校验：收款对象只能是客户、付款对象只能是供应商。
     // 交叉组合（如 payment+cus）会凭空冲减客户应收/供应商应付，报表端无法归因
     if (type === 'receipt' && partnerType !== 'cus')
-      return res.status(400).json({ error: '收款（receipt）的往来单位必须是客户' });
+      return sendError(req, res, 400, '收款（receipt）的往来单位必须是客户');
     if (type === 'payment' && partnerType !== 'ven')
-      return res.status(400).json({ error: '付款（payment）的往来单位必须是供应商' });
-    if (!partnerId) return sendError(req, res, 400, '往来单位不能为空');
+      return sendError(req, res, 400, '付款（payment）的往来单位必须是供应商');
+    if (!partnerParsed.ok) return sendError(req, res, 400, '往来单位不能为空');
+    const partnerId = partnerParsed.value;
     if (!(amount > 0)) return sendError(req, res, 400, '金额必须大于 0');
     if (amount > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
-    const dateErr = validBizDate(req.body.date);
-    if (dateErr) return sendError(req, res, 400, '收付款日期' + dateErr);
+    if (req.body.date !== undefined && req.body.date !== null && typeof req.body.date !== 'string') {
+      return sendError(req, res, 400, '收付款日期格式必须为 YYYY-MM-DD');
+    }
+    const rawDate = typeof req.body.date === 'string' ? req.body.date.trim() : '';
+    if (rawDate !== '') {
+      const dateErr = validBizDate(rawDate);
+      if (dateErr) return sendError(req, res, 400, '收付款日期' + dateErr);
+    }
+    const settleDate = rawDate || localDate();
+    const remarkParsed = parseOptionalString(req.body.remark, '备注', 500);
+    if (!remarkParsed.ok) return sendError(req, res, 400, remarkParsed.error);
+    const remark = remarkParsed.value;
     const accParsed = parseOptionalPositiveInt(req.body.accountId, 'accountId');
     if (!accParsed.ok) return sendError(req, res, 400, accParsed.error);
     const accountId = accParsed.value;
@@ -116,9 +127,10 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     }
 
     let createdId = 0;
+    let replayed = false;
     const dedupKey = JSON.stringify([
-      teamId, type, partnerType, partnerId, amount, accountId, String(req.body.date ?? ''),
-      String(req.body.remark ?? ''), refDocId ?? 0, req.auth?.userId ?? 0,
+      teamId, type, partnerType, partnerId, amount, accountId, rawDate,
+      remark ?? '', refDocId ?? 0, req.auth?.userId ?? 0,
     ]);
     if (!idem.present) {
       const hit = recentSettles.get(dedupKey);
@@ -140,6 +152,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             }
             if (hitInTx.hit) {
               createdId = Number((hitInTx.body as { id?: number }).id ?? 0);
+              replayed = true;
               return;
             }
           }
@@ -148,9 +161,9 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             const account = db
               .prepare(`SELECT id, balance FROM account WHERE id = ? AND teamId = ?`)
               .get(accountId, teamId) as { id: number; balance: number } | undefined;
-            if (!account) throw new Error('资金账户不存在');
+            if (!account) throw new ValidationError('资金账户不存在');
             if (type === 'payment' && amount > account.balance) {
-              throw new Error(
+              throw new ValidationError(
                 `账户余额不足：可用 ${(account.balance / 100).toFixed(2)} 元，本次付款 ${(amount / 100).toFixed(2)} 元`,
               );
             }
@@ -167,9 +180,9 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
               partnerId,
               accountId,
               amount,
-              String(req.body.date ?? localDate()),
+              settleDate,
               refDocId,
-              (req.body.remark as string) ?? null,
+              remark,
             );
           createdId = Number(info.lastInsertRowid);
           db.prepare(
@@ -194,11 +207,14 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         { checkpoint: true },
       );
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      if (e instanceof ConflictError) return sendError(req, res, e.statusCode, e.message, e.code);
-      return sendError(req, res, 400, e instanceof Error ? e.message : '保存失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '保存失败');
     }
-    if (!idem.present) rememberSettle(dedupKey, createdId);
+    if (replayed) {
+      res.setHeader('Idempotent-Replayed', 'true');
+    } else if (!idem.present) {
+      rememberSettle(dedupKey, createdId);
+    }
     return res.json({ ok: true, id: createdId });
   });
 
@@ -210,31 +226,53 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     const idParsed = parsePositiveInt(req.params.id, 'id');
     if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
     const id = idParsed.value;
-    const old = db
-      .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
-      .get(id, teamId) as
-      | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; date: string; remark: string | null; isAuto: number }
-      | undefined;
-    if (!old) return sendError(req, res, 404, '收付款记录不存在');
-    if (old.isAuto) {
-      return sendError(req, res, 400, '该收付款由单据审核自动生成，请通过作废单据调整');
-    }
 
-    const amount = req.body.amount != null ? Math.round(Number(req.body.amount)) : old.amount;
-    if (!(amount > 0)) return sendError(req, res, 400, '金额必须大于 0');
-    if (amount > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
-    const accountId = req.body.accountId !== undefined
-      ? (req.body.accountId ? Number(req.body.accountId) : null)
-      : old.accountId;
-    const date = String(req.body.date ?? old.date);
-    const dateErr = validBizDate(date);
-    if (dateErr) return sendError(req, res, 400, '收付款日期' + dateErr);
-    const remark = req.body.remark !== undefined ? (req.body.remark as string) : old.remark;
+    let reqAmount: number | undefined;
+    if (req.body.amount !== undefined && req.body.amount !== null) {
+      reqAmount = Math.round(Number(req.body.amount));
+      if (!(reqAmount > 0)) return sendError(req, res, 400, '金额必须大于 0');
+      if (reqAmount > MAX_TOTAL_AMOUNT_CENTS) return sendError(req, res, 400, '金额超出上限（10 亿元），请核对后重试');
+    }
+    let reqAccountId: number | null | undefined = undefined;
+    if (req.body.accountId !== undefined) {
+      const accParsed = parseOptionalPositiveInt(req.body.accountId, 'accountId');
+      if (!accParsed.ok) return sendError(req, res, 400, accParsed.error);
+      reqAccountId = accParsed.value;
+    }
+    let reqDate: string | undefined;
+    if (req.body.date !== undefined && req.body.date !== null) {
+      if (typeof req.body.date !== 'string') return sendError(req, res, 400, '收付款日期格式必须为 YYYY-MM-DD');
+      const dStr = req.body.date.trim();
+      if (!dStr) return sendError(req, res, 400, '收付款日期不能为空');
+      const dateErr = validBizDate(dStr);
+      if (dateErr) return sendError(req, res, 400, '收付款日期' + dateErr);
+      reqDate = dStr;
+    }
+    let reqRemark: string | null | undefined = undefined;
+    if (req.body.remark !== undefined) {
+      const remarkParsed = parseOptionalString(req.body.remark, '备注', 500);
+      if (!remarkParsed.ok) return sendError(req, res, 400, remarkParsed.error);
+      reqRemark = remarkParsed.value;
+    }
 
     try {
       withImmediateTx(
         db,
         () => {
+          const old = db
+            .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
+            .get(id, teamId) as
+            | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; date: string; remark: string | null; isAuto: number }
+            | undefined;
+          if (!old) throw new NotFoundError('收付款记录不存在');
+          if (old.isAuto) {
+            throw new ValidationError('该收付款由单据审核自动生成，请通过作废单据调整');
+          }
+          const amount = reqAmount !== undefined ? reqAmount : old.amount;
+          const accountId = reqAccountId !== undefined ? reqAccountId : old.accountId;
+          const date = reqDate !== undefined ? reqDate : old.date;
+          const remark = reqRemark !== undefined ? reqRemark : old.remark;
+
           if (old.accountId && old.type === 'receipt') {
             const oldAcc = db
               .prepare(`SELECT balance FROM account WHERE id = ? AND teamId = ?`)
@@ -242,21 +280,21 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             if (oldAcc) {
               const backNeed = old.accountId === accountId ? Math.max(0, old.amount - amount) : old.amount;
               if (oldAcc.balance < backNeed) {
-                throw new Error(
+                throw new ValidationError(
                   `该笔收款已被支用，旧账户当前余额 ${(oldAcc.balance / 100).toFixed(2)} 元，不足以冲回 ${(backNeed / 100).toFixed(2)} 元。请先调整资金或换用其他账户。`,
                 );
               }
             }
           }
-          if (accountId) {
+          if (accountId !== null) {
             const account = db
               .prepare(`SELECT id, balance FROM account WHERE id = ? AND teamId = ?`)
               .get(accountId, teamId) as { id: number; balance: number } | undefined;
-            if (!account) throw new Error('资金账户不存在');
+            if (!account) throw new ValidationError('资金账户不存在');
             if (old.type === 'payment') {
               const avail = old.accountId === accountId ? account.balance + old.amount : account.balance;
               if (amount > avail) {
-                throw new Error(
+                throw new ValidationError(
                   `账户余额不足：可用 ${(avail / 100).toFixed(2)} 元，本次付款 ${(amount / 100).toFixed(2)} 元`,
                 );
               }
@@ -270,10 +308,13 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
             db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(back, old.accountId, teamId);
           }
-          db.prepare(
-            `UPDATE settlement SET accountId = ?, amount = ?, date = ?, remark = ? WHERE id = ? AND teamId = ?`,
-          ).run(accountId, amount, date, remark, id, teamId);
-          if (accountId) {
+          const upd = db
+            .prepare(
+              `UPDATE settlement SET accountId = ?, amount = ?, date = ?, remark = ? WHERE id = ? AND teamId = ?`,
+            )
+            .run(accountId, amount, date, remark, id, teamId);
+          if (upd.changes === 0) throw new NotFoundError('收付款记录不存在');
+          if (accountId !== null) {
             const inc = old.type === 'receipt' ? amount : -amount;
             db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(inc, accountId, teamId);
           }
@@ -288,8 +329,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         { checkpoint: true },
       );
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '保存失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '保存失败');
     }
     return res.json({ ok: true });
   });
@@ -302,30 +343,32 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
     const idParsed = parsePositiveInt(req.params.id, 'id');
     if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
     const id = idParsed.value;
-    const old = db
-      .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
-      .get(id, teamId) as
-      | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; remark: string | null; isAuto: number }
-      | undefined;
-    if (!old) return sendError(req, res, 404, '收付款记录不存在');
-    if (old.isAuto) {
-      return sendError(req, res, 400, '该收付款由单据审核自动生成，请通过作废单据调整');
-    }
 
     try {
       withImmediateTx(
         db,
         () => {
+          const old = db
+            .prepare(`SELECT * FROM settlement WHERE id = ? AND teamId = ?`)
+            .get(id, teamId) as
+            | { id: number; type: string; partnerType: string; partnerId: number; accountId: number | null; amount: number; remark: string | null; isAuto: number }
+            | undefined;
+          if (!old) throw new NotFoundError('收付款记录不存在');
+          if (old.isAuto) {
+            throw new ValidationError('该收付款由单据审核自动生成，请通过作废单据调整');
+          }
           if (old.accountId && old.type === 'receipt') {
             const acc = db
               .prepare(`SELECT balance FROM account WHERE id = ? AND teamId = ?`)
               .get(old.accountId, teamId) as { balance: number } | undefined;
             if (acc && acc.balance < old.amount) {
-              throw new Error(
+              throw new ValidationError(
                 `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(old.amount / 100).toFixed(2)} 元。请先调整资金或改为修改金额。`,
               );
             }
           }
+          const del = db.prepare(`DELETE FROM settlement WHERE id = ? AND teamId = ?`).run(id, teamId);
+          if (del.changes === 0) throw new NotFoundError('收付款记录不存在');
           db.prepare(
             `INSERT INTO partner_balance (teamId, partnerType, partnerId, balance) VALUES (?, ?, ?, ?)
              ON CONFLICT(teamId, partnerType, partnerId) DO UPDATE SET balance = balance + excluded.balance`,
@@ -334,7 +377,6 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
             db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(back, old.accountId, teamId);
           }
-          db.prepare(`DELETE FROM settlement WHERE id = ? AND teamId = ?`).run(id, teamId);
           recordAuditTxFromRequest(db, req, {
             teamId,
             action: 'settlement.delete',
@@ -346,8 +388,8 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
         { checkpoint: true },
       );
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '删除失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '删除失败');
     }
     return res.json({ ok: true });
   });

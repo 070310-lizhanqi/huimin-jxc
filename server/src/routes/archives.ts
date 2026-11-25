@@ -30,8 +30,10 @@ export function mountArchiveRoutes(api: Router, db: DatabaseSync): void {
       return null;
     },
     validate: (body) => {
-      const parentId = Number(body.parentId);
-      if (parentId) {
+      const parentParsed = parseOptionalPositiveInt(body.parentId, '父分类');
+      if (!parentParsed.ok) return parentParsed.error;
+      const parentId = parentParsed.value;
+      if (parentId !== null) {
         const teamId = Number(body.teamId);
         const p = db.prepare(`SELECT id FROM cat WHERE id = ? AND teamId = ?`).get(parentId, teamId) as
           { id: number } | undefined;

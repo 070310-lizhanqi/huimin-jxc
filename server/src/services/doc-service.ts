@@ -5,6 +5,12 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type { Request } from 'express';
 import { escapeLike } from '../crud';
 import { validBizDate } from '../db';
+import {
+  parseBizDateOptional,
+  parseOptionalPositiveInt,
+  parseOptionalString,
+  parsePositiveInt,
+} from '../infra/validate';
 import { BILL_NO_PREFIXES } from '../settings';
 import { lineAmount, MAX_TOTAL_AMOUNT_CENTS, PRICE_CENTS_MAX, QTY_MAX, roundQty, sumQty } from '../shared/money';
 import { bumpPartnerBalance, StockError } from './stock-service';
@@ -261,43 +267,83 @@ export function rememberCreate(input: DocInput, id: number, billNo: string, user
 }
 
 export function validateDocInput(db: DatabaseSync, input: DocInput): string | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return '请求参数格式非法';
   if (!input.teamId) return 'teamId 不能为空';
-  if (!BILL_NO_PREFIXES[input.type]) return `不支持的单据类型 ${input.type}`;
-  if (!ORDER_TYPES.has(input.type) && !input.warehouseId) return '仓库不能为空';
+  if (typeof input.type !== 'string' || !Object.hasOwn(BILL_NO_PREFIXES, input.type)) {
+    return `不支持的单据类型 ${String(input.type ?? '')}`;
+  }
+  if (!ORDER_TYPES.has(input.type)) {
+    if (input.warehouseId === undefined || input.warehouseId === null || input.warehouseId === ('' as unknown)) {
+      return '仓库不能为空';
+    }
+    const whParsed = parsePositiveInt(input.warehouseId, '仓库');
+    if (!whParsed.ok) return whParsed.error;
+  } else if (input.warehouseId !== undefined && input.warehouseId !== null && input.warehouseId !== ('' as unknown)) {
+    const whOpt = parseOptionalPositiveInt(input.warehouseId, '仓库');
+    if (!whOpt.ok) return whOpt.error;
+  }
   if (!Array.isArray(input.items) || input.items.length === 0) return '明细不能为空';
   if (input.items.length > 1000) return `明细行数超出上限（最多 1000 行，当前 ${input.items.length} 行）`;
+  for (const [i, it] of input.items.entries()) {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) {
+      return `第 ${i + 1} 行明细格式非法`;
+    }
+  }
+
+  for (const [res, label] of [
+    [parseOptionalString(input.remark, '备注', 500), 'remark'],
+    [parseOptionalString(input.receiverName, '收件人', 100), 'receiverName'],
+    [parseOptionalString(input.receiverMobile, '收件手机', 32), 'receiverMobile'],
+    [parseOptionalString(input.receiverAddress, '收件地址', 200), 'receiverAddress'],
+  ] as const) {
+    if (!res.ok) return res.error;
+    void label;
+  }
 
   if (input.type === 'transfer') {
     for (const [i, it] of input.items.entries()) {
       if (!it.toWarehouseId) return `第 ${i + 1} 行调往仓库不能为空`;
-      if (it.toWarehouseId === input.warehouseId) return `第 ${i + 1} 行调往仓库不能与调出仓库相同`;
+      const toWhParsed = parsePositiveInt(it.toWarehouseId, `第 ${i + 1} 行调往仓库`);
+      if (!toWhParsed.ok) return toWhParsed.error;
+      if (toWhParsed.value === Number(input.warehouseId)) return `第 ${i + 1} 行调往仓库不能与调出仓库相同`;
     }
   }
 
-  const dateErr = validBizDate(input.date);
-  if (dateErr) return '单据日期' + dateErr;
+  if (input.date !== undefined && input.date !== null && input.date !== '') {
+    if (typeof input.date !== 'string') return '单据日期格式必须为 YYYY-MM-DD';
+    const dateErr = validBizDate(input.date.trim());
+    if (dateErr) return '单据日期' + dateErr;
+  }
+
+  const clerkParsed = parseOptionalPositiveInt(input.clerkId, '业务员');
+  if (!clerkParsed.ok) return clerkParsed.error;
+  const partnerParsed = parseOptionalPositiveInt(input.partnerId, '往来单位');
+  if (!partnerParsed.ok) return partnerParsed.error;
+  const accParsed = parseOptionalPositiveInt(input.accountId, '收款账户');
+  if (!accParsed.ok) return accParsed.error;
 
   if (input.warehouseId) {
     const wh = db
       .prepare(`SELECT id FROM warehouse WHERE id = ? AND teamId = ?`)
-      .get(input.warehouseId, input.teamId) as { id: number } | undefined;
+      .get(Number(input.warehouseId), input.teamId) as { id: number } | undefined;
     if (!wh) return '仓库不存在';
   }
-  if (input.clerkId) {
-    const clerk = db.prepare(`SELECT id FROM clerk WHERE id = ? AND teamId = ?`).get(input.clerkId, input.teamId) as
-      { id: number } | undefined;
+  if (clerkParsed.value !== null) {
+    const clerk = db
+      .prepare(`SELECT id FROM clerk WHERE id = ? AND teamId = ?`)
+      .get(clerkParsed.value, input.teamId) as { id: number } | undefined;
     if (!clerk) return '业务员不存在';
   }
-  if (input.partnerId) {
+  if (partnerParsed.value !== null) {
     if (!['cus', 'ven'].includes(input.partnerType ?? '')) return '往来单位类型非法';
     const partnerTable = input.partnerType === 'cus' ? 'customer' : 'vendor';
     const partner = db
       .prepare(`SELECT id FROM ${partnerTable} WHERE id = ? AND teamId = ?`)
-      .get(input.partnerId, input.teamId) as { id: number } | undefined;
+      .get(partnerParsed.value, input.teamId) as { id: number } | undefined;
     if (!partner) return '往来单位不存在';
   }
-  if (input.accountId) {
-    const acc = db.prepare(`SELECT id FROM account WHERE id = ? AND teamId = ?`).get(input.accountId, input.teamId) as
+  if (accParsed.value !== null) {
+    const acc = db.prepare(`SELECT id FROM account WHERE id = ? AND teamId = ?`).get(accParsed.value, input.teamId) as
       { id: number } | undefined;
     if (!acc) return '收款账户不存在';
   }
@@ -305,7 +351,8 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
   if (input.type === 'stocktake') {
     const seen = new Map<string, number>();
     for (const [i, it] of input.items.entries()) {
-      const key = [it.productId, it.reservoirId ?? null, it.batchNo ? it.batchNo : null].join('|');
+      const batchNorm = typeof it.batchNo === 'string' && it.batchNo.trim() ? it.batchNo.trim() : null;
+      const key = [it.productId, it.reservoirId ?? null, batchNorm].join('|');
       const prev = seen.get(key);
       if (prev !== undefined) return `第 ${prev + 1} 行与第 ${i + 1} 行是同一商品同一批次，请合并为一行盘点`;
       seen.set(key, i);
@@ -358,20 +405,33 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
     }
 
     for (const [i, it] of input.items.entries()) {
-      if (!it.productId || !Number.isInteger(Number(it.productId)) || Number(it.productId) <= 0) {
-        return `第 ${i + 1} 行缺少商品`;
+      const prodParsed = parsePositiveInt(it.productId, `第 ${i + 1} 行商品`);
+      if (!prodParsed.ok) return `第 ${i + 1} 行缺少商品`;
+      if (!prodSet.has(prodParsed.value)) return `第 ${i + 1} 行商品不存在`;
+      const resParsed = parseOptionalPositiveInt(it.reservoirId, `第 ${i + 1} 行库区`);
+      if (!resParsed.ok) return resParsed.error;
+      if (resParsed.value !== null) {
+        if (resMap.get(resParsed.value) !== Number(input.warehouseId)) return `第 ${i + 1} 行库区不属于该仓库`;
       }
-      if (!prodSet.has(Number(it.productId))) return `第 ${i + 1} 行商品不存在`;
-      if (it.reservoirId) {
-        if (resMap.get(Number(it.reservoirId)) !== Number(input.warehouseId)) return `第 ${i + 1} 行库区不属于该仓库`;
-      }
-      if (it.toWarehouseId && !toWhSet.has(Number(it.toWarehouseId))) return `第 ${i + 1} 行调往仓库不存在`;
-      if (it.toReservoirId) {
-        if (!it.toWarehouseId) return `第 ${i + 1} 行填写了调往库区，但缺少调往仓库`;
-        if (toResMap.get(Number(it.toReservoirId)) !== Number(it.toWarehouseId)) {
+      const toWhParsed = parseOptionalPositiveInt(it.toWarehouseId, `第 ${i + 1} 行调往仓库`);
+      if (!toWhParsed.ok) return toWhParsed.error;
+      if (toWhParsed.value !== null && !toWhSet.has(toWhParsed.value)) return `第 ${i + 1} 行调往仓库不存在`;
+      const toResParsed = parseOptionalPositiveInt(it.toReservoirId, `第 ${i + 1} 行调往库区`);
+      if (!toResParsed.ok) return toResParsed.error;
+      if (toResParsed.value !== null) {
+        if (toWhParsed.value === null) return `第 ${i + 1} 行填写了调往库区，但缺少调往仓库`;
+        if (toResMap.get(toResParsed.value) !== toWhParsed.value) {
           return `第 ${i + 1} 行调往库区不属于调往仓库`;
         }
       }
+      const batchParsed = parseOptionalString(it.batchNo, `第 ${i + 1} 行批次`, 64);
+      if (!batchParsed.ok) return batchParsed.error;
+      const itemRemarkParsed = parseOptionalString(it.remark, `第 ${i + 1} 行备注`, 500);
+      if (!itemRemarkParsed.ok) return itemRemarkParsed.error;
+      const prodDateParsed = parseBizDateOptional(it.productionDate, `第 ${i + 1} 行生产日期`);
+      if (!prodDateParsed.ok) return prodDateParsed.error;
+      const expDateParsed = parseBizDateOptional(it.expiryDate, `第 ${i + 1} 行有效期至`);
+      if (!expDateParsed.ok) return expDateParsed.error;
     }
   }
 
@@ -387,7 +447,8 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
     }
     const allowNegative = input.type === 'adjust' || input.type === 'assembly';
     const allowZero = input.type === 'stocktake';
-    if (it.qty === 0 && !allowZero) return `第 ${i + 1} 行数量不能为 0`;
+    const roundedQty = roundQty(it.qty);
+    if ((it.qty === 0 || roundedQty === 0) && !allowZero) return `第 ${i + 1} 行数量不能为 0`;
     if (!allowNegative && it.qty < 0) return `第 ${i + 1} 行数量非法`;
     if (Math.abs(it.qty) > QTY_MAX) return `第 ${i + 1} 行数量超出上限 ${QTY_MAX}`;
     if (it.price < 0) return `第 ${i + 1} 行单价不能为负`;
@@ -405,11 +466,13 @@ export function validateDocInput(db: DatabaseSync, input: DocInput): string | nu
   if (depRaw < 0) return '抵扣订金不能为负数';
 
   if (input.refOrderId != null && input.refOrderId !== undefined && Number(input.refOrderId) !== 0) {
+    const refParsed = parsePositiveInt(input.refOrderId, '来源订单');
+    if (!refParsed.ok) return refParsed.error;
     const selfId = (input as { id?: number }).id;
-    if (selfId != null && Number(input.refOrderId) === Number(selfId)) return '来源订单不能是单据自身';
+    if (selfId != null && refParsed.value === Number(selfId)) return '来源订单不能是单据自身';
     const ref = db
       .prepare(`SELECT type, status FROM doc WHERE id = ? AND teamId = ?`)
-      .get(Number(input.refOrderId), input.teamId) as { type: string; status: string } | undefined;
+      .get(refParsed.value, input.teamId) as { type: string; status: string } | undefined;
     if (!ref) return '来源订单不存在';
     if (!ORDER_TYPES.has(ref.type) || ref.type === 'quo') return '来源必须是订单类单据';
     if (ref.status !== 'audit') return '来源订单尚未审核，不能转单';
@@ -431,19 +494,24 @@ export function insertItems(db: DatabaseSync, docId: number, items: ItemInput[])
   for (const it of items) {
     const price = Math.round(Number(it.price ?? 0));
     const qty = roundQty(Number(it.qty));
+    const batchNo = typeof it.batchNo === 'string' && it.batchNo.trim() ? it.batchNo.trim() : null;
+    const productionDate =
+      typeof it.productionDate === 'string' && it.productionDate.trim() ? it.productionDate.trim() : null;
+    const expiryDate = typeof it.expiryDate === 'string' && it.expiryDate.trim() ? it.expiryDate.trim() : null;
+    const remark = typeof it.remark === 'string' && it.remark.trim() ? it.remark.trim() : null;
     stmt.run(
       docId,
-      it.productId,
+      Number(it.productId),
       qty,
       price,
       lineAmount(qty, price),
-      it.batchNo ?? null,
-      it.productionDate ?? null,
-      it.expiryDate ?? null,
-      it.reservoirId ?? null,
-      it.toWarehouseId ?? null,
-      it.toReservoirId ?? null,
-      it.remark ?? null,
+      batchNo,
+      productionDate,
+      expiryDate,
+      it.reservoirId ? Number(it.reservoirId) : null,
+      it.toWarehouseId ? Number(it.toWarehouseId) : null,
+      it.toReservoirId ? Number(it.toReservoirId) : null,
+      remark,
     );
   }
 }

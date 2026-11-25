@@ -9,7 +9,7 @@ import type { Request, Response, Router } from 'express';
 import { nextBillNo } from '../bill-no';
 import { localDate } from '../db';
 import { recordAuditTxFromRequest } from '../infra/audit-log';
-import { BusyError, ConflictError, sendError } from '../infra/errors';
+import { AppError, ConflictError, sendError, ValidationError } from '../infra/errors';
 import {
   extractIdempotencyKey,
   hashRequestPayload,
@@ -17,7 +17,7 @@ import {
   saveIdempotencyKey,
 } from '../infra/idempotency';
 import { withImmediateTx } from '../infra/tx';
-import { parsePositiveInt } from '../infra/validate';
+import { parseOptionalString, parsePositiveInt } from '../infra/validate';
 import { recomputePriceMemory, rememberPrices } from '../price';
 import {
   computeDocFinancials,
@@ -206,7 +206,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
 
   router.get('/doc/info', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    const id = Number(req.query.id);
+    if (!teamId) return sendError(req, res, 400, 'teamId 不能为空');
+    const idParsed = parsePositiveInt(req.query.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
     const doc = db.prepare('SELECT * FROM doc WHERE id = ? AND teamId = ?').get(id, teamId) as
       { type: string } | undefined;
     if (!doc) return sendError(req, res, 404, '单据不存在');
@@ -257,9 +260,18 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const fin = computeDocFinancials(input);
     if (!fin.ok) return sendError(req, res, 400, fin.error);
     const { totalQty, totalAmount, discount, paidAmount, deposit } = fin.value;
+    const docDate = typeof input.date === 'string' && input.date.trim() ? input.date.trim() : localDate();
+    const remarkVal = typeof input.remark === 'string' && input.remark !== '' ? input.remark : null;
+    const receiverName =
+      typeof input.receiverName === 'string' && input.receiverName !== '' ? input.receiverName : null;
+    const receiverMobile =
+      typeof input.receiverMobile === 'string' && input.receiverMobile !== '' ? input.receiverMobile : null;
+    const receiverAddress =
+      typeof input.receiverAddress === 'string' && input.receiverAddress !== '' ? input.receiverAddress : null;
 
     let docId = 0;
     let billNo = '';
+    let replayed = false;
     try {
       withImmediateTx(db, () => {
         if (idem.present) {
@@ -271,6 +283,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
             const payload = hitInTx.body as { id: number; billNo: string };
             docId = payload.id;
             billNo = payload.billNo;
+            replayed = true;
             return;
           }
         }
@@ -285,22 +298,22 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
             input.teamId,
             billNo,
             input.type,
-            input.date ?? localDate(),
+            docDate,
             input.partnerType ?? null,
-            input.partnerId ?? null,
-            input.clerkId ?? null,
-            input.warehouseId ?? null,
-            input.remark ?? null,
+            input.partnerId ? Number(input.partnerId) : null,
+            input.clerkId ? Number(input.clerkId) : null,
+            input.warehouseId ? Number(input.warehouseId) : null,
+            remarkVal,
             totalAmount,
             totalQty,
             req.auth?.userId ?? null,
-            input.refOrderId ?? null,
-            input.receiverName ?? null,
-            input.receiverMobile ?? null,
-            input.receiverAddress ?? null,
+            input.refOrderId ? Number(input.refOrderId) : null,
+            receiverName,
+            receiverMobile,
+            receiverAddress,
             discount,
             paidAmount,
-            input.accountId ?? null,
+            input.accountId ? Number(input.accountId) : null,
             deposit,
           );
         docId = Number(info.lastInsertRowid);
@@ -317,18 +330,24 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         }
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      if (e instanceof ConflictError) return sendError(req, res, e.statusCode, e.message, e.code);
-      return sendError(req, res, 400, e instanceof Error ? e.message : '保存失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      if (e instanceof StockError) return sendError(req, res, 400, e.message);
+      return sendError(req, res, 400, '保存失败');
     }
 
-    if (!idem.present) rememberCreate(input, docId, billNo, req.auth?.userId);
+    if (replayed) {
+      res.setHeader('Idempotent-Replayed', 'true');
+    } else if (!idem.present) {
+      rememberCreate(input, docId, billNo, req.auth?.userId);
+    }
     return res.json({ id: docId, billNo });
   });
 
   router.post('/doc/convert', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const id = Number(req.body.id);
+    const idParsed = parsePositiveInt(req.body.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
     const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
       | {
           type: string;
@@ -381,7 +400,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         const freshSrc = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
           { status: string } | undefined;
         if (!freshSrc || freshSrc.status !== 'audit') {
-          throw new Error('来源订单状态已变化（可能已作废），请刷新后重试');
+          throw new ValidationError('来源订单状态已变化（可能已作废），请刷新后重试');
         }
         const fulfilledRows = db
           .prepare(
@@ -399,13 +418,13 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           })
           .filter((it) => it.qty > 0);
         if (!remainItems.length) {
-          throw new Error('该订单已全部转单，没有可转出的剩余数量');
+          throw new ValidationError('该订单已全部转单，没有可转出的剩余数量');
         }
         billNo = nextBillNo(db, teamId, toType);
         const totalQty = sumQty(remainItems.map((i) => i.qty));
         const totalAmount = remainItems.reduce((s, i) => s + lineAmount(i.qty, i.price), 0);
         if (Math.abs(totalAmount) > MAX_TOTAL_AMOUNT_CENTS) {
-          throw new Error('单据总金额超出上限（10 亿元），请核对后重试');
+          throw new ValidationError('单据总金额超出上限（10 亿元），请核对后重试');
         }
         const info = db
           .prepare(
@@ -457,15 +476,17 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         });
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '转单失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '转单失败');
     }
     return res.json({ id: newId, billNo, type: toType });
   });
 
   router.post('/doc/copy', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const id = Number(req.body.id);
+    const idParsed = parsePositiveInt(req.body.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
     const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
       | {
           type: string;
@@ -535,21 +556,28 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         });
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '复制失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '复制失败');
     }
     return res.json({ id: newId, billNo });
   });
 
   router.put('/doc/edit', (req: Request, res: Response) => {
-    const input = req.body as DocInput & { id: number };
-    const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(input.id, input.teamId) as
+    const rawBody = req.body as Record<string, unknown> | null;
+    if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+      return sendError(req, res, 400, '请求参数格式非法');
+    }
+    const idParsed = parsePositiveInt(rawBody.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const input = rawBody as unknown as DocInput & { id: number };
+    const doc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(idParsed.value, input.teamId) as
       { status: string; billNo: string; type: string } | undefined;
     if (!doc) return sendError(req, res, 404, '单据不存在');
     if (doc.status !== 'draft') return sendError(req, res, 400, '仅草稿可编辑');
     if (input.type && input.type !== doc.type) {
       return sendError(req, res, 400, `单据类型不可修改（原类型 ${DOC_META[doc.type]?.label ?? doc.type}）`);
     }
+    input.id = idParsed.value;
     input.type = doc.type as DocInput['type'];
     const err = validateDocInput(db, input);
     if (err) return sendError(req, res, 400, err);
@@ -557,12 +585,20 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     const fin = computeDocFinancials(input);
     if (!fin.ok) return sendError(req, res, 400, fin.error);
     const { totalQty, totalAmount, discount, paidAmount, deposit } = fin.value;
+    const docDate = typeof input.date === 'string' && input.date.trim() ? input.date.trim() : localDate();
+    const remarkVal = typeof input.remark === 'string' && input.remark !== '' ? input.remark : null;
+    const receiverName =
+      typeof input.receiverName === 'string' && input.receiverName !== '' ? input.receiverName : null;
+    const receiverMobile =
+      typeof input.receiverMobile === 'string' && input.receiverMobile !== '' ? input.receiverMobile : null;
+    const receiverAddress =
+      typeof input.receiverAddress === 'string' && input.receiverAddress !== '' ? input.receiverAddress : null;
 
     try {
       withImmediateTx(db, () => {
         const fresh = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(input.id, input.teamId) as
           { status: string } | undefined;
-        if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
+        if (!fresh || fresh.status !== 'draft') throw new ValidationError('单据状态已变化，请刷新后重试');
         const upd = db
           .prepare(
             `UPDATE doc SET date=?, partnerType=?, partnerId=?, clerkId=?, warehouseId=?, remark=?, totalAmount=?, totalQty=?,
@@ -570,25 +606,25 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
              WHERE id=? AND teamId=?`,
           )
           .run(
-            input.date ?? localDate(),
+            docDate,
             input.partnerType ?? null,
-            input.partnerId ?? null,
-            input.clerkId ?? null,
-            input.warehouseId ?? null,
-            input.remark ?? null,
+            input.partnerId ? Number(input.partnerId) : null,
+            input.clerkId ? Number(input.clerkId) : null,
+            input.warehouseId ? Number(input.warehouseId) : null,
+            remarkVal,
             totalAmount,
             totalQty,
-            input.receiverName ?? null,
-            input.receiverMobile ?? null,
-            input.receiverAddress ?? null,
+            receiverName,
+            receiverMobile,
+            receiverAddress,
             discount,
             paidAmount,
-            input.accountId ?? null,
+            input.accountId ? Number(input.accountId) : null,
             deposit,
             input.id,
             input.teamId,
           );
-        if (upd.changes === 0) throw new Error('单据状态已变化，请刷新后重试');
+        if (upd.changes === 0) throw new ValidationError('单据状态已变化，请刷新后重试');
         db.prepare('DELETE FROM doc_item WHERE docId = ?').run(input.id);
         insertItems(db, input.id, input.items);
         recordAuditTxFromRequest(db, req, {
@@ -600,15 +636,18 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         });
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '保存失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      if (e instanceof StockError) return sendError(req, res, 400, e.message);
+      return sendError(req, res, 400, '保存失败');
     }
     return res.json({ ok: true });
   });
 
   router.post('/doc/submit', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const id = Number(req.body.id);
+    const idParsed = parsePositiveInt(req.body.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
     const info = db
       .prepare(
         `UPDATE doc SET status='pending', submitAt=datetime('now','localtime'), rejectReason=NULL WHERE id=? AND teamId=? AND status='draft'`,
@@ -625,13 +664,15 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
 
   router.post('/doc/reject', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const id = Number(req.body.id);
-    const reason = String(req.body.reason ?? '')
-      .trim()
-      .slice(0, 200);
+    const idParsed = parsePositiveInt(req.body.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
+    const reasonParsed = parseOptionalString(req.body.reason, '驳回原因', 200);
+    if (!reasonParsed.ok) return sendError(req, res, 400, reasonParsed.error);
+    const reason = reasonParsed.value;
     const info = db
       .prepare(`UPDATE doc SET status='draft', rejectReason=? WHERE id=? AND teamId=? AND status='pending'`)
-      .run(reason || null, id, teamId);
+      .run(reason, id, teamId);
     if (info.changes === 0) {
       const doc = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
         { status: string } | undefined;
@@ -643,8 +684,14 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
 
   router.post('/doc/submit-batch', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
-    const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
-    if (!ids.length) return sendError(req, res, 400, 'ids 不能为空');
+    if (!Array.isArray(req.body.ids) || req.body.ids.length === 0) return sendError(req, res, 400, 'ids 不能为空');
+    if (req.body.ids.length > 500) return sendError(req, res, 400, '单次最多批量提交 500 张单据');
+    const ids: number[] = [];
+    for (const rawId of req.body.ids) {
+      const p = parsePositiveInt(rawId, 'ids');
+      if (!p.ok) return sendError(req, res, 400, 'ids 必须全部为正整数');
+      ids.push(p.value);
+    }
     let done = 0;
     const skipped: number[] = [];
     const sel = db.prepare(`SELECT status FROM doc WHERE id=? AND teamId=?`);
@@ -665,8 +712,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         }
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '提交失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '提交失败');
     }
     return res.json({ ok: true, done, skipped });
   });
@@ -674,10 +721,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
   router.post('/doc/audit', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const idParsed = parsePositiveInt(req.body.id, 'id');
-    const id = idParsed.ok ? idParsed.value : 0;
-    const auditBy = String(req.body.auditBy ?? '')
-      .trim()
-      .slice(0, 50);
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
+    const auditByParsed = parseOptionalString(req.body.auditBy, '审核人', 50);
+    if (!auditByParsed.ok) return sendError(req, res, 400, auditByParsed.error);
+    const auditBy = auditByParsed.value;
 
     const idem = extractIdempotencyKey(req);
     if ('error' in idem) return sendError(req, res, 400, idem.error);
@@ -700,6 +748,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       return sendError(req, res, 400, '仅草稿或待审核单据可审核');
     }
 
+    let replayed = false;
     try {
       withImmediateTx(
         db,
@@ -709,7 +758,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
             if ('conflict' in hitInTx) {
               throw new ConflictError('幂等键冲突：相同 Idempotency-Key 不可用于不同请求参数');
             }
-            if (hitInTx.hit) return;
+            if (hitInTx.hit) {
+              replayed = true;
+              return;
+            }
           }
           const freshDoc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
             | {
@@ -728,7 +780,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
               }
             | undefined;
           if (!freshDoc || (freshDoc.status !== 'draft' && freshDoc.status !== 'pending')) {
-            throw new Error('单据状态已变化，请刷新后重试');
+            throw new ValidationError('单据状态已变化，请刷新后重试');
           }
           if (freshDoc.refOrderId) {
             const parent = db
@@ -748,7 +800,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
           rememberPrices(db, { ...freshDoc, teamId }, id);
           db.prepare(
             `UPDATE doc SET status='audit', auditAt=datetime('now','localtime'), auditBy=?, auditUserId=? WHERE id=? AND teamId=?`,
-          ).run(auditBy || null, req.auth?.userId ?? null, id, teamId);
+          ).run(auditBy, req.auth?.userId ?? null, id, teamId);
           recordAuditTxFromRequest(db, req, {
             teamId,
             action: 'doc.audit',
@@ -763,18 +815,22 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         { checkpoint: true },
       );
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      if (e instanceof ConflictError) return sendError(req, res, e.statusCode, e.message, e.code);
-      const msg = e instanceof StockError ? e.message : e instanceof Error ? e.message : '审核失败';
-      return sendError(req, res, 400, msg);
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      if (e instanceof StockError) return sendError(req, res, 400, e.message);
+      return sendError(req, res, 400, '审核失败');
     }
+    if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     return res.json({ ok: true });
   });
 
   router.post('/doc/void', (req: Request, res: Response) => {
     const teamId = Number(req.body.teamId);
     const idParsed = parsePositiveInt(req.body.id, 'id');
-    const id = idParsed.ok ? idParsed.value : 0;
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
+    const reasonParsed = parseOptionalString((req.body as { reason?: unknown }).reason, '作废原因', 200);
+    if (!reasonParsed.ok) return sendError(req, res, 400, reasonParsed.error);
+    const voidReason = reasonParsed.value;
 
     const idem = extractIdempotencyKey(req);
     if ('error' in idem) return sendError(req, res, 400, idem.error);
@@ -795,6 +851,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
     if (!doc) return sendError(req, res, 404, '单据不存在');
     if (doc.status !== 'audit') return sendError(req, res, 400, '仅已审核单据可作废');
 
+    let replayed = false;
     try {
       withImmediateTx(
         db,
@@ -804,7 +861,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
             if ('conflict' in hitInTx) {
               throw new ConflictError('幂等键冲突：相同 Idempotency-Key 不可用于不同请求参数');
             }
-            if (hitInTx.hit) return;
+            if (hitInTx.hit) {
+              replayed = true;
+              return;
+            }
           }
           const freshDoc = db.prepare(`SELECT * FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
             | {
@@ -821,15 +881,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
               }
             | undefined;
           if (!freshDoc || freshDoc.status !== 'audit') {
-            throw new Error('单据状态已变化，请刷新后重试');
+            throw new ValidationError('单据状态已变化，请刷新后重试');
           }
           if (COST_TYPES.has(freshDoc.type)) postStock(db, id, true);
           reverseSettleOnVoid(db, teamId, freshDoc);
           recomputePriceMemory(db, { ...freshDoc, teamId }, id);
-          const voidReason =
-            String((req.body as { reason?: string }).reason ?? '')
-              .trim()
-              .slice(0, 200) || null;
           db.prepare(
             `UPDATE doc SET status='void', voidAt=datetime('now','localtime'), voidReason=?, voidUserId=? WHERE id=? AND teamId=?`,
           ).run(voidReason, req.auth?.userId ?? null, id, teamId);
@@ -847,11 +903,11 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         { checkpoint: true },
       );
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      if (e instanceof ConflictError) return sendError(req, res, e.statusCode, e.message, e.code);
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
       const msg = e instanceof StockError ? e.message : '作废失败';
       return sendError(req, res, 400, msg);
     }
+    if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     return res.json({ ok: true });
   });
 
@@ -869,7 +925,7 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       withImmediateTx(db, () => {
         const fresh = db.prepare(`SELECT status FROM doc WHERE id = ? AND teamId = ?`).get(id, teamId) as
           { status: string } | undefined;
-        if (!fresh || fresh.status !== 'draft') throw new Error('单据状态已变化，请刷新后重试');
+        if (!fresh || fresh.status !== 'draft') throw new ValidationError('单据状态已变化，请刷新后重试');
         db.prepare('DELETE FROM doc_item WHERE docId = ?').run(id);
         db.prepare('DELETE FROM doc WHERE id = ? AND teamId = ?').run(id, teamId);
         recordAuditTxFromRequest(db, req, {
@@ -881,8 +937,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         });
       });
     } catch (e) {
-      if (e instanceof BusyError) return sendError(req, res, 503, e.message, 'SERVICE_UNAVAILABLE');
-      return sendError(req, res, 400, e instanceof Error ? e.message : '删除失败');
+      if (e instanceof AppError) return sendError(req, res, e.statusCode, e.message, e.code);
+      return sendError(req, res, 400, '删除失败');
     }
     return res.json({ ok: true });
   });

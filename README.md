@@ -43,7 +43,7 @@
 ## 环境要求
 
 - **Node.js ≥ 22.5**（推荐 Node 24 LTS，内置 `node:sqlite` 零原生编译依赖）
-- **pnpm 10.x**（锁文件 `lockfileVersion 9.0`）
+- **pnpm 12.x**（锁文件 `lockfileVersion 9.0`，配置见 `pnpm-workspace.yaml`）
 - **Docker / Docker Compose**（可选，用于容器化生产部署）
 
 ---

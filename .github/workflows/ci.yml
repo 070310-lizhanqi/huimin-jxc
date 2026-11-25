@@ -30,8 +30,8 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install pnpm 10
-        run: npm install -g pnpm@10.34.9
+      - name: Install pnpm 12
+        run: npm install -g pnpm@12.23.0
 
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile

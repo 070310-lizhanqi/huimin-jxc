@@ -20,7 +20,7 @@
 | **前端工程化与可访问性** | `web/index.html` 内联 740+ 行 CSS；登录页使用 `v-html` 渲染 SVG；缺少全局错误码/追踪 ID 透传与弹窗 Esc 关闭 | CSS 抽离至 `web/css/app.css`；移除 `v-html` 静态化内联 SVG；`01-api.js` 自动注入 `X-Request-Id`；补充 `:focus-visible`、`aria-label`、弹窗 `Escape` 关闭与非管理员改密可见性修复 |
 | **可观测性与探针** | 30 余处零散 `console.log`/`console.error`，无脱敏与请求链路追踪，无健康检查端点 | 新增 `infra/logger.ts`（`AsyncLocalStorage` 透传 `requestId/teamId/userId`、支持 `LOG_LEVEL`/`LOG_FORMAT=json|pretty`、递归敏感字段脱敏），替换全部服务端 `console.*`；新增 `/health`、`/ready`（及 `/api/*`）探针 |
 | **交付与 CI/CD** | 无容器化交付配置，仅有 Windows Release 流程 | 新增多阶段非 root `Dockerfile`、`.dockerignore`、`docker-compose.yml`、`.github/workflows/ci.yml`；重写 `README.md`、`README_EN.md` 并新增 `ARCHITECTURE.md` |
-| **自动化测试覆盖** | 仅手工驱动回归脚本（`tools/`），无单元测试或进程内集成测试 | 新增 `node:test` 单元测试 `19/19` + 进程内集成测试 `7/7`，且原有 `tools/run-tests.cjs` 全量回归 `45/45` 全部通过（含 Playwright UI E2E） |
+| **自动化测试覆盖** | 仅手工驱动回归脚本（`tools/`），无单元测试或进程内集成测试 | 新增 `node:test` 单元测试 `20/20` + 进程内集成测试 `8/8`，且原有 `tools/run-tests.cjs` 全量回归 `45/45` 与 `test-round1..4` 全部通过（含 Playwright UI E2E） |
 
 ---
 
@@ -42,7 +42,7 @@
   - 新增 `shared/{money,csv}.ts`、`infra/{errors,validate,tx,audit-log,idempotency}.ts`、`middleware/{rbac,security}.ts`、`routes/audit.ts`。
   - 实现 `schema_migrations` (`V1..V3`)、CLI `tools/db-migrate.cjs` 与 `tools/db-seed.cjs`（默认生成一次性高熵密码，或由 `SEED_ADMIN_PASS` 传入，不硬编码口令）。
   - 完成前端 `web/css/app.css` 抽离、`v-html` 清理、`X-Request-Id` 透传、操作审计管理面板与无障碍基础增强。
-  - 新增 `enterprise-hardening.unit.test.ts` (`6` 项) 与 `enterprise-api.test.ts` (`5` 套端到端集成校验)。
+  - 新增 `enterprise-hardening.unit.test.ts` (`7` 项) 与 `enterprise-api.test.ts` (`6` 套端到端集成校验)。
 - **关键决策与重大隐患修复**：
   - *决策（务实不拆分）*：保持单体 Express + SQLite WAL，不引入 ORM 或外部队列/缓存中间件，避免破坏单文件便携性与 `node:sqlite` 零原生依赖优势。
   - *决策（兼容已有契约）*：保留 `auth.ts` 的 `safeHandler` 导入规范、保留 `index.ts` 内 `!res.getHeader('content-encoding')` 字面守卫、保留 `settings.ts` 导出 `BILL_NO_PREFIXES` 与 `price_memory` 旧表结构，确保与存量客户端及 Electron 托管兼容。
@@ -55,15 +55,19 @@
   - 新增 `observability.unit.test.ts` (`3` 项) 与 `health-observability.test.ts` (`2` 项)。
   - 交付多阶段非 root `Dockerfile`、`.dockerignore`、`docker-compose.yml`、`.github/workflows/ci.yml`、`ARCHITECTURE.md`，并同步更新 `README.md` 与 `README_EN.md`。
 
-### Phase 5：独立红队终审与端到端回归
-- 以苛刻外部审计视角对 `master..HEAD`（74 个变更文件）执行全量静态与安全核查，未发现硬编码密钥、调试残留、`any`/`@ts-ignore`/`eslint-disable`/`TODO`/`FIXME` 或空 `catch` 块。
-- 按新版 `README.md` 从零执行依赖漏洞审计、Lint、严格类型检查、格式化检查、构建、单元与集成测试、独立库迁移/幂等种子脚本、以及隔离数据目录全量 `45/45` 业务/UI 端到端回归与实时浏览器零报错冒烟验证。
+### Phase 5：独立红队终审、缺陷修复与全量回归
+- 以苛刻外部审计视角对 `master..HEAD` 执行全量静态、边界与对抗测试，修复了复审中暴露的多项高/中危边界问题：
+  - 容器与 CI 安装契约：`Dockerfile` 补齐复制 `pnpm-workspace.yaml` 与 `.npmrc`，`Dockerfile` 与 `.github/workflows/ci.yml` 统一升级至 `pnpm@12.23.0`，并在离线沙箱验证 `pnpm install --frozen-lockfile --offline` 通过。
+  - 配置与边界精度：`env.ts` 支持 `PORT` 回落历史 `ORANGE_PORT`；`shared/money.ts` 修复 `roundQty`/`sumQty` 负数非对称舍入与 `-0`；`doc-service.ts`/`routes/docs.ts`/`product-import-service.ts` 拦截原型链键名（`Object.hasOwn`）、非对象项、极小数量归零、`date: ""` 空串落库、`doc/audit` 非法 ID（返回 `400`）与并发明细锁内重放 `Idempotent-Replayed` 头及 `doc/void` 错误透出。
+  - 结算、档案与传统路由加固：`settlement.ts`、`crud.ts`、`routes/archives.ts`、`auth.ts`、`backup.ts`、`settings.ts`、`price.ts`（修复 `kw` 搜索时 `COUNT(*)` 漏 `JOIN product`）、`docimport.ts`、`stock.ts`、`report.ts`、`jxc-report.ts`、`aging.ts`、`dashboard.ts`、`safe-handler.ts` 统一收敛至 `{ error, code, requestId }`，修复结算更新/删除锁外读取与校验、`crud` 负价格与非法外键、及 `requireAuth` 日志 `teamId`/`userId` 透传与前端 `01-api.js` `download` 401/requestId 对齐。
+  - 文档同步：修正 `ARCHITECTURE.md`、`README.md`、`README_EN.md` 与真实路由、成本计算及 `setting` 表存储一致。
+- 按新版 `README.md` 从零执行依赖漏洞审计、Lint、严格类型检查、格式化检查、构建、单元与集成测试、独立库迁移/幂等种子脚本、以及隔离数据目录全量 `45/45` 业务/UI 端到端回归、`test-round1..4` 与实时浏览器零报错冒烟验证。
 
 ---
 
 ## 3. 真实执行过的验证命令与最终结果
 
-以下全部命令均在最终代码提交后真实执行并记录实际结果（不跳过、不删改任何断言）：
+以下全部命令均在最终修复后真实执行并记录实际结果（不跳过、不删改任何断言）：
 
 | 验证项 | 执行命令 | 真实结果 |
 | --- | --- | --- |
@@ -72,18 +76,19 @@
 | 严格类型检查 | `npx pnpm run typecheck` (`tsc --noEmit -p server/tsconfig.json`) | 0 errors (exit 0) |
 | 代码风格检查 | `npx pnpm run format:check` | `All matched files use Prettier code style!` (exit 0) |
 | 后端生产编译 | `npx pnpm run build` | 编译成功至 `dist/server/` (exit 0) |
-| 单元测试套件 | `npx pnpm run test:unit` | **`19 / 19` PASS**（`baseline` 10 + `enterprise-hardening` 6 + `observability` 3） |
-| HTTP 集成测试 | `npx pnpm run test:integration` | **`7 / 7` PASS**（`enterprise-api` 5 + `health-observability` 2） |
-| 迁移与幂等种子 CLI | `ORANGE_DATA_DIR=/tmp/p5-readme-db npx pnpm run db:migrate` + `SEED_ADMIN_PASS='...' npx pnpm run db:seed` (连续执行 2 次) | 已应用 `V1:001_baseline_schema, V2:002_price_memory_schema, V3:003_audit_log_and_idempotency`；首次写入 `teamId=1`，第二次检测已有账套幂等跳过 |
-| 实时 JSON 日志与脱敏冒烟 | `LOG_FORMAT=json LOG_LEVEL=debug PORT=7748 node dist/server/index.js` + 请求 `/health`、`/ready`、`/api/auth/register` (`X-Request-Id: p4-live-req-1`) | `/health` 返回 `200 ok`、`/ready` 返回 `200 ready (schemaVersion: 3)`、JSON 日志精准携带 `requestId` 且明文密码未泄露 |
-| 实时全量业务与 Playwright UI 回归 | 启动 `PORT=7741 ORANGE_DATA_DIR=/tmp/huimin-p5-verify node dist/server/index.js`，探活 `/health` & `/ready` 后执行 `node tools/run-tests.cjs` + Playwright 打开首页查控制台 | **`聚合结果：通过 45 / 45，全部通过`**（含 `regression 92/92`、`test-auth-batch2 83/83`、`test-backup-db-batch2 60/60`、`test-ui-e2e 13/13`、`test-ui-v027-behavior 11/11`、`test-ui-flow [ok]`；注：`test-doc-import-robust` 脚本自身输出 `通过 19 / 19，跳过 2`）；浏览器首页 `UI CONSOLE ERRORS: []` |
-| `master..HEAD` 静态审计 | 扫描 `TODO/FIXME/NotImplemented/@ts-ignore/eslint-disable/debugger`、`:\s*any`/`as any`、空 `catch` 块、diff 新增硬编码密钥、服务端 `console.*` | 全部命中 0 条真实违规（仅 `config/env.ts:307` 提示文本含生成命令示例 `console.log(...)`） |
+| 单元测试套件 | `npx pnpm run test:unit` | **`20 / 20` PASS**（`baseline` 10 + `enterprise-hardening` 7 + `observability` 3） |
+| HTTP 集成测试 | `npx pnpm run test:integration` | **`8 / 8` PASS**（`enterprise-api` 6 + `health-observability` 2） |
+| Dockerfile 拷贝集安装校验 | 独立临时目录仅复制 `package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc` 执行 `npx pnpm install --frozen-lockfile --offline --ignore-scripts` | `Done in 192ms using pnpm v12.23.0` (exit 0) |
+| 迁移与幂等种子 CLI | `ORANGE_DATA_DIR=<tmp> npx pnpm run db:migrate` + `db:seed` (连续执行 2 次) | 已应用 `V1:001_baseline_schema, V2:002_price_memory_schema, V3:003_audit_log_and_idempotency`；首次写入 `teamId=1`，第二次检测已有账套幂等跳过 |
+| 全量业务与 Playwright UI 回归 | 启动隔离服务 `PORT=7749 NODE_ENV=production LOG_FORMAT=json node dist/server/index.js`，执行 `node tools/run-tests.cjs` | **`聚合结果：通过 45 / 45，全部通过`**（含 `regression 92/92`、`test-auth-batch2`、`test-backup-db-batch2 60/60`、`test-ui-e2e`、`test-ui-v027-behavior`、`test-ui-flow` 等；注：`test-doc-import-robust` 内部因 Linux 沙箱无 PowerShell 且无 `.tools/import-test/real.xlsx` 跳过 2 项并打印 `通过 19 / 19，跳过 2`，而 GBK CSV 在 `test-xlsx-limit-batch3` 与 `test-round2` 中实测通过） |
+| 对抗与端到端专项测试集 | 在隔离服务上 `node tools/rebuild-clean.cjs` 后依次执行 `test-round1..4` | `test-round1` **`25 / 25`**、`test-round2` **`27 / 27`**、`test-round3` **`39 / 39`**、`test-round4` **`24 / 24`** (全部 exit 0) |
+| 实时浏览器零报错与 JSON 日志 | Playwright 登录后台并巡检多页面路由 + 校验 `LOG_FORMAT=json` 输出 | `consoleErrors: 0, pageErrors: 0`；44/44 行有效 JSON、39 行精确携带 `teamId` & `userId` & `requestId`、零密钥明文泄露 |
+| `master..HEAD` 静态审计 | 扫描全部变更/新增文件的 `TODO/FIXME/NotImplemented/@ts-ignore/eslint-disable`、`any`、空 `catch`、`Math.random`、服务端 `console.*` | 仅 `config/env.ts` 密钥生成提示文案含 `console.log(...)`，其余全部 0 命中 |
 
 ### 未能在本环境实测的项目（如实披露）
-1. **Docker 镜像构建与 Compose 启动 (`Dockerfile` / `docker-compose.yml`)**：当前执行环境中未安装 Docker CLI / 守护进程（`no-docker`），未执行 `docker build` / `docker compose up` 实测，需在具备 Docker 引擎的构建机/宿主机执行一次 `docker compose up -d --build` 并核验 `/health` 与 `/ready`。
+1. **Docker 镜像构建与 Compose 启动 (`Dockerfile` / `docker-compose.yml`)**：当前执行环境中未安装 Docker CLI / 守护进程（`no-docker`），仅在本地离线沙箱实测了 `Dockerfile` `COPY` 文件清单与 `pnpm install --frozen-lockfile --offline` 安装流程，尚未执行 `docker build` / `docker compose up`，需在具备 Docker 引擎的主机执行一次 `docker compose up -d --build` 并核验 `/health` 与 `/ready`。
 2. **GitHub Actions CI (`ci.yml`) 远端 Runner**：已在本地完整跑通全部 CI 步骤命令，尚未在 GitHub Actions `ubuntu-latest` 上实际触发。
 3. **Electron 桌面 GUI 托盘与 Windows 安装包构建**：当前为无桌面图形界面的 Linux 沙箱且无 Windows NSIS 工具链，未实测 `pnpm run dev:electron` 托盘交互及 `pnpm run dist:electron`。
-4. **对抗专项合集 `node tools/run-tests.cjs --with-rounds`**：默认回归运行 45 个主脚本（已全绿），与主序列存在示范数据命名冲突的 4 个 `test-round1..4` 脚本未另行单独触发。
 
 ---
 

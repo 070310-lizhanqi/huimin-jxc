@@ -6,6 +6,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
+import { sendError } from './infra/errors';
+import { parseOptionalPositiveInt } from './infra/validate';
 import {
   allocateDocDiscounts,
   roundHalfAwayFromZero,
@@ -83,15 +85,19 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   // partnerId 可选过滤：按单个客户看日销售（测试与「看某客户当日成交」场景共用）
   router.get('/report/sales', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
+    const partnerRes = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
+    if (!partnerRes.ok) return sendError(req, res, 400, partnerRes.error, 'VALIDATION_ERROR');
     const { from, to } = range;
     const conds = ['d.teamId = ?', "d.status = 'audit'", "d.type IN ('stockout', 'sret')", 'd.date >= ?', 'd.date <= ?'];
     const args: Value[] = [teamId, from, to];
-    if (req.query.partnerId) {
+    if (partnerRes.value !== null) {
       conds.push('d.partnerId = ?');
-      args.push(Number(req.query.partnerId));
+      args.push(partnerRes.value);
     }
     const days = db
       .prepare(
@@ -124,9 +130,11 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   // 折扣按行金额占比分摊，单内尾差归该单金额最大的行，保证 Σ行分摊 = 整单折扣。
   router.get('/report/product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
     const { from, to } = range;
     // 按 (单据, 商品) 聚合，带上整单折扣用于分摊（毛额由各分摊行合计得出，无需子查询）
     const lines = db
@@ -237,9 +245,11 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   // 保证客户排行合计 = 净销售额，与按日/商品口径一致）
   router.get('/report/customer', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
     const { from, to } = range;
     const rows = db
       .prepare(

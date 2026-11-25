@@ -61,6 +61,13 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
       assert.equal(roundHalfAwayFromZero(-1.5), -2);
       assert.equal(roundHalfAwayFromZero(1.5), 2);
       assert.equal(roundHalfAwayFromZero(-0.5), -1);
+      // Negative symmetric rounding and zero without -0
+      assert.equal(roundQty(-0.00005), -0.0001);
+      assert.equal(roundQty(0.00005), 0.0001);
+      assert.equal(sumQty([-0.00005, -0.00005]), -0.0002);
+      assert.equal(sumQty([0.00005, 0.00005]), 0.0002);
+      assert.equal(Object.is(roundQty(-0.00001), 0), true);
+      assert.equal(Object.is(sumQty([-0.00001]), 0), true);
     });
 
     it('allocates document-level discounts across lines with exact cent conservation', () => {
@@ -201,8 +208,42 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
         };
         assert.equal(prod.purchasePrice, 250);
         assert.equal(prod.salePrice, 400);
+
+        const nonObjectRes = importProducts(db, teamId, [
+          null as unknown as Record<string, unknown>,
+          { name: '空行后合法商品', salePrice: '9.90' },
+        ]);
+        assert.equal(nonObjectRes.total, 2);
+        assert.equal(nonObjectRes.success, 1);
+        assert.equal(nonObjectRes.errors.length, 1);
       } finally {
         db.close();
+      }
+    });
+  });
+
+  describe('config/env ORANGE_PORT legacy fallback', () => {
+    it('falls back to ORANGE_PORT when PORT is unset and prioritizes PORT when set', () => {
+      const prevPort = process.env.PORT;
+      const prevOrangePort = process.env.ORANGE_PORT;
+      try {
+        delete process.env.PORT;
+        process.env.ORANGE_PORT = '18888';
+        resetConfigForTest();
+        const cfg1 = initConfig({ persistSecret: false });
+        assert.equal(cfg1.port, 18888);
+
+        process.env.PORT = '17777';
+        resetConfigForTest();
+        const cfg2 = initConfig({ persistSecret: false });
+        assert.equal(cfg2.port, 17777);
+      } finally {
+        if (prevPort === undefined) delete process.env.PORT;
+        else process.env.PORT = prevPort;
+        if (prevOrangePort === undefined) delete process.env.ORANGE_PORT;
+        else process.env.ORANGE_PORT = prevOrangePort;
+        resetConfigForTest();
+        initConfig({ persistSecret: false });
       }
     });
   });

@@ -15,16 +15,22 @@ export const QTY_MAX = 9_999_999;
 export const MAX_TOTAL_AMOUNT_CENTS = 1e11;
 
 export function roundQty(n: number): number {
-  return Math.round((n + Number.EPSILON) * QTY_SCALE) / QTY_SCALE;
+  if (n === 0) return 0;
+  const sign = n < 0 ? -1 : 1;
+  const res = (sign * Math.round((Math.abs(n) + Number.EPSILON) * QTY_SCALE)) / QTY_SCALE;
+  return res === 0 ? 0 : res;
 }
 
 /** 整数化缩放求和，避免循环内 0.1 + 0.2 类浮点尾差累积 */
 export function sumQty(values: Iterable<number>): number {
   let scaled = 0;
   for (const v of values) {
-    scaled += Math.round((v + Number.EPSILON) * QTY_SCALE);
+    if (v === 0) continue;
+    const sign = v < 0 ? -1 : 1;
+    scaled += sign * Math.round((Math.abs(v) + Number.EPSILON) * QTY_SCALE);
   }
-  return scaled / QTY_SCALE;
+  const res = scaled / QTY_SCALE;
+  return res === 0 ? 0 : res;
 }
 
 /**

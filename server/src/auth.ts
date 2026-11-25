@@ -14,8 +14,9 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { localDate } from './db';
 import { safeHandler } from './safe-handler';
 import { getConfig } from './config/env';
-import { recordAudit, recordAuditFromRequest } from './infra/audit-log';
-import { logger } from './infra/logger';
+import { extractClientIp, recordAudit, recordAuditFromRequest } from './infra/audit-log';
+import { defaultCodeForStatus, sendError } from './infra/errors';
+import { logger, updateLogContext } from './infra/logger';
 import { parsePositiveInt } from './infra/validate';
 
 /** 令牌有效期（秒）：7 天 */
@@ -252,18 +253,19 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const token = readToken(req);
   const user = token ? verifyToken(token) : null;
   if (!user) {
-    res.status(401).json({ error: '未登录或登录已过期，请重新登录' });
+    sendError(req, res, 401, '未登录或登录已过期，请重新登录', 'UNAUTHORIZED');
     return;
   }
   // 令牌版本比对：改密、删除账号后旧令牌立即失效（无此机制时旧令牌最长仍可用 7 天）
   if (stmtTokenVer) {
     const row = stmtTokenVer.get(user.userId) as { tokenVer: number } | undefined;
     if (!row || user.ver !== row.tokenVer) {
-      res.status(401).json({ error: '登录凭证已变更，请重新登录' });
+      sendError(req, res, 401, '登录凭证已变更，请重新登录', 'UNAUTHORIZED');
       return;
     }
   }
   req.auth = user;
+  updateLogContext({ userId: user.userId, teamId: user.teamId });
   // 团队隔离：把请求里的 teamId 统一覆盖为令牌中的 teamId，下游路由无需改动
   if (req.query && typeof req.query === 'object') {
     (req.query as Record<string, unknown>).teamId = String(user.teamId);
@@ -401,7 +403,7 @@ function tooManyRegisters(ip: string): boolean {
 }
 
 function clientIp(req: Request): string {
-  return req.socket.remoteAddress ?? 'unknown';
+  return extractClientIp(req);
 }
 
 /* ---------------- 认证路由 ---------------- */
@@ -585,16 +587,16 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     // 注册接口按 IP 做总频率限速（不区分成败）：teamCount=0 时若不限速，
     // 攻击者可无限重试直到抢到首个管理员
     if (tooManyRegisters(clientIp(req))) {
-      return res.status(429).json({ error: '注册请求过于频繁，请 1 分钟后再试' });
+      return sendError(req, res, 429, '注册请求过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
     }
-    const username = String(req.body.username ?? '').trim();
-    const password = String(req.body.password ?? '');
-    const teamName = String(req.body.teamName ?? '').trim();
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const teamName = typeof req.body?.teamName === 'string' ? req.body.teamName.trim() : '';
     // 失败计数 key 按 ip:username：NAT 出口下一人爆破不再封锁整个公司
     const failKey = `${clientIp(req)}:${username}`;
     const fail = (status: number, error: string) => {
       recordFail(failKey);
-      return res.status(status).json({ error });
+      return sendError(req, res, status, error, defaultCodeForStatus(status));
     };
     if (tooManyFails(failKey)) {
       return fail(429, '尝试过于频繁，请 1 分钟后再试');
@@ -607,23 +609,11 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
 
     /**
      * B-安2 + B-安3：注册原子化 + 首注册竞态。
-     * “建 team + 默认档案 + 建 user”包进一个 BEGIN IMMEDIATE … COMMIT 事务，
-     * 失败则 ROLLBACK——用户插入失败不再留下“无主账套”，首个管理员路径
-     * 不会被一次失败注册永久关闭。
-     * 事务内不做任何 await：node:sqlite 是同步 API，await 期间会长时间持写锁；
-     * 密码哈希（scrypt，异步）与邀请码校验（scrypt，异步）一律先在事务外算好。
-     * 事务开始后、插入前再次 SELECT COUNT(*) 重查 teamCount（B-安3），
-     * 两个并发首注册只有一个能建成账套。
-     * 注意：用户名重的预检（SELECT）已从事务外去掉——预检与 INSERT 之间
-     * 本就有竞态窗口，真正的兜底是事务内 INSERT 撞唯一索引 idx_user_name
-     * 后 ROLLBACK，返回同一条 400 文案。
      */
     const teamCountOut = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
     // 邀请码配置：事务外读一次（存量明文顺带转哈希，见 B-安14）
     const confOut = await loadRegisterConfMigrated(db);
-    const invite = String(req.body.inviteCode ?? '').trim();
-    // 事务外已校验通过的邀请码（已有账套时必须校验；首注册时若顺带传了
-    // 邀请码也先验一次，供事务内“外面看是 0、里面已变 1”的竞态分支复核）
+    const invite = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
     let inviteVerified = false;
     if (teamCountOut > 0) {
       // 已有账套 → 开放注册默认关闭；开启后凭邀请码创建「独立新账套」（各用各的账套）
@@ -651,7 +641,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       db.exec('BEGIN IMMEDIATE');
     } catch {
       // BEGIN 失败即无事务，不执行 ROLLBACK（与 A-数3 同口径）
-      return res.status(503).json({ error: '系统繁忙，请重试' });
+      return sendError(req, res, 503, '系统繁忙，请重试', 'SERVICE_UNAVAILABLE');
     }
     let teamId: number;
     let userId: number;
@@ -659,8 +649,6 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       // B-安3：事务开始后、插入前再次重查 teamCount，按锁内最新值定分支
       const teamCountIn = (db.prepare('SELECT COUNT(*) AS c FROM team').get() as { c: number }).c;
       if (teamCountIn === 0) {
-        // 没有任何团队 → 首次部署，建团队并初始化默认档案（起账期缺省取本地年月，勿用 UTC）
-        // 起账期格式必须为 YYYYMM：报表按 substr(date,1,6) 与账期比较，脏格式会让所有期间报表错位
         let startPeriod = String(req.body.startPeriod ?? localDate().slice(0, 7).replace('-', ''));
         if (!/^\d{6}$/.test(startPeriod)) {
           const m = String(startPeriod).match(/^(\d{4})-?(\d{1,2})$/);
@@ -702,17 +690,13 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         return fail(ce.status ?? 400, ce.error ?? '注册失败');
       }
       if (String(ce?.message ?? '').includes('UNIQUE constraint failed')) {
-        // 并发注册撞唯一索引 idx_user_name：team 与默认档案已随事务回滚，
-        // teamCount 不变，可重新注册首个管理员
         return fail(400, '该用户名已被使用');
       }
       logger.error('Registration transaction failed', { err: e });
-      return res.status(500).json({ error: '服务器内部错误' });
+      return sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
     }
     const user: AuthUser = { userId, teamId, role: 'admin', name: username, ver: 0 };
-    // 注册成功清空失败计数：避免正常用户首次注册时因前面试错被误锁
     clearFails(failKey);
-    // B-前5：注册也经 Set-Cookie 下发令牌（前端注册后直接进系统，不再读 body token）
     const token = issueToken(user);
     setAuthCookie(req, res, token);
     recordAudit(db, {
@@ -730,24 +714,18 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
 
   /** 登录 */
   router.post('/auth/login', safeHandler(async (req, res) => {
-    const username = String(req.body.username ?? '').trim();
-    const password = String(req.body.password ?? '');
-    if (!username || !password) return res.status(400).json({ error: '请输入用户名和密码' });
-    // B-安4①：先查按用户名全局锁定（不论 IP）。锁定中直接 429，不再计数，
-    // 避免被挡下的尝试自我延续锁定；锁定只针对该用户名。
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!username || !password) return sendError(req, res, 400, '请输入用户名和密码', 'VALIDATION_ERROR');
     if (userTooManyFails(username)) {
-      return res.status(429).json({ error: '该账号登录尝试过于频繁，请 10 分钟后再试' });
+      return sendError(req, res, 429, '该账号登录尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
     }
-    // 失败计数 key 按 ip:username（理由同注册）：爆破单个账号不再误伤 NAT 后的其它账号
     const failKey = `${clientIp(req)}:${username}`;
     if (tooManyFails(failKey)) {
-      // 被 IP 限速挡下也计入全局桶：否则单 IP 攻击下全局计数永远到不了 50 次
       recordUserFail(username);
-      return res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+      return sendError(req, res, 429, '尝试过于频繁，请 1 分钟后再试', 'RATE_LIMITED');
     }
     const row = db.prepare(`SELECT * FROM "user" WHERE name = ?`).get(username) as UserRow | undefined;
-    // A-安6：用户名不存在时也对固定假哈希跑一次 verifyPassword 再返回 401，
-    // 否则“不存在（直接 401）”与“存在（跑一次 scrypt）”的耗时可区分用户是否存在。
     if (!row) {
       await verifyPassword(password, DUMMY_HASH);
       recordFail(failKey);
@@ -760,7 +738,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         ip: clientIp(req),
         detail: { reason: 'invalid_credentials' },
       });
-      return res.status(401).json({ error: '用户名或密码错误' });
+      return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
     }
     if (!(await verifyPassword(password, row.password))) {
       recordFail(failKey);
@@ -774,16 +752,14 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         ip: clientIp(req),
         detail: { reason: 'invalid_credentials' },
       });
-      return res.status(401).json({ error: '用户名或密码错误' });
+      return sendError(req, res, 401, '用户名或密码错误', 'UNAUTHORIZED');
     }
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
       | { id: number; name: string }
       | undefined;
     const user: AuthUser = { userId: row.id, teamId: row.teamId, role: row.role, name: row.name, ver: row.tokenVer };
-    // 登录成功清空失败计数：解锁此前的试错，下次登录不受影响
     clearFails(failKey);
     clearUserFails(username);
-    // B-前5：登录经 Set-Cookie 下发令牌；JSON 里仍返回 token（API 客户端与测试用）
     const token = issueToken(user);
     setAuthCookie(req, res, token);
     recordAudit(db, {
@@ -831,7 +807,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 当前登录信息（前端启动时校验令牌是否还有效） */
   router.get('/auth/me', requireAuth, (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(u.teamId) as
       | { id: number; name: string }
       | undefined;
@@ -848,19 +824,19 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 改密码（需登录） */
   router.post('/auth/password', requireAuth, safeHandler(async (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     // B-安4②：旧密码连续猜错 5 次后冷却 10 分钟（失败计数，不含新密码强度不合格）
     if (pwdChangeLocked(u.userId)) {
-      return res.status(429).json({ error: '改密尝试过于频繁，请 10 分钟后再试' });
+      return sendError(req, res, 429, '改密尝试过于频繁，请 10 分钟后再试', 'RATE_LIMITED');
     }
-    const oldPwd = String(req.body.oldPassword ?? '');
-    const newPwd = String(req.body.newPassword ?? '');
+    const oldPwd = typeof req.body?.oldPassword === 'string' ? req.body.oldPassword : '';
+    const newPwd = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
     const pwdErr = checkPasswordStrength(newPwd, u.name);
-    if (pwdErr) return res.status(400).json({ error: '新' + pwdErr });
+    if (pwdErr) return sendError(req, res, 400, '新' + pwdErr, 'VALIDATION_ERROR');
     const row = db.prepare(`SELECT * FROM "user" WHERE id = ?`).get(u.userId) as UserRow | undefined;
     if (!row || !(await verifyPassword(oldPwd, row.password))) {
       recordPwdChangeFail(u.userId);
-      return res.status(400).json({ error: '原密码不正确' });
+      return sendError(req, res, 400, '原密码不正确', 'VALIDATION_ERROR');
     }
     // 改密后 tokenVer + 1：吊销该用户全部旧令牌（含泄漏在外的），并为当前会话重签新令牌
     db.prepare(`UPDATE "user" SET password = ?, tokenVer = tokenVer + 1 WHERE id = ?`).run(await hashPassword(newPwd), u.userId);
@@ -868,8 +844,6 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const renewed: AuthUser = { userId: u.userId, teamId: u.teamId, role: u.role, name: u.name, ver: fresh?.tokenVer ?? row.tokenVer + 1 };
     // 改密成功清零失败计数
     clearPwdChangeFails(u.userId);
-    // B-前5：改密会吊销旧令牌（tokenVer+1），重签的新令牌经 Set-Cookie 下发，
-    // 否则浏览器里旧 cookie 失效后下一次请求即 401 被踢回登录页
     const renewedToken = issueToken(renewed);
     setAuthCookie(req, res, renewedToken);
     recordAuditFromRequest(db, req, {
@@ -880,40 +854,29 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     return res.json({ ok: true, token: renewedToken });
   }));
 
-  /**
-   * 读注册配置：仅系统所有者（首个账套）的 admin 可看，防止朋友账套的管理员改动全局开关。
-   * B-安14：只返回 enabled 与“是否已设置”（hasInviteCode），不再回显明文邀请码。
-   * 读到存量明文行时顺带转哈希（首次读取即迁移）。
-   */
   router.get('/auth/register-conf', requireAuth, safeHandler(async (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
-      return res.status(403).json({ error: '只有系统所有者（首个账套）的管理员可以管理注册配置' });
+      return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
     }
     const conf = await loadRegisterConfMigrated(db);
     return res.json({ enabled: conf.enabled, hasInviteCode: !!conf.inviteCodeHash });
   }));
 
-  /**
-   * 写注册配置：邀请码只存 scrypt 哈希，永不回显明文。
-   * E 组契约：前端在“邀请码已设置且输入框留空”时只发 { enabled: true }、
-   * 不带 inviteCode——此时保持原哈希不变，不要 400；只有“开启且从未设置
-   * 邀请码”时才要求提供新码。关闭注册时清掉哈希。
-   */
   router.post('/auth/register-conf', requireAuth, safeHandler(async (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
     if (u.role !== 'admin' || u.teamId !== OWNER_TEAM) {
-      return res.status(403).json({ error: '只有系统所有者（首个账套）的管理员可以管理注册配置' });
+      return sendError(req, res, 403, '只有系统所有者（首个账套）的管理员可以管理注册配置', 'FORBIDDEN');
     }
-    const enabled = req.body.enabled === true;
-    const inviteCode = String(req.body.inviteCode ?? '').trim();
+    const enabled = req.body?.enabled === true;
+    const inviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
     const existing = await loadRegisterConfMigrated(db);
     if (enabled) {
       if (inviteCode) {
         if (!/^[A-Za-z0-9-]{6,32}$/.test(inviteCode)) {
-          return res.status(400).json({ error: '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）' });
+          return sendError(req, res, 400, '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）', 'VALIDATION_ERROR');
         }
         saveRegisterConf(db, { enabled: true, inviteCodeHash: await hashPassword(inviteCode) });
         recordAuditFromRequest(db, req, {
@@ -924,9 +887,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         });
         return res.json({ ok: true, enabled: true, hasInviteCode: true });
       }
-      // 未提供新码：已设置则保持原哈希不变；从未设置则 400
       if (!existing.inviteCodeHash) {
-        return res.status(400).json({ error: '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）' });
+        return sendError(req, res, 400, '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）', 'VALIDATION_ERROR');
       }
       saveRegisterConf(db, { enabled: true, inviteCodeHash: existing.inviteCodeHash });
       recordAuditFromRequest(db, req, {
@@ -950,8 +912,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 团队内用户列表：仅管理员可看（员工账号信息也是敏感数据） */
   router.get('/auth/users', requireAuth, (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
-    if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以查看用户列表' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+    if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以查看用户列表', 'FORBIDDEN');
     const rows = db
       .prepare(`SELECT id, name, role, createdAt FROM "user" WHERE teamId = ? ORDER BY id`)
       .all(u.teamId);
@@ -961,19 +923,18 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 管理员新增同团队用户 */
   router.post('/auth/users', requireAuth, safeHandler(async (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
-    if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以添加用户' });
-    const username = String(req.body.username ?? '').trim();
-    const password = String(req.body.password ?? '');
-    // B-安6：默认角色改为权限最小的 clerk，只有显式传 'admin' 才建管理员
-    // （此前漏传 role 字段即静默产生新管理员，与最小权限原则相反）
-    const role = req.body.role === 'admin' ? 'admin' : 'clerk';
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+    if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以添加用户', 'FORBIDDEN');
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const rawRole = req.body?.role;
+    const role = rawRole === 'admin' ? 'admin' : 'clerk';
     const nameErr = checkUsername(username);
-    if (nameErr) return res.status(400).json({ error: nameErr });
+    if (nameErr) return sendError(req, res, 400, nameErr, 'VALIDATION_ERROR');
     const pwdErr = checkPasswordStrength(password, username);
-    if (pwdErr) return res.status(400).json({ error: pwdErr });
+    if (pwdErr) return sendError(req, res, 400, pwdErr, 'VALIDATION_ERROR');
     const dup = db.prepare(`SELECT id FROM "user" WHERE name = ?`).get(username);
-    if (dup) return res.status(400).json({ error: '该用户名已被使用' });
+    if (dup) return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
     const hashed = await hashPassword(password);
     let info: { lastInsertRowid: number | bigint };
     try {
@@ -981,8 +942,7 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         .prepare(`INSERT INTO "user" (teamId, name, role, password, createdAt) VALUES (?, ?, ?, ?, ?)`)
         .run(u.teamId, username, role, hashed, new Date().toISOString());
     } catch {
-      // 并发新增撞唯一索引 idx_user_name（预检与 INSERT 之间有竞态窗口）
-      return res.status(400).json({ error: '该用户名已被使用' });
+      return sendError(req, res, 400, '该用户名已被使用', 'VALIDATION_ERROR');
     }
     const newUserId = Number(info.lastInsertRowid);
     recordAuditFromRequest(db, req, {
@@ -997,19 +957,19 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
   /** 管理员删除同团队用户（不能删自己，避免把最后一个管理员删掉） */
   router.delete('/auth/users/:id', requireAuth, (req, res) => {
     const u = req.auth;
-    if (!u) return res.status(401).json({ error: '未登录' });
-    if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以删除用户' });
+    if (!u) return sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
+    if (u.role !== 'admin') return sendError(req, res, 403, '只有管理员可以删除用户', 'FORBIDDEN');
     const idParsed = parsePositiveInt(req.params.id, '用户 ID');
-    if (!idParsed.ok) return res.status(400).json({ error: '用户 ID 无效' });
+    if (!idParsed.ok) return sendError(req, res, 400, '用户 ID 无效', 'VALIDATION_ERROR');
     const id = idParsed.value;
-    if (id === u.userId) return res.status(400).json({ error: '不能删除当前登录账号' });
+    if (id === u.userId) return sendError(req, res, 400, '不能删除当前登录账号', 'VALIDATION_ERROR');
     const row = db.prepare(`SELECT id, name, role FROM "user" WHERE id = ? AND teamId = ?`).get(id, u.teamId) as
       | { id: number; name: string; role: string }
       | undefined;
-    if (!row) return res.status(404).json({ error: '用户不存在' });
+    if (!row) return sendError(req, res, 404, '用户不存在', 'NOT_FOUND');
     if (row.role === 'admin') {
       const admins = (db.prepare(`SELECT COUNT(*) AS c FROM "user" WHERE teamId = ? AND role = 'admin'`).get(u.teamId) as { c: number }).c;
-      if (admins <= 1) return res.status(400).json({ error: '至少保留一个管理员' });
+      if (admins <= 1) return sendError(req, res, 400, '至少保留一个管理员', 'VALIDATION_ERROR');
     }
     db.prepare(`DELETE FROM "user" WHERE id = ? AND teamId = ?`).run(id, u.teamId);
     recordAuditFromRequest(db, req, {

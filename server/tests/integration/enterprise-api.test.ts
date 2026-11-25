@@ -423,4 +423,237 @@ describe('Phase 3 Integration Tests: Security, Validation, Concurrency, Idempote
     assert.equal(allDetails.includes('ClerkPassNew!2026'), false);
     assert.equal(allDetails.includes('StrongAdmin!2026'), false);
   });
+
+  it('rejects prototype/non-object/negative/out-of-range inputs and preserves unified error envelopes', async () => {
+    // 1. Auth non-string username -> 400 VALIDATION_ERROR with code + requestId (no 500 or array coercion)
+    const badLogin = await req('/api/auth/login', {
+      method: 'POST',
+      body: { username: ['adminboss'], password: 'StrongAdmin!2026' },
+    });
+    assert.equal(badLogin.status, 400);
+    assert.equal(badLogin.json.code, 'VALIDATION_ERROR');
+    assert.ok(badLogin.json.requestId);
+
+    // 2. doc/create edge cases: Object.prototype key, non-object item, near-zero qty, object remark, empty date
+    const protoDoc = await req('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        type: 'toString',
+        warehouseId: whId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    });
+    assert.equal(protoDoc.status, 400);
+
+    const nullItemDoc = await req('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: { type: 'stockin', warehouseId: whId, partnerType: 'ven', partnerId: venId, items: [null] },
+    });
+    assert.equal(nullItemDoc.status, 400);
+
+    const tinyQtyDoc = await req('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        type: 'stockin',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 0.00001, price: 100 }],
+      },
+    });
+    assert.equal(tinyQtyDoc.status, 400);
+
+    const objRemarkDoc = await req('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        type: 'stockin',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        remark: { nested: 1 },
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    });
+    assert.equal(objRemarkDoc.status, 400);
+    assert.equal(objRemarkDoc.json.code, 'VALIDATION_ERROR');
+
+    // Empty date normalizes to today's valid YYYY-MM-DD rather than storing ''
+    const emptyDateDoc = await req<{ id: number; billNo: string }>('/api/doc/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        type: 'stockin',
+        date: '',
+        warehouseId: whId,
+        partnerType: 'ven',
+        partnerId: venId,
+        items: [{ productId: prodId, qty: 1, price: 100 }],
+      },
+    });
+    assert.equal(emptyDateDoc.status, 200);
+    const createdDocRow = db.prepare('SELECT date FROM doc WHERE id = ?').get(emptyDateDoc.json.id) as { date: string };
+    assert.match(createdDocRow.date, /^\d{4}-\d{2}-\d{2}$/);
+
+    // 3. doc/audit invalid id returns 400 (not 404), and concurrent/replay sets Idempotent-Replayed header
+    const badAuditId = await req('/api/doc/audit', {
+      method: 'POST',
+      token: adminToken,
+      body: { id: 'abc' },
+    });
+    assert.equal(badAuditId.status, 400);
+    assert.equal(badAuditId.json.code, 'VALIDATION_ERROR');
+
+    const auditAgain = await req<{ id: number }>('/api/doc/audit', {
+      method: 'POST',
+      token: adminToken,
+      headers: { 'Idempotency-Key': 'idem-audit-in-001' },
+      body: { id: emptyDateDoc.json.id },
+    });
+    // Different docId -> 409 CONFLICT for reused key on different payload
+    assert.equal(auditAgain.status, 409);
+
+    const auditSame = await req<{ ok: boolean }>('/api/doc/audit', {
+      method: 'POST',
+      token: adminToken,
+      headers: { 'Idempotency-Key': 'idem-audit-regress-001' },
+      body: { id: emptyDateDoc.json.id },
+    });
+    assert.equal(auditSame.status, 200);
+    const auditReplay = await req<{ ok: boolean }>('/api/doc/audit', {
+      method: 'POST',
+      token: adminToken,
+      headers: { 'Idempotency-Key': 'idem-audit-regress-001' },
+      body: { id: emptyDateDoc.json.id },
+    });
+    assert.equal(auditReplay.status, 200);
+    assert.equal(auditReplay.headers.get('idempotent-replayed'), 'true');
+
+    // 4. CRUD validation: invalid parentId, negative prices/lowQty
+    const badCat = await req('/api/cat', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '非法父类目', parentId: 'abc' },
+    });
+    assert.equal(badCat.status, 400);
+
+    const negPriceProd = await req('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '负价商品', salePrice: -100 },
+    });
+    assert.equal(negPriceProd.status, 400);
+
+    const negLowQtyProd = await req('/api/product', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '负预警商品', lowQty: -1 },
+    });
+    assert.equal(negLowQtyProd.status, 400);
+
+    // 5. Settlement create with empty date, invalid PUT accountId/remark, concurrent DELETE atomicity
+    const accBefore = (db.prepare('SELECT balance FROM account WHERE id = ?').get(accId) as { balance: number })
+      .balance;
+    const settleEmptyDate = await req<{ id: number }>('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'receipt',
+        partnerType: 'cus',
+        partnerId: cusId,
+        amount: 1200,
+        accountId: accId,
+        date: '',
+      },
+    });
+    assert.equal(settleEmptyDate.status, 200);
+    const settleRow = db
+      .prepare('SELECT date, accountId FROM settlement WHERE id = ?')
+      .get(settleEmptyDate.json.id) as {
+      date: string;
+      accountId: number;
+    };
+    assert.match(settleRow.date, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(settleRow.accountId, accId);
+
+    const badSettlePut = await req(`/api/settlement/${settleEmptyDate.json.id}`, {
+      method: 'PUT',
+      token: adminToken,
+      body: { teamId, amount: 1500, accountId: 'abc' },
+    });
+    assert.equal(badSettlePut.status, 400);
+    assert.equal(badSettlePut.json.code, 'VALIDATION_ERROR');
+    assert.ok(badSettlePut.json.requestId);
+
+    const accAfterBadPut = (db.prepare('SELECT balance FROM account WHERE id = ?').get(accId) as { balance: number })
+      .balance;
+    assert.equal(accAfterBadPut, accBefore + 1200);
+
+    // Concurrent DELETE: only one succeeds (200), second returns 404, balance reverts strictly once
+    const [del1, del2] = await Promise.all([
+      req(`/api/settlement/${settleEmptyDate.json.id}`, { method: 'DELETE', token: adminToken }),
+      req(`/api/settlement/${settleEmptyDate.json.id}`, { method: 'DELETE', token: adminToken }),
+    ]);
+    assert.deepEqual([del1.status, del2.status].sort(), [200, 404]);
+    const accAfterDelete = (db.prepare('SELECT balance FROM account WHERE id = ?').get(accId) as { balance: number })
+      .balance;
+    assert.equal(accAfterDelete, accBefore);
+
+    // 6. Price, settings, backup & report unified error contracts & validation fixes
+    const badPriceSet = await req('/api/price/set', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, partnerId: cusId, productId: prodId, price: '' },
+    });
+    assert.equal(badPriceSet.status, 400);
+    assert.equal(badPriceSet.json.code, 'VALIDATION_ERROR');
+    assert.ok(badPriceSet.json.requestId);
+
+    const priceListKw = await req<{ rows: unknown[]; total: number }>(
+      `/api/price/list?teamId=${teamId}&kw=${encodeURIComponent('测试')}`,
+      { token: adminToken },
+    );
+    assert.equal(priceListKw.status, 200);
+
+    const badPriceDel = await req(`/api/price/abc?teamId=${teamId}`, {
+      method: 'DELETE',
+      token: adminToken,
+    });
+    assert.equal(badPriceDel.status, 400);
+
+    const arrPrefix = await req('/api/setting/prefix', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, prefix: ['RK'] },
+    });
+    assert.equal(arrPrefix.status, 400);
+    assert.equal(arrPrefix.json.code, 'VALIDATION_ERROR');
+    assert.ok(arrPrefix.json.requestId);
+
+    const badPrint = await req('/api/setting/print', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, print: { company: {} } },
+    });
+    assert.equal(badPrint.status, 400);
+
+    const badBackupDl = await req('/api/backup/download?file=../etc/passwd', { token: adminToken });
+    assert.equal(badBackupDl.status, 400);
+    assert.equal(badBackupDl.json.code, 'VALIDATION_ERROR');
+    assert.ok(badBackupDl.json.requestId);
+
+    const badReportSales = await req('/api/report/sales?from=bad-date', { token: adminToken });
+    assert.equal(badReportSales.status, 400);
+    assert.equal(badReportSales.json.code, 'VALIDATION_ERROR');
+    assert.ok(badReportSales.json.requestId);
+
+    const badStatement = await req('/api/report/statement?partnerId=abc', { token: adminToken });
+    assert.equal(badStatement.status, 400);
+    assert.equal(badStatement.json.code, 'VALIDATION_ERROR');
+    assert.ok(badStatement.json.requestId);
+  });
 });

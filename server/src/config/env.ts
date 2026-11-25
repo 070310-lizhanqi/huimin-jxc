@@ -242,7 +242,8 @@ export function validateConfig(rawEnv: NodeJS.ProcessEnv, options: ValidateConfi
   }
   const nodeEnv = (VALID_NODE_ENVS.has(rawNodeEnv) ? rawNodeEnv : 'development') as NodeEnv;
 
-  const port = parseIntRange(rawEnv.PORT, 7741, 1, 65535, 'PORT', errors);
+  const rawPort = rawEnv.PORT !== undefined && rawEnv.PORT.trim() !== '' ? rawEnv.PORT : rawEnv.ORANGE_PORT;
+  const port = parseIntRange(rawPort, 7741, 1, 65535, 'PORT', errors);
   const bindHost = (rawEnv.ORANGE_BIND ?? '127.0.0.1').trim() || '127.0.0.1';
   const isLoopbackBind = isLoopbackAddress(bindHost);
 

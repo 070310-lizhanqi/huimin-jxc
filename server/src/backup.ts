@@ -21,7 +21,8 @@ import { dataDir, createWindowLimiter } from './db';
 import { verifyPassword } from './auth';
 import { safeHandler as safe } from './safe-handler';
 import { getConfig } from './config/env';
-import { recordAuditFromRequest } from './infra/audit-log';
+import { recordAuditFromRequest, extractClientIp } from './infra/audit-log';
+import { sendError } from './infra/errors';
 import { logger } from './infra/logger';
 
 const NAME_RE = /^backup-\d{8}-\d{6}(?:-[a-z0-9]{4})?\.db$/;
@@ -262,11 +263,11 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
   /** 管理员守卫：所有备份接口仅 admin 角色 */
   const requireAdmin = (req: Request, res: Response): boolean => {
     if (!req.auth) {
-      res.status(401).json({ error: '未登录' });
+      sendError(req, res, 401, '未登录', 'UNAUTHORIZED');
       return false;
     }
     if (req.auth.role !== 'admin') {
-      res.status(403).json({ error: '仅管理员可管理数据备份' });
+      sendError(req, res, 403, '仅管理员可管理数据备份', 'FORBIDDEN');
       return false;
     }
     return true;
@@ -305,7 +306,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     if (!requireAdmin(req, res)) return;
     // B-安4③：限速检查在鉴权之后、执行之前（被拒的调用不计入配额的是 401/403，429 本身计入一次）
     if (!backupCreateLimit(`team:${req.auth!.teamId}`)) {
-      return res.status(429).json({ error: '备份创建过于频繁，请稍后再试' });
+      return sendError(req, res, 429, '备份创建过于频繁，请稍后再试', 'RATE_LIMITED');
     }
     try {
       checkpoint(db);
@@ -313,7 +314,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       const p = (n: number) => String(n).padStart(2, '0');
       const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
       // 文件名带 4 位随机后缀：同一秒连点两次备份不互相覆盖
-      const suffix = Math.random().toString(36).slice(2, 6);
+      const suffix = crypto.randomBytes(2).toString('hex');
       const name = `backup-${stamp}-${suffix}.db`;
       const dir = backupDir();
       // Use VACUUM INTO instead of fs.copyFileSync(dbFilePath()) to keep SQLite's POSIX fcntl
@@ -334,56 +335,60 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     } catch (e) {
       // A-安4：不把 err.message 回吐给客户端，只写服务端日志
       logger.error('Failed to create backup', { err: e });
-      return res.status(500).json({ error: '备份失败，请稍后重试' });
+      return sendError(req, res, 500, '备份失败，请稍后重试', 'INTERNAL_ERROR');
     }
   });
 
   /** 下载备份文件（前端 fetch + Bearer 后转存） */
   router.get('/backup/download', (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const file = String(req.query.file ?? '');
-    if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
+    const file = typeof req.query.file === 'string' ? req.query.file : '';
+    if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
     // 防符号链接逃逸：仅文件名白名单不够，攻击者若能把 backupDir 里的文件替换成
     // 指向敏感文件的软链接，res.download 会读到任意文件。resolve 后必须仍落在 backupDir 内。
     const dir = backupDir();
     const full = path.join(dir, file);
     const resolved = path.resolve(full);
     if (!resolved.startsWith(path.resolve(dir) + path.sep)) {
-      return res.status(400).json({ error: '备份文件路径非法' });
+      return sendError(req, res, 400, '备份文件路径非法', 'VALIDATION_ERROR');
     }
     // 拒绝软链接/硬链接：lstat 与 stat 比较，符号链接直接拒绝
     try {
       const lst = fs.lstatSync(resolved);
-      if (lst.isSymbolicLink()) return res.status(400).json({ error: '备份文件类型非法' });
+      if (lst.isSymbolicLink()) return sendError(req, res, 400, '备份文件类型非法', 'VALIDATION_ERROR');
     } catch {
-      return res.status(404).json({ error: '备份文件不存在' });
+      return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
     }
-    if (!fs.existsSync(resolved)) return res.status(404).json({ error: '备份文件不存在' });
+    if (!fs.existsSync(resolved)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
     return res.download(resolved, file);
   });
 
   /** 恢复备份：需二次验证当前管理员密码（高危不可逆操作），排队后自动重启生效 */
   router.post('/backup/restore', safe(async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const file = String(req.body.file ?? '');
-    if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
+    const body =
+      req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const file = typeof body.file === 'string' ? body.file : '';
+    if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
     const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
+    if (!fs.existsSync(full)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
     try {
       assertSQLiteFile(full);
     } catch (e) {
       // A-安4：assertSQLiteFile 的原始错误不回吐，只返回通用文案，详情写服务端日志
       logger.error('Restore validation failed (invalid SQLite header)', { file, err: e });
-      return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
+      return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
     }
     // 二次验密：恢复会整体覆盖数据，即便会话被他人借走也不能一键抹库
-    const password = String(req.body.password ?? '');
-    if (!password) return res.status(400).json({ error: '请输入当前登录账号的密码以确认恢复' });
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!password) return sendError(req, res, 400, '请输入当前登录账号的密码以确认恢复', 'VALIDATION_ERROR');
     // B-安4②：失败计数——同一 IP 连续 5 次密码错误后冷却 10 分钟（冷却期内即使密码正确也 429）
-    const ipKey = String(req.ip ?? 'unknown');
+    const ipKey = extractClientIp(req);
     const failRec = restoreFailures.get(ipKey);
     if (failRec && failRec.lockedUntil > Date.now()) {
-      return res.status(429).json({ error: '恢复失败次数过多，请 10 分钟后再试' });
+      return sendError(req, res, 429, '恢复失败次数过多，请 10 分钟后再试', 'RATE_LIMITED');
     }
     const row = db.prepare(`SELECT password FROM "user" WHERE id = ?`).get(req.auth!.userId) as
       | { password: string | null }
@@ -393,7 +398,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       rec.count++;
       if (rec.count >= RESTORE_MAX_FAILS) rec.lockedUntil = Date.now() + RESTORE_COOLDOWN_MS;
       restoreFailures.set(ipKey, rec);
-      return res.status(400).json({ error: '密码不正确，恢复已取消' });
+      return sendError(req, res, 400, '密码不正确，恢复已取消', 'VALIDATION_ERROR');
     }
     restoreFailures.delete(ipKey);
     // B-安7：恢复前完整性校验（integrity_check 对大库耗时数秒是正常的，请耐心等待；
@@ -404,7 +409,7 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     } catch (e) {
       // A-安4：校验失败的原始错误不回吐，只返回通用文案，详情写服务端日志
       logger.error('Restore integrity verification failed', { file, err: e });
-      return res.status(400).json({ error: '恢复已取消：所选文件不是有效的备份文件' });
+      return sendError(req, res, 400, '恢复已取消：所选文件不是有效的备份文件', 'VALIDATION_ERROR');
     }
     try {
       // 校验通过：先检查点再备份当前库、写 pending（任一步失败都能回滚，见 db.ts）
@@ -420,17 +425,17 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     } catch (e) {
       // A-安4：不把 err.message 回吐给客户端，只写服务端日志
       logger.error('Failed to queue restore', { file, err: e });
-      return res.status(500).json({ error: '恢复失败，请稍后重试' });
+      return sendError(req, res, 500, '恢复失败，请稍后重试', 'INTERNAL_ERROR');
     }
   }));
 
   /** 删除备份 */
   router.delete('/backup/:file', (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const file = String(req.params.file ?? '');
-    if (!NAME_RE.test(file)) return res.status(400).json({ error: '备份文件名非法' });
+    const file = typeof req.params.file === 'string' ? req.params.file : '';
+    if (!NAME_RE.test(file)) return sendError(req, res, 400, '备份文件名非法', 'VALIDATION_ERROR');
     const full = path.join(backupDir(), file);
-    if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
+    if (!fs.existsSync(full)) return sendError(req, res, 404, '备份文件不存在', 'NOT_FOUND');
     removeBackupFile(backupDir(), file);
     recordAuditFromRequest(db, req, {
       action: 'backup.delete',

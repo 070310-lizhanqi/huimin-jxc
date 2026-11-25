@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { escapeLike } from './crud';
+import { sendError } from './infra/errors';
+import { parsePositiveInt } from './infra/validate';
 
 /**
  * 客户价格记忆（price_memory）
@@ -28,14 +30,31 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
 
   /** 某客户的全部价格记忆（商品管理里的「客户价格」页用） */
   router.get('/price/list', (req: Request, res: Response) => {
-    const teamId = Number(req.query.teamId);
+    const teamRes = parsePositiveInt(req.query.teamId, 'teamId');
+    if (!teamRes.ok) {
+      return sendError(
+        req,
+        res,
+        400,
+        req.query.teamId === undefined || req.query.teamId === '' || req.query.teamId === '0'
+          ? 'teamId 不能为空'
+          : teamRes.error,
+        'VALIDATION_ERROR',
+      );
+    }
+    const teamId = teamRes.value;
     const partnerId = Number(req.query.partnerId);
-    const kw = String(req.query.kw ?? '').trim();
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const kw = typeof req.query.kw === 'string' ? req.query.kw.trim() : '';
     const where: string[] = ['m.teamId = ?'];
     const args: Array<string | number> = [teamId];
-    if (partnerId) { where.push('m.partnerId = ?'); args.push(partnerId); }
-    if (kw) { where.push('p.name LIKE ? ESCAPE \'\\\''); args.push(`%${escapeLike(kw)}%`); }
+    if (Number.isInteger(partnerId) && partnerId > 0) {
+      where.push('m.partnerId = ?');
+      args.push(partnerId);
+    }
+    if (kw) {
+      where.push("p.name LIKE ? ESCAPE '\\'");
+      args.push(`%${escapeLike(kw)}%`);
+    }
     const rows = db
       .prepare(
         `SELECT m.*, p.name AS prodName, p.spec, p.unit, p.salePrice,
@@ -49,26 +68,66 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
       .all(...args);
     // total 让前端能识别「被 LIMIT 500 静默截断」的情况并提示筛选
     const total = (
-      db.prepare(`SELECT COUNT(*) AS c FROM price_memory m WHERE ${where.join(' AND ')}`).get(...args) as { c: number }
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c
+           FROM price_memory m
+           JOIN product p ON p.id = m.productId AND p.teamId = m.teamId
+           WHERE ${where.join(' AND ')}`,
+        )
+        .get(...args) as { c: number }
     ).c;
     return res.json({ rows, total, truncated: total > rows.length });
   });
 
   /** 手工改价记忆（也允许删除单条） */
   router.post('/price/set', (req: Request, res: Response) => {
-    const teamId = Number(req.body.teamId);
-    const partnerId = Number(req.body.partnerId);
-    const productId = Number(req.body.productId);
-    const price = Number(req.body.price);
-    if (!teamId || !partnerId || !productId) return res.status(400).json({ error: '缺少必填参数' });
-    if (!(price >= 0)) return res.status(400).json({ error: '价格不能为负' });
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return sendError(req, res, 400, '请求体必须是对象', 'VALIDATION_ERROR');
+    }
+    const body = req.body as Record<string, unknown>;
+    const teamRes = parsePositiveInt(body.teamId, 'teamId');
+    const partnerRes = parsePositiveInt(body.partnerId, 'partnerId');
+    const productRes = parsePositiveInt(body.productId, 'productId');
+    if (!teamRes.ok || !partnerRes.ok || !productRes.ok) {
+      return sendError(
+        req,
+        res,
+        400,
+        !teamRes.ok && teamRes.error !== 'teamId 不能为空'
+          ? teamRes.error
+          : !partnerRes.ok && partnerRes.error !== 'partnerId 不能为空'
+            ? partnerRes.error
+            : !productRes.ok && productRes.error !== 'productId 不能为空'
+              ? productRes.error
+              : '缺少必填参数',
+        'VALIDATION_ERROR',
+      );
+    }
+    const teamId = teamRes.value;
+    const partnerId = partnerRes.value;
+    const productId = productRes.value;
+    const rawPrice = body.price;
+    if (
+      rawPrice === null ||
+      rawPrice === undefined ||
+      typeof rawPrice === 'boolean' ||
+      (typeof rawPrice !== 'number' && (typeof rawPrice !== 'string' || rawPrice.trim() === ''))
+    ) {
+      return sendError(req, res, 400, '价格无效', 'VALIDATION_ERROR');
+    }
+    const price = Number(rawPrice);
+    if (!Number.isFinite(price)) return sendError(req, res, 400, '价格无效', 'VALIDATION_ERROR');
+    if (price < 0) return sendError(req, res, 400, '价格不能为负', 'VALIDATION_ERROR');
     // 金额上限与结算侧同量级：误录 15 位数会成为该客户的默认开单价
-    if (!Number.isFinite(price) || price > 1e11) return res.status(400).json({ error: '价格超出上限（10 亿元），请核对后重试' });
+    if (price > 1e11) {
+      return sendError(req, res, 400, '价格超出上限（10 亿元），请核对后重试', 'VALIDATION_ERROR');
+    }
     // 归属校验：客户与商品必须属于本团队（记忆行带 teamId，但引用的档案可以是跨团队 id）
     const cus = db.prepare(`SELECT id FROM customer WHERE id = ? AND teamId = ?`).get(partnerId, teamId);
-    if (!cus) return res.status(400).json({ error: '客户不存在' });
+    if (!cus) return sendError(req, res, 400, '客户不存在', 'VALIDATION_ERROR');
     const prod = db.prepare(`SELECT id FROM product WHERE id = ? AND teamId = ?`).get(productId, teamId);
-    if (!prod) return res.status(400).json({ error: '商品不存在' });
+    if (!prod) return sendError(req, res, 400, '商品不存在', 'VALIDATION_ERROR');
     // 手工改价不冒充「最近成交」：已有 lastDate（真实成交日）时保留，仅首次记忆记今天
     db.prepare(
       `INSERT INTO price_memory (teamId, partnerId, productId, price, lastDate, times)
@@ -81,10 +140,21 @@ export function mountPriceMemory(router: Router, db: DatabaseSync): void {
   });
 
   router.delete('/price/:id', (req: Request, res: Response) => {
-    const teamId = Number(req.query.teamId);
-    const id = Number(req.params.id);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    db.prepare(`DELETE FROM price_memory WHERE id = ? AND teamId = ?`).run(id, teamId);
+    const teamRes = parsePositiveInt(req.query.teamId, 'teamId');
+    if (!teamRes.ok) {
+      return sendError(
+        req,
+        res,
+        400,
+        req.query.teamId === undefined || req.query.teamId === '' || req.query.teamId === '0'
+          ? 'teamId 不能为空'
+          : teamRes.error,
+        'VALIDATION_ERROR',
+      );
+    }
+    const idRes = parsePositiveInt(req.params.id, 'id');
+    if (!idRes.ok) return sendError(req, res, 400, idRes.error, 'VALIDATION_ERROR');
+    db.prepare(`DELETE FROM price_memory WHERE id = ? AND teamId = ?`).run(idRes.value, teamRes.value);
     return res.json({ ok: true });
   });
 }

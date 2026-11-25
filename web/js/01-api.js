@@ -109,21 +109,30 @@ const api = {
    *  同源 fetch 默认 credentials: 'same-origin'，httpOnly Cookie 自动带上，不再手动拼头。 */
   download: async (path, fallbackName) => {
     // 超时中止（与 req() 同款）：备份文件大，超时放宽到 120 秒；超时/断网抛与 req() 相同的中文错误
+    const requestId = nextRequestId();
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 120000);
     let r;
     try {
-      r = await fetch('/api' + path, { signal: ctl.signal });
+      r = await fetch('/api' + path, {
+        signal: ctl.signal,
+        headers: { 'X-Request-Id': requestId },
+      });
     } catch (e) {
       clearTimeout(timer);
       if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试', { cause: e });
       throw new Error('网络异常，请检查服务是否可用', { cause: e });
     }
+    if (r.status === 401) handle401();
     if (!r.ok) {
       clearTimeout(timer);
       let data = null;
       try { data = await r.json(); } catch { /* non-json */ }
-      throw new Error((data && data.error) || `HTTP ${r.status}`);
+      const err = new Error((data && data.error) || `HTTP ${r.status}`);
+      err.status = r.status;
+      err.code = data && data.code;
+      err.requestId = (data && data.requestId) || r.headers.get('X-Request-Id') || requestId;
+      throw err;
     }
     let blob;
     try {

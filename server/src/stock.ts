@@ -4,6 +4,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate } from './db';
+import { sendError } from './infra/errors';
 import { centsToYuan, csvCell, MAX_EXPORT_ROWS } from './shared/csv';
 import { HIST_AVG_COST_SQL } from './shared/money';
 
@@ -22,7 +23,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // onlyLow=1：只看低库存商品；sort=qtyAsc|qtyDesc：按数量排序（默认按商品名，与旧口径一致）。
   router.get('/stock/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const warehouseId = req.query.warehouseId ? Number(req.query.warehouseId) : 0;
     const productId = req.query.productId ? Number(req.query.productId) : 0;
     const kw = typeof req.query.kw === 'string' ? req.query.kw : '';
@@ -190,8 +193,12 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   router.get('/stock/qty-by-product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const warehouseId = Number(req.query.warehouseId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    if (!warehouseId) return res.status(400).json({ error: 'warehouseId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
+    if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
+      return sendError(req, res, 400, 'warehouseId 不能为空', 'VALIDATION_ERROR');
+    }
     const rows = db
       .prepare(
         `SELECT s.productId, SUM(s.qty) AS qty FROM stock s
@@ -204,7 +211,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 工作台统计卡片
   router.get('/stats/dashboard', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const stockAgg = db
       .prepare(
         `SELECT COALESCE(SUM(qty),0) AS totalQty, COUNT(DISTINCT productId) AS skuCount
@@ -292,7 +301,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 近 14 天出入库趋势（工作台图表用）
   router.get('/stats/trend', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const rows = db
       .prepare(
         `SELECT substr(date,1,10) AS day,
@@ -317,7 +328,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
    */
   router.get('/stock/ledger', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const productId = Number(req.query.productId);
     const warehouseId = Number(req.query.warehouseId);
     const conds: string[] = ['teamId = ?'];
@@ -359,7 +372,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 库存流水 CSV 导出（由 docs.ts 迁回库存模块，与 /stock/ledger 共用筛选口径）
   router.get('/stock/ledger/export', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const conds: string[] = ['l.teamId = ?'];
     const args: Array<string | number> = [teamId];
     const productId = Number(req.query.productId);
@@ -385,9 +400,13 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     const where = conds.join(' AND ');
     const total = db.prepare(`SELECT COUNT(*) AS c FROM stock_ledger l WHERE ${where}`).get(...args) as { c: number };
     if (total.c > MAX_EXPORT_ROWS) {
-      return res
-        .status(400)
-        .json({ error: `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出` });
+      return sendError(
+        req,
+        res,
+        400,
+        `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出`,
+        'VALIDATION_ERROR',
+      );
     }
     const rows = db
       .prepare(
@@ -437,7 +456,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 汇总仪表盘：SKU 数、库存总量、库存货值（历史采购均价（估算），与报表同口径，B-数8）
   router.get('/stock/summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const sku = db
       .prepare(`SELECT COUNT(DISTINCT productId) AS c FROM stock WHERE teamId=? AND qty != 0`)
       .get(teamId) as { c: number };

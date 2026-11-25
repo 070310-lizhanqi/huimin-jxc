@@ -10,6 +10,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { sendError } from './infra/errors';
 import { allocateDocDiscounts, roundQty } from './shared/money';
 
 function pad(n: number): string {
@@ -32,8 +33,8 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
   router.get('/stats/sales-summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const range = String(req.query.range ?? 'month');
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = rangeBounds(range);
@@ -166,8 +167,8 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     const rawLimit = Number(req.query.limit ?? 10);
     const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 10;
     const { from, to } = rangeBounds(String(req.query.range ?? 'month'));
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
 

@@ -71,11 +71,11 @@
 ### 3.1 进销存单据状态机与原子过账
 
 1. **草稿与待审**：`POST /api/doc/create` 支持 `Idempotency-Key`（24h 持久表 `idempotency_key` + canonical payload SHA-256 校验，载荷不一致返回 `409 CONFLICT`）及同内容防双击窗口保护；草稿 (`draft`) 与待审 (`pending`) **不修改库存表与往来余额**。
-2. **原子审核 (`POST /api/doc/:id/audit`)**：
+2. **原子审核 (`POST /api/doc/audit`)**：
    - 全部状态校验与过账动作包裹在 `BEGIN IMMEDIATE`（`withImmediateTx`）写锁事务内，杜绝并发双审、超卖竞态。
-   - **出库类单据**先校验仓库总库存是否满足需求；对启用/存在批次的库存按入库时间先进先出（FIFO）扣减，同时更新移动加权成本；**盘点/调拨**原子更新源/目标仓库存并记录 `stock_ledger`。
+   - **出库类单据**先校验仓库总库存是否满足需求；对启用/存在批次的库存按入库时间先进先出（FIFO）扣减，并记录 `stock_ledger` 成本流水（报表按 `HIST_AVG_COST_SQL` 计算历史采购估算均价）；**盘点/调拨**原子更新源/目标仓库存并记录 `stock_ledger`。
    - 若单据附带现收/现付金额，事务内同步更新资金账户余额、生成自动关联 `settlement` 记录、计算客户/供应商 `partner_balance` 并刷新客户记忆价 `price_memory`。
-3. **作废冲回 (`POST /api/doc/:id/void`)**：
+3. **作废冲回 (`POST /api/doc/void`)**：
    - 锁内重读单据状态防止并发双作废。
    - 若原审核生成了自动结算且后续已被手工核销记录引用，或当前资金账户余额不足以冲回原自动收款，均拒绝作废并返回明确指引，避免出现负资金账户或孤立核销。
    - 对 FIFO 出库按 `stock_ledger` 原批次记录精准回滚，恢复盘点前库位、回退应收应付及账户余额，并记入 `audit_log`。
@@ -83,7 +83,7 @@
 ### 3.2 鉴权、多租户隔离与跨站防护
 
 - **密码与口令**：使用 `node:crypto.scrypt`（随机盐 + 定长比较 `timingSafeEqual`）；新用户及改密强制密码复杂度检查；登录与注册按 IP + 账号维度施行失败冷却限速。
-- **令牌与吊销**：HMAC-SHA256 签名载荷（`userId`、`teamId`、`role`、`ver`、`jti`、`exp`），通过 `HttpOnly; SameSite=Lax` Cookie (`oc_token`) 或显式 `Authorization: Bearer` 传递；注销持久化写入 `revoked` 表并重启恢复；改密递增 `ver` 使旧会话立即失效。
+- **令牌与吊销**：HMAC-SHA256 签名载荷（`userId`、`teamId`、`role`、`ver`、`jti`、`exp`），通过 `HttpOnly; SameSite=Lax` Cookie (`oc_token`) 或显式 `Authorization: Bearer` 传递；注销持久化写入 `setting` 表（`teamId=0, key='auth.revoked'`）并重启恢复；改密递增 `ver` 使旧会话立即失效。
 - **团队隔离**：`requireAuth` 解析令牌后强制覆盖 `req.query.teamId` 与 `req.body.teamId`，一切 SQL 查询均带 `teamId = ?` 条件。
 - **CSRF 防护**：当请求使用 `oc_token` Cookie 鉴权、未携带 `Bearer` 且处于写方法（`POST`/`PUT`/`PATCH`/`DELETE`）时，`csrfOriginGuardMiddleware` 强制校验 `Origin` 必须匹配当前 Host 或 `ORANGE_ALLOW_HOSTS` 白名单。
 
