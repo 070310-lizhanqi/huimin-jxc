@@ -4,18 +4,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate } from './db';
-
-/** 历史采购均价（估算）标量子查询（与 report.ts / dashboard.ts / aging.ts 同口径，B-数4 修后）：
- *  仅统计已审核采购入库单、入库日期 ≤ 今天的流水；零价入库（unitCost<=0，如赠品/价缺省）
- *  不计入分母；全零价商品返回 NULL，调用方用 COALESCE 回落到 purchasePrice。
- *  注意：这是按商品全局取价，未分仓库/批次，多仓不同采购价时仍失真——彻底修需按仓/批取价，见 C-数1。
- *  另：聚合均价不再取单条“最近价”，旧 ORDER BY l.id（插入顺序，补录早日期入库单会成
- *  “最近价”）的问题随之消除——均价与行选取顺序无关，不再需要 ORDER BY d.date DESC, l.id DESC。 */
-const HIST_AVG_COST_SQL = `(SELECT SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
-     / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0)
-   FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-   WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
-     AND d.type = 'stockin' AND d.status = 'audit' AND d.date <= date('now', 'localtime'))`;
+import { centsToYuan, csvCell, MAX_EXPORT_ROWS } from './shared/csv';
+import { HIST_AVG_COST_SQL } from './shared/money';
 
 export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 实时库存（可按仓库/商品/关键词过滤，聚合同商品多仓位批次）
@@ -364,6 +354,84 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       .prepare(`SELECT * FROM stock_ledger WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
       .all(...args, rows, (page - 1) * rows);
     return res.json({ rows: list, total, page, rowsPerPage: rows });
+  });
+
+  // 库存流水 CSV 导出（由 docs.ts 迁回库存模块，与 /stock/ledger 共用筛选口径）
+  router.get('/stock/ledger/export', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const conds: string[] = ['l.teamId = ?'];
+    const args: Array<string | number> = [teamId];
+    const productId = Number(req.query.productId);
+    const warehouseId = Number(req.query.warehouseId);
+    if (productId) {
+      conds.push('l.productId = ?');
+      args.push(productId);
+    }
+    if (warehouseId) {
+      conds.push('l.warehouseId = ?');
+      args.push(warehouseId);
+    }
+    const from = typeof req.query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : '';
+    const to = typeof req.query.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : '';
+    if (from) {
+      conds.push('substr(l.createdAt,1,10) >= ?');
+      args.push(from);
+    }
+    if (to) {
+      conds.push('substr(l.createdAt,1,10) <= ?');
+      args.push(to);
+    }
+    const where = conds.join(' AND ');
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM stock_ledger l WHERE ${where}`).get(...args) as { c: number };
+    if (total.c > MAX_EXPORT_ROWS) {
+      return res
+        .status(400)
+        .json({ error: `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出` });
+    }
+    const rows = db
+      .prepare(
+        `SELECT l.createdAt, l.direction, l.qty, l.unitCost, l.batchNo, l.refDocId,
+           (SELECT name FROM product WHERE id = l.productId) AS prodName,
+           (SELECT name FROM warehouse WHERE id = l.warehouseId) AS whName,
+           (SELECT billNo FROM doc WHERE id = l.refDocId) AS billNo
+         FROM stock_ledger l WHERE ${where} ORDER BY l.id DESC LIMIT ?`,
+      )
+      .all(...args, MAX_EXPORT_ROWS) as Array<{
+      createdAt: string;
+      direction: string;
+      qty: number;
+      unitCost: number | null;
+      batchNo: string | null;
+      refDocId: number;
+      prodName: string | null;
+      whName: string | null;
+      billNo: string | null;
+    }>;
+    const filename = `库存流水导出_${localDate().replace(/-/g, '')}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('X-Export-Total', String(total.c));
+    res.write(
+      '\ufeff' + ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'].map(csvCell).join(',') + '\r\n',
+    );
+    for (const r of rows) {
+      res.write(
+        [
+          r.createdAt,
+          r.prodName || '',
+          r.whName || '',
+          r.batchNo || '',
+          r.direction === 'in' ? '入库' : '出库',
+          r.qty,
+          centsToYuan(r.unitCost),
+          r.billNo || '#' + r.refDocId,
+        ]
+          .map(csvCell)
+          .join(',') + '\r\n',
+      );
+    }
+    return res.end();
   });
 
   // 汇总仪表盘：SKU 数、库存总量、库存货值（历史采购均价（估算），与报表同口径，B-数8）

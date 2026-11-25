@@ -10,7 +10,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
-import { allocateDocDiscounts } from './report';
+import { allocateDocDiscounts, roundQty } from './shared/money';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -123,7 +123,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     for (const r of profitRows) {
       const a = perProd.get(r.productId) ?? { qty: 0, amt: 0 };
       const sign = r.type === 'stockout' ? 1 : -1;
-      a.qty += sign * r.qty;
+      a.qty = roundQty(a.qty + sign * r.qty);
       a.amt += sign * (netLine.get(`${r.docId}:${r.productId}`) ?? r.amount);
       perProd.set(r.productId, a);
     }

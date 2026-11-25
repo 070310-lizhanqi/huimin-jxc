@@ -19,6 +19,9 @@ import { readSpreadsheet, excelSerialToDate } from './xlsxlite';
 import { localDate, validBizDate, createWindowLimiter, tryCheckpoint } from './db';
 import { nextBillNo, loadBillNoConfig } from './bill-no';
 import { PRICE_CENTS_MAX, QTY_MAX } from './crud';
+import { recordAuditFromRequest } from './infra/audit-log';
+import { safeRollback } from './infra/tx';
+import { lineAmount, sumQty } from './shared/money';
 import type { SheetData } from './xlsxlite';
 
 /** 与 docs.ts 的上限保持一致（与 crud.ts 共用同一份常量） */
@@ -607,12 +610,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         try {
           for (const b of bills) {
             const ext = b as BillOut & { clerkId?: number | null; remarks?: string };
-            const totalQty = Math.round(b.items.reduce((s, i) => s + i.qty, 0) * 10000) / 10000;
-            // 行金额/表头总额与 docs.ts lineAmount 同口径（qty 万分整数 × 单价分 ÷ 10000）：
-            // 浮点 Math.round(qty*price) 在 4 位小数数量上可差数分，编辑重存后金额跳变
-            const lineAmt = (qty: number, priceCents: number): number =>
-              Math.round((Math.round((Number(qty) || 0) * 10000) * (Math.round(Number(priceCents) || 0))) / 10000);
-            const totalAmount = b.items.reduce((s, i) => s + lineAmt(i.qty, i.price), 0);
+            const totalQty = sumQty(b.items.map((i) => i.qty));
+            const totalAmount = b.items.reduce((s, i) => s + lineAmount(i.qty, i.price), 0);
             const billNo = nextBillNo(db, teamId, b.type, billNoCfg);
             const remarkParts = ['Excel导入'];
             if (ext.remarks) remarkParts.push(ext.remarks);
@@ -632,7 +631,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
             );
             const docId = Number(info.lastInsertRowid);
             for (const it of b.items) {
-              insItem.run(docId, it.productId, it.qty, it.price, lineAmt(it.qty, it.price), null);
+              insItem.run(docId, it.productId, it.qty, it.price, lineAmount(it.qty, it.price), null);
             }
             created.push({ id: docId, billNo, type: b.type, srcBillNo: b.srcBillNo, itemCount: b.items.length });
             if (b.partnerId != null) createdPartnerIds.add(b.partnerId);
@@ -667,7 +666,7 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
           // B-安17 折中：导入是批量写操作，落库后显式检查点，把 WAL 落盘（见 db.ts 注释的实测数据）
           tryCheckpoint(db);
         } catch (e) {
-          db.exec('ROLLBACK');
+          safeRollback(db);
           // 落库失败：事务外的自动建档已成孤儿，按「无单据引用」清理（doc 未生成，id 安全）
           for (const p of pendingPartnerCreates) {
             if (p.id == null) continue;
@@ -686,6 +685,14 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         }
       }
 
+      if (!dryRun && created.length > 0) {
+        recordAuditFromRequest(db, req, {
+          teamId,
+          action: 'doc.import',
+          entityType: 'doc',
+          detail: { imported: created.length, skipped: skipped.length, rowErrors: rowErrors.length },
+        });
+      }
       // 响应里去掉内部字段
       const billsOut = bills.map((b) => {
         const { clerkId: _c, remarks: _r, ...rest } = b as BillOut & { clerkId?: number | null; remarks?: string };

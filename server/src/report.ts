@@ -6,6 +6,14 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
+import {
+  allocateDocDiscounts,
+  roundHalfAwayFromZero,
+  roundQty,
+  type DiscountableLine,
+} from './shared/money';
+
+export { allocateDocDiscounts, roundHalfAwayFromZero, type DiscountableLine };
 
 type Value = string | number | null;
 
@@ -68,64 +76,7 @@ function strictRange(req: Request): { from: string; to: string; error: string | 
   return { from, to, error: null };
 }
 
-/** (docId, productId) 级的明细聚合行，用于整单折扣分摊 */
-export interface DiscountableLine {
-  docId: number;
-  productId: number;
-  type: string;
-  discount: number | null;
-  qty: number;
-  amount: number;
-}
-
-/** 对称舍入（round half away from zero）：-1.5 → -2，与 +1.5 → 2 对称；-0.5 → -1。
- *  Math.round 是向 +∞ 取整，负数 -1.5 会得 -1，造成行级 1 分偏差。
- *  与 docs.ts 的 lineAmount 同口径（B 组负责 docs.ts 侧，同样用对称舍入，
- *  公式逐字相同：Math.sign(n) * Math.round(Math.abs(n))）。 */
-export function roundHalfAwayFromZero(n: number): number {
-  return Math.sign(n) * Math.round(Math.abs(n));
-}
-
-/**
- * 按行金额占比把整单折扣分摊到各 (docId, productId) 行，尾差归该单金额最大的行，
- * 保证单内 Σ分摊 = 整单折扣。返回 `docId:productId` → 扣折扣后的净额。
- * 折扣 ≤ 0 或毛额 ≤ 0 的单按原毛额返回。
- * 供 /report/product 与工作台 /stats/sales-summary 共用——两处毛利必须同一口径，
- * 否则带折扣的销售在报表页和工作台会算出两个不同的毛利。
- */
-export function allocateDocDiscounts(lines: DiscountableLine[]): Map<string, number> {
-  const byDoc = new Map<number, DiscountableLine[]>();
-  for (const l of lines) {
-    const arr = byDoc.get(l.docId) ?? [];
-    arr.push(l);
-    byDoc.set(l.docId, arr);
-  }
-  const net = new Map<string, number>();
-  for (const arr of byDoc.values()) {
-    const discount = Math.max(0, Math.round(Number(arr[0].discount ?? 0)));
-    const gross = arr.reduce((s, l) => s + l.amount, 0);
-    if (discount <= 0 || gross <= 0) {
-      for (const l of arr) net.set(`${l.docId}:${l.productId}`, l.amount);
-      continue;
-    }
-    let allocated = 0;
-    let maxLine = arr[0];
-    for (const l of arr) {
-      // 负数行用对称舍入：-1.5 → -2，与 +1.5 → 2 对称（Math.round(-1.5) 得 -1，行级差 1 分）
-      const share = roundHalfAwayFromZero((discount * l.amount) / gross);
-      net.set(`${l.docId}:${l.productId}`, l.amount - share);
-      allocated += share;
-      if (l.amount > maxLine.amount) maxLine = l;
-    }
-    // 尾差补给金额最大的行，保证单内 Σ分摊 = 整单折扣
-    const tail = discount - allocated;
-    if (tail !== 0) {
-      const k = `${maxLine.docId}:${maxLine.productId}`;
-      net.set(k, (net.get(k) ?? maxLine.amount) - tail);
-    }
-  }
-  return net;
-}
+/** 报表日期参数校验：与 jxc-report 的 rangeOf 同口径——脏日期直接 400 拒绝 */
 
 export function mountReports(router: Router, db: DatabaseSync): void {
   // 按日销售汇总（销售出库 + 销售退货）
@@ -226,10 +177,10 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       const a = aggMap.get(l.productId) ?? { saleQty: 0, retQty: 0, saleAmount: 0, retAmount: 0 };
       const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
       if (l.type === 'stockout') {
-        a.saleQty += l.qty;
+        a.saleQty = roundQty(a.saleQty + l.qty);
         a.saleAmount += net;
       } else {
-        a.retQty += l.qty;
+        a.retQty = roundQty(a.retQty + l.qty);
         a.retAmount += net;
       }
       aggMap.set(l.productId, a);
@@ -259,9 +210,9 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
     const out: ProductReportRow[] = rows.map((r) => {
       const avgCost = costMap.get(r.productId) ?? r.purchasePrice;
-      const netQty = r.saleQty - r.retQty;
+      const netQty = roundQty(r.saleQty - r.retQty);
       const netAmount = r.saleAmount - r.retAmount;
-      const estCost = Math.round(netQty * avgCost);
+      const estCost = roundHalfAwayFromZero(netQty * avgCost);
       return {
         productId: r.productId,
         prodName: r.prodName,

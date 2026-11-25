@@ -1,0 +1,209 @@
+import { after, before, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import os from 'node:os';
+import path from 'node:path';
+import { initConfig, resetConfigForTest } from '../src/config/env';
+import { getSchemaVersion, listAppliedMigrations, migrate, openDb } from '../src/db';
+import { BusyError } from '../src/infra/errors';
+import { safeRollback, withImmediateTx } from '../src/infra/tx';
+import {
+  parseBizDateOptional,
+  parseBizDateRequired,
+  parseCents,
+  parseEnum,
+  parseNonEmptyString,
+  parseOptionalPositiveInt,
+  parsePositiveInt,
+  parseQty,
+} from '../src/infra/validate';
+import { importProducts } from '../src/services/product-import-service';
+import { allocateDocDiscounts, lineAmount, roundHalfAwayFromZero, roundQty, sumQty } from '../src/shared/money';
+
+describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Product Import', () => {
+  const savedEnv = { ...process.env };
+  const tempDirs: string[] = [];
+
+  const mkTmp = (prefix: string): string => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    tempDirs.push(d);
+    return d;
+  };
+
+  before(() => {
+    process.env.ORANGE_ENV_FILE = '';
+    process.env.ORANGE_JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    resetConfigForTest();
+    initConfig({ persistSecret: false });
+  });
+
+  after(() => {
+    resetConfigForTest();
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) delete process.env[key];
+    }
+    for (const [k, v] of Object.entries(savedEnv)) {
+      process.env[k] = v;
+    }
+    for (const dir of tempDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe('shared/money precision guarantees', () => {
+    it('eliminates IEEE754 float drift on qty sums and line amounts', () => {
+      assert.equal(sumQty([0.1, 0.2, 0.3]), 0.6);
+      assert.equal(roundQty(0.1 + 0.2), 0.3);
+      assert.equal(lineAmount(0.1, 3333), 333);
+      assert.equal(lineAmount(0.15, 100), 15);
+      assert.equal(roundHalfAwayFromZero(-1.5), -2);
+      assert.equal(roundHalfAwayFromZero(1.5), 2);
+      assert.equal(roundHalfAwayFromZero(-0.5), -1);
+    });
+
+    it('allocates document-level discounts across lines with exact cent conservation', () => {
+      const lines = [
+        { docId: 10, productId: 1, type: 'stockout', discount: 100, qty: 1, amount: 333 },
+        { docId: 10, productId: 2, type: 'stockout', discount: 100, qty: 1, amount: 333 },
+        { docId: 10, productId: 3, type: 'stockout', discount: 100, qty: 1, amount: 334 },
+      ];
+      const net = allocateDocDiscounts(lines);
+      const totalNet = (net.get('10:1') ?? 0) + (net.get('10:2') ?? 0) + (net.get('10:3') ?? 0);
+      assert.equal(totalNet, 900);
+      assert.equal(net.get('10:1'), 300);
+      assert.equal(net.get('10:2'), 300);
+      assert.equal(net.get('10:3'), 300);
+    });
+  });
+
+  describe('infra/validate schema primitives', () => {
+    it('validates positive ints, non-empty strings, biz dates, enums, qty, and cents', () => {
+      assert.deepEqual(parsePositiveInt('42', 'id'), { ok: true, value: 42 });
+      assert.equal(parsePositiveInt('0', 'id').ok, false);
+      assert.equal(parsePositiveInt('1.5', 'id').ok, false);
+      assert.equal(parsePositiveInt('12abc', 'id').ok, false);
+
+      assert.deepEqual(parseOptionalPositiveInt('', 'catId'), { ok: true, value: null });
+      assert.equal(parseOptionalPositiveInt('-5', 'catId').ok, false);
+
+      assert.deepEqual(parseNonEmptyString('  红富士  ', '名称', 20), { ok: true, value: '红富士' });
+      assert.equal(parseNonEmptyString('   ', '名称', 20).ok, false);
+      assert.equal(parseNonEmptyString(123, '名称', 20).ok, false);
+
+      assert.equal(parseBizDateRequired('', '单据日期').ok, false);
+      assert.equal(parseBizDateOptional('2026-02-30', '日期').ok, false);
+      assert.deepEqual(parseBizDateRequired('2026-02-28', '日期'), { ok: true, value: '2026-02-28' });
+
+      assert.deepEqual(parseEnum('bank', ['cash', 'bank'] as const, '类型'), { ok: true, value: 'bank' });
+      assert.equal(parseEnum('crypto', ['cash', 'bank'] as const, '类型').ok, false);
+
+      assert.equal(parseQty(0, '数量').ok, false);
+      assert.deepEqual(parseQty(1.23456, '数量'), { ok: true, value: 1.2346 });
+      assert.equal(parseCents(-1, '金额').ok, false);
+      assert.deepEqual(parseCents(undefined, '金额', { defaultZero: true }), { ok: true, value: 0 });
+    });
+  });
+
+  describe('infra/tx transaction safety & busy handling', () => {
+    it('rolls back cleanly on business error without masking original exception and handles BusyError', () => {
+      const tmp = mkTmp('jxc-tx-');
+      const dbPath = path.join(tmp, 'tx.db');
+      const db1 = openDb(dbPath);
+      const db2 = new DatabaseSync(dbPath);
+      try {
+        db1.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)');
+        assert.throws(() => {
+          withImmediateTx(db1, () => {
+            db1.prepare("INSERT INTO t (v) VALUES ('temp')").run();
+            throw new Error('business_boom');
+          });
+        }, /business_boom/);
+        const count = (db1.prepare('SELECT COUNT(*) AS c FROM t').get() as { c: number }).c;
+        assert.equal(count, 0);
+
+        // safeRollback when no active tx must never throw
+        assert.doesNotThrow(() => safeRollback(db1));
+
+        // Simulate write lock held by db2 exceeding busy_timeout(0)
+        db1.exec('PRAGMA busy_timeout = 10;');
+        db2.exec("BEGIN IMMEDIATE; INSERT INTO t (v) VALUES ('lock');");
+        try {
+          assert.throws(() => withImmediateTx(db1, () => {}), BusyError);
+        } finally {
+          db2.exec('ROLLBACK;');
+        }
+      } finally {
+        db2.close();
+        db1.close();
+      }
+    });
+  });
+
+  describe('db versioned migrations', () => {
+    it('tracks applied migrations V1..V3 and upgrades pre-existing legacy DB cleanly', () => {
+      const tmp = mkTmp('jxc-mig-');
+      const dbPath = path.join(tmp, 'legacy.db');
+      const raw = new DatabaseSync(dbPath);
+      raw.exec(`
+        CREATE TABLE team (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, startPeriod TEXT NOT NULL);
+        INSERT INTO team (name, startPeriod) VALUES ('老客户账套', '2025-01-01');
+      `);
+      raw.close();
+
+      const db = openDb(dbPath);
+      try {
+        migrate(db);
+        migrate(db);
+        assert.equal(getSchemaVersion(db), 3);
+        const applied = listAppliedMigrations(db);
+        assert.deepEqual(
+          applied.map((r) => r.version),
+          [1, 2, 3],
+        );
+        const team = db.prepare('SELECT name FROM team WHERE id = 1').get() as { name: string };
+        assert.equal(team.name, '老客户账套');
+        const tables = (
+          db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
+        ).map((t) => t.name);
+        assert.ok(tables.includes('price_memory'));
+        assert.ok(tables.includes('audit_log'));
+        assert.ok(tables.includes('idempotency_key'));
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  describe('services/product-import-service partial success and limits', () => {
+    it('imports valid products, auto-creates categories, and skips invalid rows safely', () => {
+      const tmp = mkTmp('jxc-imp-');
+      const db = openDb(path.join(tmp, 'imp.db'));
+      try {
+        migrate(db);
+        const teamId = Number(
+          db.prepare("INSERT INTO team (name, startPeriod) VALUES ('导入测试', '2026-01-01')").run().lastInsertRowid,
+        );
+        const res = importProducts(db, teamId, [
+          { name: '可乐 330ml', catName: '饮料', unit: '罐', purchasePrice: '2.50', salePrice: '4.00', lowQty: '10' },
+          { name: '可乐 330ml', catName: '饮料', unit: '罐' },
+          { name: '', catName: '饮料' },
+          { name: '价格异常品', purchasePrice: 'not-a-number' },
+          { name: '长字段品', barcode: 'B'.repeat(80) },
+        ]);
+        assert.equal(res.total, 5);
+        assert.equal(res.success, 1);
+        assert.equal(res.errors.length, 4);
+        const prod = db.prepare('SELECT purchasePrice, salePrice FROM product WHERE teamId = ?').get(teamId) as {
+          purchasePrice: number;
+          salePrice: number;
+        };
+        assert.equal(prod.purchasePrice, 250);
+        assert.equal(prod.salePrice, 400);
+      } finally {
+        db.close();
+      }
+    });
+  });
+});

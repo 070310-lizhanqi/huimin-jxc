@@ -50,6 +50,13 @@ function handle401() {
   return handling401Promise;
 }
 
+function nextRequestId() {
+  if (typeof window !== 'undefined' && window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return 'req-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
 async function req(method, path, body, params) {
   let url = '/api' + path;
   if (params) {
@@ -60,7 +67,8 @@ async function req(method, path, body, params) {
     const s = qs.toString();
     if (s) url += '?' + s;
   }
-  const opt = { method, headers: {} };
+  const requestId = nextRequestId();
+  const opt = { method, headers: { 'X-Request-Id': requestId } };
   if (body !== undefined) {
     opt.headers['content-type'] = 'application/json';
     opt.body = JSON.stringify(body);
@@ -83,7 +91,13 @@ async function req(method, path, body, params) {
   try { data = await r.json(); } catch { /* non-json */ }
   // 令牌失效：清空登录态（含缓存账套数据）并跳登录页（登录接口自身的 401 交给调用方提示）
   if (r.status === 401 && !path.startsWith('/auth/login')) handle401();
-  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error((data && data.error) || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.code = data && data.code;
+    err.requestId = (data && data.requestId) || r.headers.get('X-Request-Id') || requestId;
+    throw err;
+  }
   return data;
 }
 const api = {

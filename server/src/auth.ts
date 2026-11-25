@@ -14,6 +14,8 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { localDate } from './db';
 import { safeHandler } from './safe-handler';
 import { getConfig } from './config/env';
+import { recordAudit, recordAuditFromRequest } from './infra/audit-log';
+import { parsePositiveInt } from './infra/validate';
 
 /** 令牌有效期（秒）：7 天 */
 const TOKEN_TTL = 7 * 24 * 3600;
@@ -32,12 +34,27 @@ const COOKIE_NAME = 'oc_token';
  * 登录/注册 JSON 仍返回 token（API 客户端与既有 Bearer 测试用），前端忽略 body 里的 token。
  * 不加 Access-Control-Allow-Credentials：应用是同源部署，浏览器不需要跨域带凭据。
  */
-function setAuthCookie(res: Response, token: string): void {
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_TTL}`);
+function shouldSetCookieSecure(req: Request): boolean {
+  const mode = getConfig().cookieSecure;
+  if (mode === '1') return true;
+  if (mode === 'auto') {
+    const xfProto = String(req.headers['x-forwarded-proto'] ?? '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    return Boolean(req.secure || xfProto === 'https');
+  }
+  return false;
+}
+
+function setAuthCookie(req: Request, res: Response, token: string): void {
+  const sec = shouldSetCookieSecure(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_TTL}${sec}`);
 }
 /** 登出时清掉 Cookie：空值 + Max-Age=0 */
-function clearAuthCookie(res: Response): void {
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+function clearAuthCookie(req: Request, res: Response): void {
+  const sec = shouldSetCookieSecure(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${sec}`);
 }
 
 export interface AuthUser {
@@ -696,7 +713,17 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     clearFails(failKey);
     // B-前5：注册也经 Set-Cookie 下发令牌（前端注册后直接进系统，不再读 body token）
     const token = issueToken(user);
-    setAuthCookie(res, token);
+    setAuthCookie(req, res, token);
+    recordAudit(db, {
+      teamId,
+      userId,
+      username,
+      action: 'auth.register',
+      entityType: 'user',
+      entityId: userId,
+      ip: clientIp(req),
+      detail: { teamName: teamNameOut },
+    });
     return res.json({ ok: true, token, user, teamId, teamName: teamNameOut });
   }));
 
@@ -724,11 +751,28 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       await verifyPassword(password, DUMMY_HASH);
       recordFail(failKey);
       recordUserFail(username);
+      recordAudit(db, {
+        teamId: 0,
+        username,
+        action: 'auth.login_failed',
+        entityType: 'auth',
+        ip: clientIp(req),
+        detail: { reason: 'invalid_credentials' },
+      });
       return res.status(401).json({ error: '用户名或密码错误' });
     }
     if (!(await verifyPassword(password, row.password))) {
       recordFail(failKey);
       recordUserFail(username);
+      recordAudit(db, {
+        teamId: row.teamId,
+        userId: row.id,
+        username: row.name,
+        action: 'auth.login_failed',
+        entityType: 'auth',
+        ip: clientIp(req),
+        detail: { reason: 'invalid_credentials' },
+      });
       return res.status(401).json({ error: '用户名或密码错误' });
     }
     const team = db.prepare('SELECT id, name FROM team WHERE id = ?').get(row.teamId) as
@@ -740,7 +784,15 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     clearUserFails(username);
     // B-前5：登录经 Set-Cookie 下发令牌；JSON 里仍返回 token（API 客户端与测试用）
     const token = issueToken(user);
-    setAuthCookie(res, token);
+    setAuthCookie(req, res, token);
+    recordAudit(db, {
+      teamId: row.teamId,
+      userId: row.id,
+      username: row.name,
+      action: 'auth.login',
+      entityType: 'auth',
+      ip: clientIp(req),
+    });
     return res.json({ ok: true, token, user, team });
   }));
 
@@ -757,7 +809,8 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       } catch { /* 令牌格式异常时无需吊销 */ }
     }
     // B-前5：登出同时清掉浏览器里的 Cookie（Max-Age=0）
-    clearAuthCookie(res);
+    clearAuthCookie(req, res);
+    recordAuditFromRequest(db, req, { action: 'auth.logout', entityType: 'auth' });
     return res.json({ ok: true });
   });
 
@@ -817,7 +870,12 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     // B-前5：改密会吊销旧令牌（tokenVer+1），重签的新令牌经 Set-Cookie 下发，
     // 否则浏览器里旧 cookie 失效后下一次请求即 401 被踢回登录页
     const renewedToken = issueToken(renewed);
-    setAuthCookie(res, renewedToken);
+    setAuthCookie(req, res, renewedToken);
+    recordAuditFromRequest(db, req, {
+      action: 'auth.password_change',
+      entityType: 'user',
+      entityId: u.userId,
+    });
     return res.json({ ok: true, token: renewedToken });
   }));
 
@@ -857,6 +915,12 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
           return res.status(400).json({ error: '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）' });
         }
         saveRegisterConf(db, { enabled: true, inviteCodeHash: await hashPassword(inviteCode) });
+        recordAuditFromRequest(db, req, {
+          action: 'auth.register_conf',
+          entityType: 'setting',
+          entityId: 'global.register',
+          detail: { enabled: true, inviteCodeUpdated: true },
+        });
         return res.json({ ok: true, enabled: true, hasInviteCode: true });
       }
       // 未提供新码：已设置则保持原哈希不变；从未设置则 400
@@ -864,9 +928,21 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
         return res.status(400).json({ error: '开启注册必须设置 6-32 位邀请码（字母/数字/短横线）' });
       }
       saveRegisterConf(db, { enabled: true, inviteCodeHash: existing.inviteCodeHash });
+      recordAuditFromRequest(db, req, {
+        action: 'auth.register_conf',
+        entityType: 'setting',
+        entityId: 'global.register',
+        detail: { enabled: true, inviteCodeUpdated: false },
+      });
       return res.json({ ok: true, enabled: true, hasInviteCode: true });
     }
     saveRegisterConf(db, { enabled: false, inviteCodeHash: '' });
+    recordAuditFromRequest(db, req, {
+      action: 'auth.register_conf',
+      entityType: 'setting',
+      entityId: 'global.register',
+      detail: { enabled: false },
+    });
     return res.json({ ok: true, enabled: false, hasInviteCode: false });
   }));
 
@@ -907,7 +983,14 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       // 并发新增撞唯一索引 idx_user_name（预检与 INSERT 之间有竞态窗口）
       return res.status(400).json({ error: '该用户名已被使用' });
     }
-    return res.json({ ok: true, id: Number(info.lastInsertRowid) });
+    const newUserId = Number(info.lastInsertRowid);
+    recordAuditFromRequest(db, req, {
+      action: 'auth.user_create',
+      entityType: 'user',
+      entityId: newUserId,
+      detail: { username, role },
+    });
+    return res.json({ ok: true, id: newUserId });
   }));
 
   /** 管理员删除同团队用户（不能删自己，避免把最后一个管理员删掉） */
@@ -915,11 +998,12 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
     const u = req.auth;
     if (!u) return res.status(401).json({ error: '未登录' });
     if (u.role !== 'admin') return res.status(403).json({ error: '只有管理员可以删除用户' });
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: '用户 ID 无效' });
+    const idParsed = parsePositiveInt(req.params.id, '用户 ID');
+    if (!idParsed.ok) return res.status(400).json({ error: '用户 ID 无效' });
+    const id = idParsed.value;
     if (id === u.userId) return res.status(400).json({ error: '不能删除当前登录账号' });
-    const row = db.prepare(`SELECT id, role FROM "user" WHERE id = ? AND teamId = ?`).get(id, u.teamId) as
-      | { id: number; role: string }
+    const row = db.prepare(`SELECT id, name, role FROM "user" WHERE id = ? AND teamId = ?`).get(id, u.teamId) as
+      | { id: number; name: string; role: string }
       | undefined;
     if (!row) return res.status(404).json({ error: '用户不存在' });
     if (row.role === 'admin') {
@@ -927,6 +1011,12 @@ export function mountAuth(router: Router, db: DatabaseSync): void {
       if (admins <= 1) return res.status(400).json({ error: '至少保留一个管理员' });
     }
     db.prepare(`DELETE FROM "user" WHERE id = ? AND teamId = ?`).run(id, u.teamId);
+    recordAuditFromRequest(db, req, {
+      action: 'auth.user_delete',
+      entityType: 'user',
+      entityId: id,
+      detail: { targetName: row.name, targetRole: row.role },
+    });
     return res.json({ ok: true });
   });
 }

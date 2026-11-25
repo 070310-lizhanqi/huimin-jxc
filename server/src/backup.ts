@@ -20,15 +20,14 @@ import { spawn } from 'node:child_process';
 import { dataDir, createWindowLimiter } from './db';
 import { verifyPassword } from './auth';
 import { safeHandler as safe } from './safe-handler';
+import { getConfig } from './config/env';
+import { recordAuditFromRequest } from './infra/audit-log';
 
 const NAME_RE = /^backup-\d{8}-\d{6}(?:-[a-z0-9]{4})?\.db$/;
 
-/**
- * 自动备份保留份数：每次新建备份后只保留最近 N 份，超出按文件名（=时间）删最旧。
- * 无上限的备份目录会随使用年限无限增长（每份约等于整库大小），最终吃满磁盘
- * 反而让备份功能本身失效。30 份足够覆盖「近一个月内发现录错要回滚」的常见诉求。
- */
-const KEEP_BACKUPS = 30;
+function keepBackupsCount(): number {
+  return getConfig().backupKeepCount;
+}
 
 function backupDir(): string {
   const dir = path.join(dataDir(), 'backups');
@@ -59,14 +58,12 @@ function pruneBackups(dir: string, keepFile?: string): string[] {
   } catch {
     return [];
   }
-  if (entries.length <= KEEP_BACKUPS) return [];
+  const keepBackups = keepBackupsCount();
+  if (entries.length <= keepBackups) return [];
   entries.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.file < b.file ? 1 : -1)); // 新 → 旧
   const removed: string[] = [];
-  // 从最旧端开始删，直到剩 KEEP_BACKUPS 份为止。
-  // 不能简单「删 slice(KEEP)」：keepFile 被豁免时那份会占掉一个名额，最终会多留一份；
-  // 用「剩余数量」做循环条件可确保精确收敛，且同秒文件（mtime 相同）也不会误删新份。
   let remaining = entries.length;
-  for (let i = entries.length - 1; i >= 0 && remaining > KEEP_BACKUPS; i--) {
+  for (let i = entries.length - 1; i >= 0 && remaining > keepBackups; i--) {
     const old = entries[i].file;
     if (old === keepFile) continue; // 绝不动本次刚创建的那份
     // 连副产物一起删：备份文件是 WAL 主库的复制，被工具打开过会留下 -wal/-shm，
@@ -215,7 +212,10 @@ function scheduleRestore(source: string, db: DatabaseSync): void {
   const p = (n: number) => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}-${crypto.randomBytes(3).toString('hex')}`;
   const preName = `pre-restore-${stamp}.db`;
-  fs.copyFileSync(dbFilePath(), path.join(backupDir(), preName));
+  // Use SQLite VACUUM INTO instead of fs.copyFileSync(dbFilePath()): on Linux, closing ANY
+  // raw fd to the live DB file in the same PID clears all POSIX fcntl advisory locks held
+  // by SQLite, which tricks other processes closing their DB handles into unlinking -wal/-shm.
+  db.prepare('VACUUM INTO ?').run(path.join(backupDir(), preName));
   console.log(`[恢复] 当前库已备份为 ${preName}，再写入恢复标记。`);
   fs.copyFileSync(source, target);
   // 服务入口：编译产物 dist/server/index.js 相对 server/src 为 ../../dist/server/index.js
@@ -313,10 +313,18 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
       const suffix = Math.random().toString(36).slice(2, 6);
       const name = `backup-${stamp}-${suffix}.db`;
       const dir = backupDir();
-      fs.copyFileSync(dbFilePath(), path.join(dir, name));
+      // Use VACUUM INTO instead of fs.copyFileSync(dbFilePath()) to keep SQLite's POSIX fcntl
+      // locks intact while producing an atomic, compact standalone snapshot.
+      db.prepare('VACUUM INTO ?').run(path.join(dir, name));
       // 保留策略：新建后立即裁剪，避免目录无限增长（显式豁免刚创建的这份）
       const removed = pruneBackups(dir, name);
-      if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${KEEP_BACKUPS} 份）的旧备份`);
+      if (removed.length) console.log(`[备份] 已清理 ${removed.length} 个超出保留上限（${keepBackupsCount()} 份）的旧备份`);
+      recordAuditFromRequest(db, req, {
+        action: 'backup.create',
+        entityType: 'backup',
+        entityId: name,
+        detail: { pruned: removed.length },
+      });
       return res.json({ ok: true, file: name, ...statOf(path.join(dir, name)), pruned: removed.length });
     } catch (e) {
       // A-安4：不把 err.message 回吐给客户端，只写服务端日志
@@ -396,6 +404,12 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     try {
       // 校验通过：先检查点再备份当前库、写 pending（任一步失败都能回滚，见 db.ts）
       checkpoint(db);
+      recordAuditFromRequest(db, req, {
+        action: 'backup.restore',
+        entityType: 'backup',
+        entityId: file,
+        detail: { validationSeconds: Number(validation.seconds.toFixed(2)) },
+      });
       scheduleRestore(full, db);
       return res.json({ ok: true, message: `恢复已排队：服务即将重启，重启后数据回到所选备份时点。（恢复前完整性校验已通过，耗时 ${validation.seconds.toFixed(1)} 秒；当前库已备份，恢复失败可回滚。）` });
     } catch (e) {
@@ -413,6 +427,11 @@ export function mountBackup(router: Router, db: DatabaseSync): void {
     const full = path.join(backupDir(), file);
     if (!fs.existsSync(full)) return res.status(404).json({ error: '备份文件不存在' });
     removeBackupFile(backupDir(), file);
+    recordAuditFromRequest(db, req, {
+      action: 'backup.delete',
+      entityType: 'backup',
+      entityId: file,
+    });
     return res.json({ ok: true });
   });
 }

@@ -3,6 +3,7 @@
  */
 import type { Request, Response, Router } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
+import { recordAuditFromRequest } from './infra/audit-log';
 
 /** 默认单据前缀（可被 team 配置覆盖） */
 export const DEFAULT_PREFIX: Record<string, string> = {
@@ -146,6 +147,13 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       clean[k] = s.toUpperCase();
     }
     setSetting(db, teamId, 'prefix', JSON.stringify(clean));
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: 'setting.prefix',
+      entityType: 'setting',
+      entityId: 'prefix',
+      detail: clean,
+    });
     return res.json({ ok: true, prefix: loadPrefix(db, teamId) });
   });
 
@@ -159,6 +167,13 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       return res.status(400).json({ error: '编号重置方式不合法' });
     }
     setSetting(db, teamId, 'noMode', mode);
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: 'setting.no_mode',
+      entityType: 'setting',
+      entityId: 'noMode',
+      detail: { noMode: mode },
+    });
     return res.json({ ok: true, noMode: mode });
   });
 
@@ -177,6 +192,13 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       showLogo: p.showLogo !== false,
     };
     setSetting(db, teamId, PRINT_KEY, JSON.stringify(conf));
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: 'setting.print',
+      entityType: 'setting',
+      entityId: PRINT_KEY,
+      detail: { company: conf.company, showLogo: conf.showLogo },
+    });
     return res.json({ ok: true, print: conf });
   });
 
@@ -189,6 +211,12 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
     if (scope === 'all' || scope === 'prefix') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'prefix'`).run(teamId);
     if (scope === 'all' || scope === PRINT_KEY) db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = ?`).run(teamId, PRINT_KEY);
     if (scope === 'all' || scope === 'noMode') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'noMode'`).run(teamId);
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: 'setting.reset',
+      entityType: 'setting',
+      entityId: scope,
+    });
     return res.json({ ok: true, prefix: loadPrefix(db, teamId), noMode: loadNoMode(db, teamId), print: loadPrint(db, teamId) });
   });
 }

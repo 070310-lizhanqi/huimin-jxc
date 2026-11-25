@@ -15,6 +15,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { roundHalfAwayFromZero, roundQty } from './shared/money';
 
 /** 账龄分桶边界（天）。最后一段为「超过 720 天」。 */
 const BUCKETS = [30, 60, 90, 180, 360, 720] as const;
@@ -406,10 +407,10 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       const days = firstDate ? daysBetween(firstDate, now) : 0;
       const bucket = bucketOf(days);
       const unitCost = costMap.get(s.productId) ?? s.purchasePrice;
-      const amount = Math.round(s.qty * unitCost);
+      const amount = roundHalfAwayFromZero(s.qty * unitCost);
       totals[bucket] += amount;
       totals.total += amount;
-      totals.qty += s.qty;
+      totals.qty = roundQty(totals.qty + s.qty);
       items.push({
         productId: s.productId,
         prodName: s.prodName,

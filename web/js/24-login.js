@@ -1,8 +1,6 @@
 'use strict';
 /* web/js/24-login.js —— 由 app.js 拆分（lines 4157-4400） */
 /* ================= 登录 / 注册 ================= */
-const BRAND_SVG = `<svg viewBox="0 0 32 32" fill="none"><path d="M16 4c-1.2 0-2.2.6-3 1.6-.7-.5-1.6-.8-2.5-.8-2.4 0-4.3 1.9-4.3 4.3 0 .5.1 1 .3 1.5C5 11.6 4 13.2 4 15c0 1.6.8 3 2 3.9-.3.6-.5 1.3-.5 2 0 2.4 1.9 4.3 4.3 4.3.6 0 1.2-.1 1.7-.4.7 1.2 2 2 3.5 2s2.8-.8 3.5-2c.5.3 1.1.4 1.7.4 2.4 0 4.3-1.9 4.3-4.3 0-.7-.2-1.4-.5-2 1.2-.9 2-2.3 2-3.9 0-1.8-1-3.4-2.5-4.4.2-.5.3-1 .3-1.5 0-2.4-1.9-4.3-4.3-4.3-.9 0-1.8.3-2.5.8C18.2 4.6 17.2 4 16 4z" fill="#f26f21"/><path d="M11.5 13.5c0 1.4 1.1 2.5 2.5 2.5s2.5-1.1 2.5-2.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>`;
-
 const LoginPage = {
   setup() {
     const mode = ref('login'); // login | register
@@ -72,13 +70,13 @@ const LoginPage = {
       }
     }
 
-    return { mode, form, err, busy, firstRun, initialized, submit, switchMode, BRAND_SVG };
+    return { mode, form, err, busy, firstRun, initialized, submit, switchMode };
   },
   template: `
   <div class="login-wrap">
     <div class="login-card">
       <div class="login-brand">
-        <span v-html="BRAND_SVG"></span>
+        <span><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 4c-1.2 0-2.2.6-3 1.6-.7-.5-1.6-.8-2.5-.8-2.4 0-4.3 1.9-4.3 4.3 0 .5.1 1 .3 1.5C5 11.6 4 13.2 4 15c0 1.6.8 3 2 3.9-.3.6-.5 1.3-.5 2 0 2.4 1.9 4.3 4.3 4.3.6 0 1.2-.1 1.7-.4.7 1.2 2 2 3.5 2s2.8-.8 3.5-2c.5.3 1.1.4 1.7.4 2.4 0 4.3-1.9 4.3-4.3 0-.7-.2-1.4-.5-2 1.2-.9 2-2.3 2-3.9 0-1.8-1-3.4-2.5-4.4.2-.5.3-1 .3-1.5 0-2.4-1.9-4.3-4.3-4.3-.9 0-1.8.3-2.5.8C18.2 4.6 17.2 4 16 4z" fill="#f26f21"/><path d="M11.5 13.5c0 1.4 1.1 2.5 2.5 2.5s2.5-1.1 2.5-2.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg></span>
         <span class="t">展惠进销存</span>
       </div>
       <p class="login-sub">{{ mode === 'login' ? '登录你的账套，开始今天的经营' : (firstRun ? '首次使用，请创建管理员账号与账套' : '新建管理员账号') }}</p>
@@ -281,7 +279,7 @@ const App = {
       toast('已退出登录');
     }
 
-    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, activeNav, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, BRAND_SVG, navInd, tipbarOn,
+    return { ready, booting, switchTo, store, route, pageComp, pageTitle, pageKey, curKey, activeNav, onSwitchTeam, MENU, nav, go, openMenu, onNavClick, auth, onLogout, navInd, tipbarOn,
       cmdOpen, cmdKw, cmdList, cmdGo, goLowStock };
   },
   template: `
@@ -290,7 +288,7 @@ const App = {
     <header class="topnav">
       <span class="nav-ind" :style="navInd"></span>
       <div class="brand" @click="nav('#/dashboard')">
-        <span class="brand-mark" v-html="BRAND_SVG"></span>
+        <span class="brand-mark"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 4c-1.2 0-2.2.6-3 1.6-.7-.5-1.6-.8-2.5-.8-2.4 0-4.3 1.9-4.3 4.3 0 .5.1 1 .3 1.5C5 11.6 4 13.2 4 15c0 1.6.8 3 2 3.9-.3.6-.5 1.3-.5 2 0 2.4 1.9 4.3 4.3 4.3.6 0 1.2-.1 1.7-.4.7 1.2 2 2 3.5 2s2.8-.8 3.5-2c.5.3 1.1.4 1.7.4 2.4 0 4.3-1.9 4.3-4.3 0-.7-.2-1.4-.5-2 1.2-.9 2-2.3 2-3.9 0-1.8-1-3.4-2.5-4.4.2-.5.3-1 .3-1.5 0-2.4-1.9-4.3-4.3-4.3-.9 0-1.8.3-2.5.8C18.2 4.6 17.2 4 16 4z" fill="#f26f21"/><path d="M11.5 13.5c0 1.4 1.1 2.5 2.5 2.5s2.5-1.1 2.5-2.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg></span>
         <span class="brand-txt">展惠进销存</span>
       </div>
       <div class="nav-item" v-for="(g, i) in MENU" :key="g.label">
@@ -302,12 +300,12 @@ const App = {
         </div>
       </div>
       <div class="nav-right">
-        <span class="nav-icon" title="快速跳转（Ctrl+K）" @click="cmdOpen = true; cmdKw = ''"><el-icon><Search/></el-icon></span>
-        <span class="nav-icon bell" :class="{ active: store.lowStockCount > 0 }" :title="store.lowStockCount > 0 ? store.lowStockCount + ' 项商品低于安全库存，点击查看' : '库存正常'" @click="goLowStock">
+        <span class="nav-icon" role="button" tabindex="0" aria-label="快速跳转" title="快速跳转（Ctrl+K）" @click="cmdOpen = true; cmdKw = ''" @keydown.enter="cmdOpen = true; cmdKw = ''"><el-icon><Search/></el-icon></span>
+        <span class="nav-icon bell" role="button" tabindex="0" aria-label="低库存提醒" :class="{ active: store.lowStockCount > 0 }" :title="store.lowStockCount > 0 ? store.lowStockCount + ' 项商品低于安全库存，点击查看' : '库存正常'" @click="goLowStock" @keydown.enter="goLowStock">
           <el-icon><Bell/></el-icon>
           <i class="bell-badge" v-if="store.lowStockCount > 0">{{ store.lowStockCount > 99 ? '99+' : store.lowStockCount }}</i>
         </span>
-        <span class="nav-icon" title="使用帮助" @click="nav('#/help')"><el-icon><QuestionFilled/></el-icon></span>
+        <span class="nav-icon" role="button" tabindex="0" aria-label="使用帮助" title="使用帮助" @click="nav('#/help')" @keydown.enter="nav('#/help')"><el-icon><QuestionFilled/></el-icon></span>
         <el-select v-if="store.teams.length > 1" v-model="switchTo" size="small" style="width:150px;margin-left:6px" @change="onSwitchTeam">
           <el-option v-for="t in store.teams" :key="t.id" :label="t.name" :value="t.id"/>
         </el-select>
@@ -316,7 +314,7 @@ const App = {
           <span class="role" v-if="auth.user.role === 'admin'">管理员</span>
           <span class="role" v-else>员工</span>
         </span>
-        <span class="nav-logout" title="退出登录" @click="onLogout"><el-icon><SwitchButton/></el-icon></span>
+        <span class="nav-logout" role="button" tabindex="0" aria-label="退出登录" title="退出登录" @click="onLogout" @keydown.enter="onLogout"><el-icon><SwitchButton/></el-icon></span>
       </div>
     </header>
     <div class="tipbar" v-if="tipbarOn">

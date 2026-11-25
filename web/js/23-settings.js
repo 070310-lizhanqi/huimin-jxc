@@ -115,7 +115,10 @@ const SettingsPage = {
     const pwdForm = reactive({ oldPassword: '', newPassword: '', newPassword2: '' });
 
     async function loadUsers() {
-      if (!auth.user) return;
+      if (!auth.user || !isAdmin.value) {
+        users.value = [];
+        return;
+      }
       userLoading.value = true;
       try {
         users.value = await api.get('/auth/users');
@@ -184,8 +187,8 @@ const SettingsPage = {
       const m = String((e && e.message) || '');
       return /403|Forbidden|仅管理员|权限不足|没有权限/.test(m) ? '权限不足：仅管理员可执行此操作' : '';
     }
-    /** 系统所有者 = 首个账套（teamId 1）；全局注册配置只有它可管理，与服务端 OWNER_TEAM 对应 */
-    const isOwner = computed(() => auth.user?.teamId === 1);
+    /** 系统所有者 = 首个账套（teamId 1）的管理员 */
+    const isOwner = computed(() => auth.user?.teamId === 1 && auth.user?.role === 'admin');
 
     /* ---- 开放注册（邀请码）管理 ---- */
     /* B-安14：后端 GET 不再回显邀请码明文，只返回 enabled 与是否已设置。
@@ -346,6 +349,32 @@ const SettingsPage = {
       } catch (e) { toast(e.message, 'error'); }
     }
 
+    /* ---- 操作审计日志（仅管理员） ---- */
+    const auditLogs = ref([]);
+    const auditLoading = ref(false);
+    const auditPage = ref(1);
+    const auditTotal = ref(0);
+    const auditKw = ref('');
+    const auditAction = ref('');
+
+    async function loadAuditLogs(page) {
+      if (!isAdmin.value) return;
+      if (typeof page === 'number') auditPage.value = Math.max(1, page);
+      auditLoading.value = true;
+      try {
+        const r = await api.get('/audit-logs', {
+          teamId: store.teamId,
+          page: auditPage.value,
+          rows: 20,
+          kw: auditKw.value.trim(),
+          action: auditAction.value.trim(),
+        });
+        auditLogs.value = r.rows || [];
+        auditTotal.value = Number(r.total || 0);
+      } catch (e) { toast(e.message, 'error'); }
+      finally { auditLoading.value = false; }
+    }
+
     onMounted(load);
     return {
       tab, loading, saving, prefix, noMode, print, defaults, rows, sample,
@@ -355,6 +384,7 @@ const SettingsPage = {
       regConf, regLoading, regBusy, loadRegConf, saveRegConf,
       backups, backupDir, backupLoading, backupBusy, loadBackups, createBackup, downloadBackup, restoreBackup, deleteBackup,
       restoreFailed, retryRestore,
+      auditLogs, auditLoading, auditPage, auditTotal, auditKw, auditAction, loadAuditLogs,
       fmtSize, fmtBackupName,
     };
   },
@@ -367,6 +397,7 @@ const SettingsPage = {
         <span class="tb" :class="{ on: tab === 'print' }" @click="tab = 'print'">打印抬头</span>
         <span class="tb" :class="{ on: tab === 'user' }" @click="tab = 'user'; loadUsers(); loadRegConf()">用户与权限</span>
         <span v-if="isAdmin" class="tb" :class="{ on: tab === 'backup' }" @click="tab = 'backup'; loadBackups()">数据备份</span>
+        <span v-if="isAdmin" class="tb" :class="{ on: tab === 'audit' }" @click="tab = 'audit'; loadAuditLogs(1)">操作审计</span>
       </div>
       <div class="hd-right">
         <button v-if="isAdmin" class="btn" @click="reset('all')">恢复默认</button>
@@ -449,7 +480,7 @@ const SettingsPage = {
       <div class="muted" style="font-size:12.5px;margin-bottom:12px">
         当前账套「{{ auth.team ? auth.team.name : '—' }}」的成员。管理员可添加/删除用户；员工只能使用业务功能，不能管理用户。
       </div>
-      <table class="tbl">
+      <table v-if="isAdmin" class="tbl">
         <thead><tr><th style="width:70px">ID</th><th>用户名</th><th style="width:110px">角色</th><th style="width:180px">创建时间</th><th style="width:120px">操作</th></tr></thead>
         <tbody>
           <tr v-for="u in users" :key="u.id">
@@ -469,11 +500,9 @@ const SettingsPage = {
         </tbody>
       </table>
       <div class="de-add" style="margin-top:12px">
-        <template v-if="isAdmin">
-          <button class="btn primary" @click="openUserDialog">+ 添加用户</button>
-          <button class="btn" @click="openPwdDialog">修改我的密码</button>
-        </template>
-        <span v-else class="muted" style="font-size:12.5px">仅管理员可管理用户</span>
+        <button v-if="isAdmin" class="btn primary" @click="openUserDialog">+ 添加用户</button>
+        <button class="btn" @click="openPwdDialog">修改我的密码</button>
+        <span v-if="!isAdmin" class="muted" style="font-size:12.5px">仅管理员可管理团队用户</span>
       </div>
 
       <!-- 开放注册（邀请码）：系统所有者允许其他人自建独立账套 -->
@@ -533,6 +562,49 @@ const SettingsPage = {
       </table>
       <div class="muted" style="font-size:12px;margin-top:10px">
         「下载」把备份文件存到你想放的地方（建议同时保存到本机以外）；「恢复到此」用所选备份覆盖当前全部数据，不可撤销。
+      </div>
+    </div>
+
+    <!-- 操作审计日志 -->
+    <div v-else-if="tab === 'audit'" class="card">
+      <div class="card-title" style="margin-bottom:4px">操作审计日志</div>
+      <div class="muted" style="font-size:12.5px;margin-bottom:12px">
+        记录登录认证、单据过账/作废、资金收付、权限变更、设置与数据备份等关键操作，支持按操作类型与关键词检索。
+      </div>
+      <div class="filterbar" style="border:none;padding:0 0 12px">
+        <input class="finp" v-model="auditAction" placeholder="操作类型（如 doc.audit）" style="width:180px" @keyup.enter="loadAuditLogs(1)"/>
+        <input class="finp" v-model="auditKw" placeholder="搜索操作人 / 实体 ID / 详情" style="width:220px" @keyup.enter="loadAuditLogs(1)"/>
+        <button class="btn primary" :disabled="auditLoading" @click="loadAuditLogs(1)">查询</button>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="width:160px">时间</th>
+            <th style="width:110px">操作人</th>
+            <th style="width:140px">动作</th>
+            <th style="width:110px">对象</th>
+            <th>详情</th>
+            <th style="width:130px">来源 IP</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="log in auditLogs" :key="log.id">
+            <td class="muted nowrap">{{ log.createdAt }}</td>
+            <td>{{ log.username || '—' }}</td>
+            <td><span class="billno">{{ log.action }}</span></td>
+            <td class="muted">{{ log.entityType }}{{ log.entityId ? ' #' + log.entityId : '' }}</td>
+            <td><div class="audit-detail" :title="log.detail || ''">{{ log.detail || '—' }}</div></td>
+            <td class="muted nowrap">{{ log.ip || '—' }}</td>
+          </tr>
+          <tr v-if="auditLoading"><td colspan="6"><div class="empty">加载中…</div></td></tr>
+          <tr v-else-if="!auditLogs.length"><td colspan="6"><div class="empty">暂无符合条件的审计日志</div></td></tr>
+        </tbody>
+      </table>
+      <div class="pager" style="margin-top:12px">
+        <span class="muted">共 {{ auditTotal }} 条记录（第 {{ auditPage }} 页）</span>
+        <span class="fb-gap"></span>
+        <button class="btn sm" :disabled="auditLoading || auditPage <= 1" @click="loadAuditLogs(auditPage - 1)">上一页</button>
+        <button class="btn sm" :disabled="auditLoading || auditPage * 20 >= auditTotal" @click="loadAuditLogs(auditPage + 1)">下一页</button>
       </div>
     </div>
 

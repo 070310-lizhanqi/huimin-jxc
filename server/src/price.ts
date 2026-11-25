@@ -13,18 +13,7 @@ import { escapeLike } from './crud';
  * 读取时机：开单选客户/商品时，前端查 /price/memory 批量取回，优先级高于商品默认售价。
  */
 export function mountPriceMemory(router: Router, db: DatabaseSync): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS price_memory (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      teamId INTEGER NOT NULL,
-      partnerId INTEGER NOT NULL,
-      productId INTEGER NOT NULL,
-      price INTEGER NOT NULL,
-      lastDate TEXT,
-      times INTEGER DEFAULT 1,
-      UNIQUE (teamId, partnerId, productId)
-    );
-  `);
+  // price_memory 表结构已由 db.ts V002_price_memory_schema 统一迁移管理
 
   /** 取某客户对一批商品的历史价（开单时一次性批量查，避免逐行请求） */
   router.get('/price/memory', (req: Request, res: Response) => {

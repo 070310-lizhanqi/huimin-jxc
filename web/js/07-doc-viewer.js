@@ -21,6 +21,11 @@ const DocViewer = {
       }
     }, { immediate: true });
     const close = () => emit('close');
+    function onEscClose(e) {
+      if (e && e.key === 'Escape' && props.docId) close();
+    }
+    onMounted(() => window.addEventListener('keydown', onEscClose));
+    onBeforeUnmount(() => window.removeEventListener('keydown', onEscClose));
     function printDoc() {
       const d = data.value;
       if (!d) return;
@@ -95,9 +100,6 @@ const DocViewer = {
       w.focus();
       w.print();
     }
-    function escapeHtml(s) {
-      return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-    }
     /** 打印页合计数量：null/undefined 不许印出字面 'null' */
     function fmtQtyPrint(v) {
       const n = Number(v);
@@ -111,11 +113,11 @@ const DocViewer = {
       }) };
   },
   template: `
-  <div class="modal-mask" v-if="docId" @click.self="close">
+  <div class="modal-mask" v-if="docId" @click.self="close" role="dialog" aria-modal="true" aria-label="单据详情">
     <div class="modal">
       <div class="modal-head">
         <span class="mt">{{ data ? (DOC_META[data.doc.type]?.label || data.doc.type) + ' ' + data.doc.billNo : '单据详情' }}</span>
-        <span class="x" @click="close">×</span>
+        <button type="button" class="x" aria-label="关闭" style="background:none;border:0" @click="close">×</button>
       </div>
       <div class="modal-body" v-if="data">
         <div class="form-grid">

@@ -4,16 +4,20 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { recordAuditFromRequest } from './infra/audit-log';
+import { sendError } from './infra/errors';
+import { parsePositiveInt } from './infra/validate';
+import { PRICE_CENTS_MAX, QTY_MAX, roundQty } from './shared/money';
 
 type Value = string | number | null;
 
 /** 列表分页保护：单页行数上限（防止恶意大分页拖垮内存） */
 export const CRUD_MAX_ROWS = 500;
 
+export { PRICE_CENTS_MAX, QTY_MAX };
+
 /**
- * B-安13：档案字段上限（与导入侧共用同一份常量，见 docimport.ts / index.ts 的商品导入）。
- * 阈值依据：仓库内无存量生产库文件（data/ 为空），演示/测试数据均为短名；
- * name 100 / remark 500 远高于正常档案长度，正常业务不受影响。
+ * B-安13：档案字段上限（与导入侧共用同一份常量，见 docimport.ts / product-import-service.ts）。
  */
 export const FIELD_LIMITS: Record<string, number> = {
   name: 100,
@@ -26,10 +30,6 @@ export const FIELD_LIMITS: Record<string, number> = {
   priceLevel: 20,
   type: 20,
 };
-/** 价格类字段：整数分语义（与导入侧 9_999_999 分上限一致，约 10 万元） */
-export const PRICE_CENTS_MAX = 9_999_999;
-/** 数量类字段上限（与 docs.ts MAX_QTY 一致） */
-export const QTY_MAX = 9_999_999;
 /** 以“分”为单位存整数的字段：小数一律 Math.round 取整，拒绝 REAL 落库 */
 export const INT_CENTS_FIELDS = new Set(['salePrice', 'retailPrice', 'purchasePrice', 'wholePrice', 'balance']);
 /** 以 4 位小数存的数量字段 */
@@ -56,7 +56,7 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       const s = v.trim();
       if (s === '') return { value: null };
       if (!/^-?\d+(\.\d+)?$/.test(s)) return { error: `「${field}」必须是数字` };
-      const n = Math.round(Number(s) * 10000) / 10000;
+      const n = roundQty(Number(s));
       if (!Number.isFinite(n) || Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
       return { value: n };
     }
@@ -70,7 +70,7 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       return { value: n };
     }
     if (QTY_FIELDS.has(field)) {
-      const n = Math.round(v * 10000) / 10000;
+      const n = roundQty(v);
       if (Math.abs(n) > QTY_MAX) return { error: `「${field}」超出上限 ${QTY_MAX}` };
       return { value: n };
     }
@@ -151,16 +151,23 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
   });
 
   router.post(`/${cfg.table}`, (req: Request, res: Response) => {
-    const teamId = Number(req.body.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const teamIdParsed = parsePositiveInt(req.body.teamId, 'teamId');
+    if (!teamIdParsed.ok) return sendError(req, res, 400, 'teamId 不能为空');
+    const teamId = teamIdParsed.value;
+    if (cfg.fields.includes('name')) {
+      const rawName = (req.body as Record<string, unknown>).name;
+      if (typeof rawName !== 'string' || !rawName.trim()) {
+        return sendError(req, res, 400, '名称不能为空');
+      }
+    }
     if (cfg.validate) {
       const err = cfg.validate(req.body as Record<string, unknown>);
-      if (err) return res.status(400).json({ error: err });
+      if (err) return sendError(req, res, 400, err);
     }
     const values: Value[] = [];
     for (const f of cfg.fields) {
       const checked = checkField(f, req.body[f]);
-      if ('error' in checked) return res.status(400).json({ error: checked.error });
+      if ('error' in checked) return sendError(req, res, 400, checked.error);
       values.push(checked.value);
     }
     let info: { lastInsertRowid: number | bigint };
@@ -170,31 +177,46 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
         .run(teamId, ...values);
     } catch {
       // 唯一索引兜底（如商品同名）触发时返回友好错误而非 500
-      return res.status(400).json({ error: '保存失败：名称可能已存在' });
+      return sendError(req, res, 400, '保存失败：名称可能已存在');
     }
-    const row = db.prepare(`SELECT * FROM ${cfg.table} WHERE id = ?`).get(info.lastInsertRowid);
+    const newId = Number(info.lastInsertRowid);
+    const row = db.prepare(`SELECT * FROM ${cfg.table} WHERE id = ?`).get(newId);
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: `archive.${cfg.table}.create`,
+      entityType: cfg.table,
+      entityId: newId,
+      detail: { name: (req.body as Record<string, unknown>).name ?? null },
+    });
     return res.json(row);
   });
 
   router.put(`/${cfg.table}/:id`, (req: Request, res: Response) => {
-    const teamId = Number(req.body.teamId);
-    const id = Number(req.params.id);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const teamIdParsed = parsePositiveInt(req.body.teamId, 'teamId');
+    if (!teamIdParsed.ok) return sendError(req, res, 400, 'teamId 不能为空');
+    const teamId = teamIdParsed.value;
+    const idParsed = parsePositiveInt(req.params.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
+    if (cfg.fields.includes('name') && (req.body as Record<string, unknown>).name !== undefined) {
+      const rawName = (req.body as Record<string, unknown>).name;
+      if (typeof rawName !== 'string' || !rawName.trim()) {
+        return sendError(req, res, 400, '名称不能为空');
+      }
+    }
     if (cfg.validate) {
       // PUT 语义补充路由 id：validate 需要区分「新建」与「编辑自身」
       // （如分类父级成环检测依赖被编辑记录的 id）。
       const err = cfg.validate({ ...(req.body as Record<string, unknown>), id });
-      if (err) return res.status(400).json({ error: err });
+      if (err) return sendError(req, res, 400, err);
     }
     // PATCH 式更新：请求体未携带的字段（undefined）保持旧值，显式传 null/'' 才清空。
-    // 原实现把 undefined 一律 normalize 成 NULL——局部更新会静默清掉未携带的字段
-    // （前端目前总发全量字段所以未触发，但 API 是对外契约，不能埋这个雷）
     const present = updateFields.filter((f) => (req.body as Record<string, unknown>)[f] !== undefined);
-    if (!present.length) return res.status(400).json({ error: '没有可更新的字段' });
+    if (!present.length) return sendError(req, res, 400, '没有可更新的字段');
     const values: Value[] = [];
     for (const f of present) {
       const checked = checkField(f, req.body[f]);
-      if ('error' in checked) return res.status(400).json({ error: checked.error });
+      if ('error' in checked) return sendError(req, res, 400, checked.error);
       values.push(checked.value);
     }
     let info: { changes: number | bigint };
@@ -203,27 +225,43 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
         .prepare(`UPDATE ${cfg.table} SET ${present.map((f) => `${f} = ?`).join(', ')} WHERE id = ? AND teamId = ?`)
         .run(...values, id, teamId);
     } catch {
-      return res.status(400).json({ error: '保存失败：名称可能已存在' });
+      return sendError(req, res, 400, '保存失败：名称可能已存在');
     }
-    if (info.changes === 0) return res.status(404).json({ error: '记录不存在' });
+    if (info.changes === 0) return sendError(req, res, 404, '记录不存在');
     const row = db
       .prepare(`SELECT * FROM ${cfg.table} WHERE id = ? AND teamId = ?`)
       .get(id, teamId);
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: `archive.${cfg.table}.update`,
+      entityType: cfg.table,
+      entityId: id,
+      detail: { fields: present },
+    });
     return res.json(row);
   });
 
   router.delete(`/${cfg.table}/:id`, (req: Request, res: Response) => {
-    const teamId = Number(req.query.teamId);
-    const id = Number(req.params.id);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    const teamIdParsed = parsePositiveInt(req.query.teamId, 'teamId');
+    if (!teamIdParsed.ok) return sendError(req, res, 400, 'teamId 不能为空');
+    const teamId = teamIdParsed.value;
+    const idParsed = parsePositiveInt(req.params.id, 'id');
+    if (!idParsed.ok) return sendError(req, res, 400, idParsed.error);
+    const id = idParsed.value;
     if (cfg.deleteGuard) {
       // guard 带 teamId：引用检查只看本团队的记录，跨团队 id 不构成删除障碍也不泄露他队数据
       const err = cfg.deleteGuard(db, id, teamId);
-      if (err) return res.status(400).json({ error: err });
+      if (err) return sendError(req, res, 400, err);
     }
     // 删除带归属校验返回影响行数：目标不存在/跨团队时返回 404（此前静默返回 ok 语义失真）
     const info = db.prepare(`DELETE FROM ${cfg.table} WHERE id = ? AND teamId = ?`).run(id, teamId);
-    if (info.changes === 0) return res.status(404).json({ error: '记录不存在' });
+    if (info.changes === 0) return sendError(req, res, 404, '记录不存在');
+    recordAuditFromRequest(db, req, {
+      teamId,
+      action: `archive.${cfg.table}.delete`,
+      entityType: cfg.table,
+      entityId: id,
+    });
     return res.json({ ok: true });
   });
 }

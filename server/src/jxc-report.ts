@@ -9,8 +9,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
-import { allocateDocDiscounts, type DiscountableLine } from './report';
-// 无循环引用：report.ts 只 import ./db，与 dashboard.ts 引用 allocateDocDiscounts 的方式相同。
+import { allocateDocDiscounts, lineAmount, roundQty, type DiscountableLine } from './shared/money';
 
 function rangeOf(req: Request): { from: string; to: string; error: string | null } {
   const d = new Date();
@@ -124,10 +123,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       };
       const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
       if (IN_TYPES.has(l.type)) {
-        a.inQty += l.qty;
+        a.inQty = roundQty(a.inQty + l.qty);
         a.inAmount += net;
       } else {
-        a.outQty += l.qty;
+        a.outQty = roundQty(a.outQty + l.qty);
         a.outAmount += net;
       }
       aggMap.set(l.productId, a);
@@ -138,9 +137,9 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
 
     const totals = rows.reduce(
       (s, r) => ({
-        inQty: s.inQty + r.inQty,
+        inQty: roundQty(s.inQty + r.inQty),
         inAmount: s.inAmount + r.inAmount,
-        outQty: s.outQty + r.outQty,
+        outQty: roundQty(s.outQty + r.outQty),
         outAmount: s.outAmount + r.outAmount,
       }),
       { inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 },
@@ -234,7 +233,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       const outQty = outMap.get(p.id) ?? 0;
       const avgDailyOut = outQty / windowDays;
       const unitCost = Math.round(costMap.get(p.id) ?? p.purchasePrice);
-      const amount = Math.round(qty * unitCost);
+      const amount = lineAmount(qty, unitCost);
       // 可售天数：无出库记录时视为无限
       const saleableDays = avgDailyOut > 0 ? Math.floor(qty / avgDailyOut) : null;
       // 建议补货：可售天数 < 15 天时补到 30 天用量

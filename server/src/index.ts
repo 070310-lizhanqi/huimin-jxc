@@ -1,26 +1,18 @@
 /**
- * 服务入口：Express + node:sqlite
- * 端口 7741，REST 风格 /api/<资源>
+ * 服务入口：配置初始化、数据库迁移、gzip 静态加速、单实例锁与优雅停机
  */
-import express from 'express';
-import { openDb, migrate, tryCheckpoint, createWindowLimiter } from './db';
-import { mountCrud, PRICE_CENTS_MAX, QTY_MAX } from './crud';
-import { mountDocs } from './docs';
-import { mountStockQueries } from './stock';
-import { mountSettlements } from './settlement';
-import { mountReports } from './report';
-import { mountAging } from './aging';
-import { mountDashboard } from './dashboard';
-import { mountJxcReports } from './jxc-report';
-import { mountPriceMemory } from './price';
-import { mountSettings } from './settings';
-import { mountAuth, requireAuth } from './auth';
-import { mountDocImport } from './docimport';
-import { mountBackup } from './backup';
-import { dataDir } from './db';
+import fs from 'node:fs';
+import type http from 'node:http';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { createApp } from './app';
 import { ConfigError, initConfig } from './config/env';
 import type { AppConfig } from './config/env';
-import type { Router } from 'express';
+import { dataDir, migrate, openDb, tryCheckpoint } from './db';
+import { recordAuditFromRequest } from './infra/audit-log';
+import { sendError } from './infra/errors';
+import { requireAdmin } from './middleware/rbac';
 
 let appConfig: AppConfig;
 try {
@@ -38,555 +30,160 @@ const PORT = appConfig.port;
 const db = openDb(appConfig.dbPath);
 migrate(db);
 
-const app = express();
-app.set('x-powered-by', false);
-app.set('trust proxy', appConfig.trustProxy);
-app.use(express.json({ limit: '2mb' }));
+/** 零依赖异步 gzip 中间件（保留 !res.getHeader('content-encoding') 守卫与 /vendor 缓存） */
+function createGzipMiddleware(): RequestHandler {
+  const GZIP_MIN = 1024;
+  const GZIP_MAX_BUFFER = 32 * 1024 * 1024;
+  const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
+  const GZIP_SKIP_PATH = /^\/api\/backup\/download/;
+  const VENDOR_GZIP_CACHE = new Map<string, { body: Buffer; origSize: number }>();
+  let vendorGzipCacheBytes = 0;
+  const VENDOR_GZIP_CACHE_MAX = 16 * 1024 * 1024;
 
-// Host 头白名单：本机应用被隧道/反代暴露时，防 DNS rebinding（攻击者用自己域名解析到 127.0.0.1
-// 借用户浏览器读本地 API）。白名单外的 Host 直接拒绝；隧道域名通过 ORANGE_ALLOW_HOSTS 追加。
-// A-安5：Host 检查必须在 CORS 之前——CORS 中间件对 OPTIONS 预检直接返回 204，
-// 若 Host 检查在其后，任意 Host 的预检都能绕过白名单拿到 204。
-const ALLOW_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', ...appConfig.allowHosts]);
-const hostAllowed = (hostHeader: string): boolean => {
-  const h = hostHeader.replace(/:\d+$/, '').toLowerCase();
-  if (ALLOW_HOSTS.has(h)) return true;
-  // 本机任意回环地址（如 127.0.0.5）也算可信
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-};
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const host = String(req.headers.host ?? '');
-  if (host && !hostAllowed(host)) {
-    res.status(421).json({ error: '请求 Host 不在允许列表内（本机应用默认仅允许 127.0.0.1/localhost）' });
-    return;
-  }
-  next();
-});
-
-// CORS：仅允许同源与本地开发端口（白名单按实际端口动态生成，改 PORT 部署不失效）
-const ALLOW_ORIGINS = new Set(
-  [PORT, 19387].flatMap((p) => [`http://127.0.0.1:${p}`, `http://localhost:${p}`]),
-);
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && ALLOW_ORIGINS.has(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Max-Age', '600');
-  }
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(204);
-    return;
-  }
-  next();
-});
-
-// 基线安全响应头。说明：前端是无构建的 Vue 3 global build（模板运行时编译依赖 new Function），
-// 严格 CSP 需放开 unsafe-eval 反而削弱其意义，故不引入 CSP；仅设置无副作用的基线安全头。
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'same-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  next();
-});
-
-// 零依赖 gzip 压缩：vendor 库（echarts ≈1MB）与 JSON API 响应体积约缩至 1/3，
-// 显著加快首屏与列表加载。阈值以下不压（压缩开销不划算）。
-import zlib from 'node:zlib';
-const GZIP_MIN = 1024;
-// 上限保护：单次响应缓冲超过 32MB 时直接放弃压缩，转发原始响应——
-// 避免报表导出/备份下载这类大响应被整体缓冲进内存推高 RSS。
-const GZIP_MAX_BUFFER = 32 * 1024 * 1024;
-const COMPRESSIBLE = /^(text\/|application\/json|application\/javascript|application\/xml|image\/svg)/;
-// 下载/导出路由显式跳过压缩：备份文件已是 SQLite 二进制，压缩无收益且放大内存
-const GZIP_SKIP_PATH = /^\/api\/backup\/download/;
-// B-安12：/vendor/* 压缩结果内存缓存。vendor 文件内容恒定（immutable: true 已声明），
-// 同一文件重复压缩是纯浪费；缓存键为请求路径，附带原文体积做一致性校验。
-// 上限 16MB（全部 vendor 约 2.7MB，gzip 后约 0.8MB，留足余量）；超限后不再新增缓存项。
-const VENDOR_GZIP_CACHE = new Map<string, { body: Buffer; origSize: number }>();
-let vendorGzipCacheBytes = 0;
-const VENDOR_GZIP_CACHE_MAX = 16 * 1024 * 1024;
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const accept = String(req.headers['accept-encoding'] ?? '');
-  if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
-    next();
-    return;
-  }
-  // 下载路由跳过：直接走原始流式响应
-  if (GZIP_SKIP_PATH.test(req.path)) {
-    next();
-    return;
-  }
-  // B-安12：先把请求路径/方法快照下来。挂载点后的中间件（如 app.use('/vendor', …)）
-  // 会改写 req.url，res.end 执行时 req.path 已不含挂载前缀（实测 /vendor/echarts.min.js
-  // 会变成 /echarts.min.js），缓存键必须用进入中间件时的原始路径，否则永远命中不了。
-  const reqPath = req.path;
-  const reqMethod = req.method;
-  // 包装 write/end：缓冲完整体再统一 gzip（静态文件与 JSON 均为一次性写出，内存可控）
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let usingGzip = false;
-  let overflow = false; // 缓冲超上限后放弃压缩，直接转发原始字节
-  const origWrite = res.write.bind(res) as (c: unknown) => boolean;
-  const origEnd = res.end.bind(res) as (...a: unknown[]) => express.Response;
-  const origSetHeader = res.setHeader.bind(res);
-  res.setHeader = (name: string, value: unknown) => {
-    // 内容长度按压缩后重算；压缩决定下发前先扣下原值
-    if (usingGzip && /^content-length$/i.test(name)) return res;
-    return origSetHeader(name, value as never);
-  };
-  res.write = (chunk: unknown): boolean => {
-    if (chunk) {
-      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-      // 超上限：放弃压缩，立即把已缓冲内容原样写出，转入直通模式
-      if (!overflow && size + b.length > GZIP_MAX_BUFFER) {
-        overflow = true;
-        for (const c of chunks) origWrite(c);
-        chunks.length = 0;
-        origWrite(b);
-        return true;
-      }
-      if (overflow) {
-        origWrite(b);
-        return true;
-      }
-      chunks.push(b);
-      size += b.length;
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const accept = String(req.headers['accept-encoding'] ?? '');
+    if (!/\bgzip\b/.test(accept) || req.headers['content-encoding']) {
+      next();
+      return;
     }
-    return true;
-  };
-  res.end = (...a: unknown[]): express.Response => {
-    const tail = a[0];
-    if (tail) {
-      const b = Buffer.isBuffer(tail) ? tail : Buffer.from(String(tail));
-      if (overflow) {
-        origWrite(b);
-        return origEnd();
-      }
-      if (size + b.length > GZIP_MAX_BUFFER) {
-        // 最后一个 chunk 把它顶超上限：原样转发全部
-        for (const c of chunks) origWrite(c);
-        chunks.length = 0;
-        origWrite(b);
-        return origEnd();
-      }
-      chunks.push(b);
-      size += b.length;
+    if (GZIP_SKIP_PATH.test(req.path)) {
+      next();
+      return;
     }
-    if (overflow) return origEnd();
-    const type = String(res.getHeader('content-type') ?? '').split(';')[0];
-    // 决策：类型可压 + 体积达标 + 未手动指定 Content-Encoding
-    if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
-      // B-安12：vendor 静态文件先查压缩缓存（内容恒定，命中即零压缩成本）
-      if (reqMethod === 'GET' && reqPath.startsWith('/vendor/')) {
-        const hit = VENDOR_GZIP_CACHE.get(reqPath);
-        if (hit && hit.origSize === size) {
-          usingGzip = true;
-          origSetHeader('content-encoding', 'gzip');
-          origSetHeader('content-length', String(hit.body.length));
-          origSetHeader('vary', 'Accept-Encoding');
-          origWrite(hit.body);
+    const reqPath = req.path;
+    const reqMethod = req.method;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let usingGzip = false;
+    let overflow = false;
+    const origWrite = res.write.bind(res) as (c: unknown) => boolean;
+    const origEnd = res.end.bind(res) as (...a: unknown[]) => Response;
+    const origSetHeader = res.setHeader.bind(res);
+    res.setHeader = (name: string, value: unknown) => {
+      if (usingGzip && /^content-length$/i.test(name)) return res;
+      return origSetHeader(name, value as never);
+    };
+    res.write = (chunk: unknown): boolean => {
+      if (chunk) {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        if (!overflow && size + b.length > GZIP_MAX_BUFFER) {
+          overflow = true;
+          for (const c of chunks) origWrite(c);
+          chunks.length = 0;
+          origWrite(b);
+          return true;
+        }
+        if (overflow) {
+          origWrite(b);
+          return true;
+        }
+        chunks.push(b);
+        size += b.length;
+      }
+      return true;
+    };
+    res.end = (...a: unknown[]): Response => {
+      const tail = a[0];
+      if (tail) {
+        const b = Buffer.isBuffer(tail) ? tail : Buffer.from(String(tail));
+        if (overflow) {
+          origWrite(b);
           return origEnd();
         }
+        if (size + b.length > GZIP_MAX_BUFFER) {
+          for (const c of chunks) origWrite(c);
+          chunks.length = 0;
+          origWrite(b);
+          return origEnd();
+        }
+        chunks.push(b);
+        size += b.length;
       }
-      usingGzip = true;
-      const body = Buffer.concat(chunks);
-      chunks.length = 0;
-      // B-安12：gzipSync 会阻塞事件循环（1MB 的 echarts 约 47ms，期间登录等小请求都被拖住），
-      // 改为异步 zlib.gzip（走 libuv 线程池），压缩完成后再写出；失败则回落为明文。
-      zlib.gzip(body, { level: 6 }, (err, gzipped) => {
-        if (err || !gzipped) {
-          console.error('[gzip] 压缩失败，回落明文:', err);
-          usingGzip = false;
-          origWrite(body);
+      if (overflow) return origEnd();
+      const type = String(res.getHeader('content-type') ?? '').split(';')[0];
+      if (size >= GZIP_MIN && COMPRESSIBLE.test(type) && !res.getHeader('content-encoding')) {
+        if (reqMethod === 'GET' && reqPath.startsWith('/vendor/')) {
+          const hit = VENDOR_GZIP_CACHE.get(reqPath);
+          if (hit && hit.origSize === size) {
+            usingGzip = true;
+            origSetHeader('content-encoding', 'gzip');
+            origSetHeader('content-length', String(hit.body.length));
+            origSetHeader('vary', 'Accept-Encoding');
+            origWrite(hit.body);
+            return origEnd();
+          }
+        }
+        usingGzip = true;
+        const body = Buffer.concat(chunks);
+        chunks.length = 0;
+        zlib.gzip(body, { level: 6 }, (err, gzipped) => {
+          if (err || !gzipped) {
+            console.error('[gzip] 压缩失败，回落明文:', err);
+            usingGzip = false;
+            origWrite(body);
+            origEnd();
+            return;
+          }
+          if (reqMethod === 'GET' && reqPath.startsWith('/vendor/') && gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+            if (!VENDOR_GZIP_CACHE.has(reqPath) && vendorGzipCacheBytes + gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
+              VENDOR_GZIP_CACHE.set(reqPath, { body: gzipped, origSize: size });
+              vendorGzipCacheBytes += gzipped.length;
+            }
+          }
+          origSetHeader('content-encoding', 'gzip');
+          origSetHeader('content-length', String(gzipped.length));
+          origSetHeader('vary', 'Accept-Encoding');
+          origWrite(gzipped);
           origEnd();
-          return;
-        }
-        // 压缩成功：vendor 文件记入缓存（总量封顶，超限不再新增）
-        if (reqMethod === 'GET' && reqPath.startsWith('/vendor/') && gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
-          if (!VENDOR_GZIP_CACHE.has(reqPath) && vendorGzipCacheBytes + gzipped.length <= VENDOR_GZIP_CACHE_MAX) {
-            VENDOR_GZIP_CACHE.set(reqPath, { body: gzipped, origSize: size });
-            vendorGzipCacheBytes += gzipped.length;
-          }
-        }
-        origSetHeader('content-encoding', 'gzip');
-        origSetHeader('content-length', String(gzipped.length));
-        origSetHeader('vary', 'Accept-Encoding');
-        origWrite(gzipped);
-        origEnd();
+        });
+        return res;
+      }
+      for (const c of chunks) origWrite(c);
+      return origEnd();
+    };
+    next();
+  };
+}
+
+let shutdownHandler: ((signal: string) => Promise<void>) | null = null;
+
+const app = createApp(db, appConfig, {
+  gzipMiddleware: createGzipMiddleware(),
+  mountApiExtra: (api) => {
+    api.post('/admin/shutdown', requireAdmin('仅管理员可执行停机操作'), (req: Request, res: Response) => {
+      const remote = req.socket.remoteAddress;
+      if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+        return sendError(req, res, 403, '仅允许本机调用', 'FORBIDDEN');
+      }
+      recordAuditFromRequest(db, req, {
+        action: 'admin.shutdown',
+        entityType: 'system',
+        detail: { remote },
       });
-      return res;
-    }
-    for (const c of chunks) origWrite(c);
-    return origEnd();
-  };
-  next();
-});
-
-const api: Router = express.Router();
-
-// 认证路由（注册/登录/状态查询为公开；其余在 mountAuth 内部自带 requireAuth）
-mountAuth(api, db);
-
-// 自此之后注册的全部业务路由都要求登录。
-// requireAuth 会把 req.query/req.body 里的 teamId 覆盖为令牌中的团队，
-// 因此下游路由无需改造即实现团队数据隔离，客户端无法越权读写其他团队。
-api.use(requireAuth);
-
-// 基础档案 CRUD（含删除引用保护）
-const exists = (sql: string, ...args: Array<string | number>): boolean =>
-  Boolean((db.prepare(sql).get(...args) as { c: number } | undefined)?.c);
-mountCrud(api, db, {
-  table: 'cat',
-  fields: ['parentId', 'name'],
-  deleteGuard: (_d, id, teamId) => {
-    // 子分类/商品引用检查限定本团队：跨团队 id 不构成删除障碍
-    if (exists(`SELECT COUNT(*) AS c FROM cat WHERE parentId = ? AND teamId = ?`, id, teamId)) return '分类下还有子分类，不能删除';
-    if (exists(`SELECT COUNT(*) AS c FROM product WHERE catId = ? AND teamId = ?`, id, teamId)) return '分类下还有商品，不能删除';
-    return null;
-  },
-  // 新建/改分类时校验父分类归属本团队（防把分类挂到别的团队的分类树下），
-  // 并沿 parentId 向上查环：把祖先挂到自己的子孙下会形成环，导致前端分类树无限递归。
-  validate: (body) => {
-    const parentId = Number(body.parentId);
-    if (parentId) {
-      const teamId = Number(body.teamId);
-      const p = db.prepare(`SELECT id FROM cat WHERE id = ? AND teamId = ?`).get(parentId, teamId) as
-        | { id: number }
-        | undefined;
-      if (!p) return '父分类不存在';
-      const editId = Number(body.id);
-      if (editId) {
-        // 自引用与间接环检测：从父级沿链上溯，遇到自己即成环
-        // B-安10④：语句提到循环外预编译一次（原每跳一次 db.prepare，最深 100 跳即 100 次编译）
-        const parentStmt = db.prepare(`SELECT parentId FROM cat WHERE id = ? AND teamId = ?`);
-        let cur = parentId;
-        for (let hop = 0; hop < 100; hop++) {
-          if (cur === editId) return '父分类不能是自己或自己的子分类';
-          const row = parentStmt.get(cur, teamId) as
-            | { parentId: number | null }
-            | undefined;
-          if (!row || !row.parentId) break;
-          cur = row.parentId;
-        }
-      }
-    }
-    return null;
-  },
-});
-mountCrud(api, db, {
-  table: 'product',
-  fields: ['catId', 'name', 'barcode', 'unit', 'spec', 'salePrice', 'retailPrice', 'purchasePrice', 'wholePrice', 'lowQty', 'remark', 'archived'],
-  // 关键词同时搜条码/规格：扫码枪录入与按规格找货都不用先选列
-  kwFields: ['barcode', 'spec'],
-  deleteGuard: (_d, id, teamId) => {
-    if (exists(`SELECT COUNT(*) AS c FROM doc_item i JOIN doc x ON x.id = i.docId WHERE i.productId = ? AND x.teamId = ?`, id, teamId)) return '商品已被单据引用，不能删除';
-    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE productId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '商品还有库存，不能删除';
-    return null;
-  },
-});
-mountCrud(api, db, {
-  table: 'warehouse',
-  fields: ['name', 'remark'],
-  deleteGuard: (_d, id, teamId) => {
-    if (exists(`SELECT COUNT(*) AS c FROM reservoir WHERE warehouseId = ? AND teamId = ?`, id, teamId)) return '仓库下还有库位，不能删除';
-    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE warehouseId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '仓库还有库存，不能删除';
-    // 单据引用（含调拨目标仓）：被引用的仓库删除会让历史单据仓库名悬空
-    if (exists(`SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND status != 'void' AND (warehouseId = ? OR warehouseId IS NULL) AND EXISTS (SELECT 1 FROM doc_item WHERE docId = doc.id AND toWarehouseId = ?)`, teamId, id, id)) return '仓库已被调拨单引用，不能删除';
-    if (exists(`SELECT COUNT(*) AS c FROM doc WHERE teamId = ? AND warehouseId = ? AND status != 'void'`, teamId, id)) return '仓库已被单据引用，不能删除';
-    return null;
-  },
-});
-mountCrud(api, db, {
-  table: 'reservoir',
-  fields: ['warehouseId', 'name'],
-  deleteGuard: (_d, id, teamId) => {
-    if (exists(`SELECT COUNT(*) AS c FROM stock WHERE reservoirId = ? AND teamId = ? AND qty != 0`, id, teamId)) return '库位还有库存，不能删除';
-    return null;
-  },
-});
-const partnerGuard = (ptype: 'cus' | 'ven', label: string) => (_d: unknown, id: number, teamId: number): string | null => {
-  if (exists(
-    `SELECT COUNT(*) AS c FROM doc WHERE partnerType = ? AND partnerId = ? AND teamId = ? AND status != 'void'`,
-    ptype,
-    id,
-    teamId,
-  )) return `${label}已被单据引用，不能删除`;
-  if (exists(
-    `SELECT COUNT(*) AS c FROM settlement WHERE partnerType = ? AND partnerId = ? AND teamId = ?`,
-    ptype,
-    id,
-    teamId,
-  )) return `${label}已有收付款记录，不能删除`;
-  return null;
-};
-mountCrud(api, db, { table: 'customer', fields: ['name', 'mobile', 'address', 'remark', 'priceLevel'], deleteGuard: partnerGuard('cus', '客户') });
-mountCrud(api, db, { table: 'vendor', fields: ['name', 'mobile', 'address', 'remark'], deleteGuard: partnerGuard('ven', '供应商') });
-mountCrud(api, db, {
-  table: 'clerk',
-  fields: ['name', 'mobile'],
-  deleteGuard: (_d, id, teamId) =>
-    exists(`SELECT COUNT(*) AS c FROM doc WHERE clerkId = ? AND teamId = ?`, id, teamId) ? '业务员已被单据引用，不能删除' : null,
-});
-mountCrud(api, db, {
-  table: 'account',
-  fields: ['name', 'type', 'balance'],
-  // 期初余额仅创建时可设；余额只能由收付款/单据结算变动，防止任意登录用户直接篡改资金
-  createOnlyFields: ['balance'],
-  deleteGuard: (_d, id, teamId) =>
-    exists(`SELECT COUNT(*) AS c FROM settlement WHERE accountId = ? AND teamId = ?`, id, teamId) ? '账户已被收付款引用，不能删除' : null,
-});
-// 商品单位档案
-mountCrud(api, db, {
-  table: 'unit',
-  fields: ['name', 'remark'],
-  deleteGuard: (d, id, teamId) => {
-    const row = d.prepare(`SELECT name, teamId FROM unit WHERE id = ? AND teamId = ?`).get(id, teamId) as
-      { name: string; teamId: number } | undefined;
-    if (!row) return null;
-    return exists(`SELECT COUNT(*) AS c FROM product WHERE teamId = ? AND unit = ?`, row.teamId, row.name)
-      ? '该单位已被商品使用，不能删除' : null;
+      res.json({ ok: true });
+      setTimeout(() => {
+        if (shutdownHandler) void shutdownHandler('HTTP');
+      }, 50);
+      return;
+    });
   },
 });
 
-// 单据与库存
-mountDocs(api, db);
-// 单据 Excel/CSV 智能导入（raw body 上传）
-mountDocImport(api, db);
-mountStockQueries(api, db);
-mountSettlements(api, db);
-mountReports(api, db);
-mountAging(api, db);
-mountDashboard(api, db);
-mountJxcReports(api, db);
-mountPriceMemory(api, db);
-mountSettings(api, db);
-// 数据备份与恢复（仅管理员）
-mountBackup(api, db);
-
-// 商品批量导入：部分成功模式（错误行跳过并返回行号错误清单）
-/** B-安4③：商品导入按团队限速（每分钟 100 次），1000 行建档是高成本操作。阈值调参（2026-11-21，总协调人）：
- *  与单据导入同口径：全量回归一分钟内合法导入约 20 余次，10 次/分钟误伤既有测试；100 次留有余量。 */
-const productImportLimit = createWindowLimiter(100, 60_000);
-api.post('/product/import', (req, res) => {
-  // A-安3：批量导入商品仅 admin（与 backup.ts 的 requireAdmin 同款；
-  // settings 侧是 A 组的事；E 组在并行做前端店员门控，随同一批快照发布，不存在 403 窗口）
-  if (!req.auth || req.auth.role !== 'admin') return res.status(403).json({ error: '仅管理员可批量导入商品' });
-  if (!productImportLimit(`team:${req.auth.teamId}`)) {
-    return res.status(429).json({ error: '导入过于频繁，请稍后再试' });
-  }
-  const teamId = Number(req.body.teamId);
-  if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-  const rows = req.body.rows as Array<Record<string, unknown>>;
-  if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: '导入数据不能为空' });
-  if (rows.length > 1000) return res.status(400).json({ error: '单次最多导入 1000 行' });
-  // 价格解析：去 ¥/￥/逗号/空白，×100 取整为分；空值视为 0；非法返回 null
-  const parsePrice = (v: unknown): number | null => {
-    const s = String(v ?? '').replace(/[¥￥,\s]/g, '');
-    if (s === '') return 0;
-    if (!/^\d+(\.\d+)?$/.test(s)) return null;
-    const n = Math.round(parseFloat(s) * 100);
-    if (!Number.isFinite(n) || n < 0 || n > PRICE_CENTS_MAX) return null;
-    return n;
-  };
-  const errors: Array<{ row: number; msg: string }> = [];
-  let success = 0;
-  // B-安10③：一次全量读 + 内存 Map，循环内零查询。原每行两次查询（getProd + getCat），
-  // 1000 行即 2000 次；并发冲突由 product(teamId, name) 唯一索引兜底，记为行错误。
-  const prodNames = new Set<string>(
-    (db.prepare(`SELECT name FROM product WHERE teamId = ?`).all(teamId) as Array<{ name: string }>).map((p) => p.name),
-  );
-  const catByName = new Map<string, number>(
-    (db.prepare(`SELECT id, name FROM cat WHERE teamId = ?`).all(teamId) as Array<{ id: number; name: string }>).map(
-      (c) => [c.name, c.id] as [string, number],
-    ),
-  );
-  // 仅内存未命中时用：复核一次库（可能是并发导入刚建的分类），再决定是否新建
-  const getCat = db.prepare(`SELECT id FROM cat WHERE teamId = ? AND name = ?`);
-  const insCat = db.prepare(`INSERT INTO cat (teamId, name) VALUES (?, ?)`);
-  const ins = db.prepare(
-    `INSERT INTO product (teamId, catId, name, barcode, unit, spec, salePrice, retailPrice, purchasePrice, wholePrice, lowQty, remark)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  // BEGIN 放 try 外：BEGIN 失败时 ROLLBACK 二次抛错会掩盖原始错误
-  // BEGIN IMMEDIATE：批量导入立刻取写锁，避免与其它写事务交叉时 SQLITE_BUSY
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    for (const [idx, r] of rows.entries()) {
-      const rowNo = idx + 1;
-      const name = String(r.name ?? '').trim();
-      if (!name) {
-        errors.push({ row: rowNo, msg: '名称不能为空' });
-        continue;
-      }
-      if (prodNames.has(name)) {
-        errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
-        continue;
-      }
-      // 分类名：不存在则自动创建（先查内存 Map，未命中再复核一次库）
-      let catId: number | null = null;
-      const catName = String(r.catName ?? '').trim();
-      if (catName) {
-        const cached = catByName.get(catName);
-        if (cached !== undefined) {
-          catId = cached;
-        } else {
-          const hit = getCat.get(teamId, catName) as { id: number } | undefined;
-          if (hit) {
-            catId = hit.id;
-          } else {
-            catId = Number(insCat.run(teamId, catName).lastInsertRowid);
-          }
-          catByName.set(catName, catId);
-        }
-      }
-      const prices: number[] = [];
-      let bad = '';
-      for (const k of ['purchasePrice', 'salePrice', 'retailPrice', 'wholePrice'] as const) {
-        const p = parsePrice(r[k]);
-        if (p === null) {
-          bad = '价格格式不正确';
-          break;
-        }
-        prices.push(p);
-      }
-      if (bad) {
-        errors.push({ row: rowNo, msg: bad });
-        continue;
-      }
-      let lowQty = 0;
-      const lowRaw = String(r.lowQty ?? '').trim();
-      if (lowRaw !== '') {
-        const n = Number(lowRaw);
-        // 与单据侧 MAX_QTY 同上限：安全库存是数量不是价格，量级失控同样是录错
-        if (!Number.isFinite(n) || n < 0 || n > QTY_MAX) {
-          errors.push({ row: rowNo, msg: '安全库存格式不正确' });
-          continue;
-        }
-        lowQty = n;
-      }
-      try {
-        ins.run(
-          teamId,
-          catId,
-          name,
-          String(r.barcode ?? '').trim() || null,
-          String(r.unit ?? '').trim() || '件',
-          String(r.spec ?? '').trim() || null,
-          prices[1],
-          prices[2],
-          prices[0],
-          prices[3],
-          lowQty,
-          String(r.remark ?? '').trim() || null,
-        );
-      } catch (e) {
-        // B-安10③ 唯一索引兜底：内存判重用的是导入开始时的快照，并发导入已建同名商品时
-        // INSERT 撞 product(teamId, name) 唯一索引，记为行错误继续下一行，不整批 500。
-        // 约束冲突只中止当前语句、不中止事务，循环可继续。
-        if (String((e as Error)?.message ?? '').includes('UNIQUE constraint failed')) {
-          prodNames.add(name); // 后续同名行直接走内存判重
-          errors.push({ row: rowNo, msg: `商品「${name}」已存在` });
-          continue;
-        }
-        throw e;
-      }
-      prodNames.add(name);
-      success++;
-    }
-    db.exec('COMMIT');
-    // B-安17 折中：批量导入落库后显式检查点，把 WAL 落盘
-    tryCheckpoint(db);
-  } catch (e) {
-    db.exec('ROLLBACK');
-    // A-安4：不把 err.message 回吐给客户端（可能含 SQLite 表名/唯一索引名/磁盘路径），只写服务端日志
-    console.error('[product-import] 导入失败:', e);
-    return res.status(500).json({ error: '导入失败，请稍后重试' });
-  }
-  return res.json({ success, errors, total: rows.length });
-});
-
-// 当前登录用户所属团队（团队隔离：不再返回全库团队列表）
-api.get('/team/list', (req, res) => {
-  const u = req.auth;
-  if (!u) return res.status(401).json({ error: '未登录' });
-  const team = db.prepare(`SELECT id, name, startPeriod FROM team WHERE id = ?`).get(u.teamId);
-  return res.json(team ? [team] : []);
-});
-
-app.use('/api', api);
-
-// API 未匹配路由统一返回 JSON 404（否则落到静态兜底会返回 index.html）
-app.use('/api', (_req, res) => {
-  res.status(404).json({ error: '接口不存在' });
-});
-
-// 静态前端（web 目录）；vendor 前端库内容恒定，缓存 7 天减少重复下载
-import path from 'node:path';
-import fs from 'node:fs';
-const WEB_ROOT = path.join(__dirname, '..', '..', 'web');
-app.use(
-  '/vendor',
-  express.static(path.join(WEB_ROOT, 'vendor'), { maxAge: '7d', immutable: true }),
-);
-// 应用脚本 index.html 必须每次校验（no-cache，允许协商缓存命中 304）：
-// 否则升级程序后浏览器可能复用旧 index.html + 旧 js，用户看到的是未修复的前端。
-app.use(
-  express.static(WEB_ROOT, {
-    setHeaders: (res, filePath) => {
-      if (/\.(?:html|js|css)$/i.test(filePath)) {
-        res.setHeader('Cache-Control', 'no-cache');
-      }
-    },
-  }),
-);
-// 非页面路径兜底回 index.html（hash 路由其实不需要，仅保险）。
-// vendor 静态库文件缺失时按真实 404 返回，而不是兜底回 index.html：
-// 浏览器请求 JS 收到 HTML 会报语法错误且难排查；404 能直接暴露缺文件。
-app.get(/^\/(?!api|vendor\/).*/, (_req, res) => {
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, '..', '..', 'web', 'index.html'));
-});
-// vendor 兜底 404（express.static 未命中时走到这里）
-app.use('/vendor', (_req: express.Request, res: express.Response) => {
-  res.status(404).json({ error: 'vendor 文件不存在' });
-});
-
-// 全局错误处理：任何路由抛出的异常统一返回 JSON，避免 Express 默认 HTML 错误页
-// 破坏前端 {error} 约定（同步 throw 由 Express 自动转入此中间件）
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  // headersSent 防止响应已开始后再写头导致崩溃
-  if (res.headersSent) {
-    _next(err);
-    return;
-  }
-  console.error('[api-error]', err);
-  // A-安4：固定返回通用文案，不回吐 err.message（可能含 SQLite 表名/唯一索引名/磁盘路径）；
-  // err.message + stack 只写服务端日志（上一行 console.error 已输出完整错误对象）。
-  res.status(500).json({ error: '服务器内部错误' });
-});
-
-// ---------- 启动监听：本机回环 + 端口自适应 + 单实例文件锁 ----------
-import type http from 'node:http';
-
-/** 单实例锁：锁文件存在且 pid 活着 → 已有实例在跑，退出（启动器会去唤起已有实例） */
 function acquireLock(): boolean {
   const lockFile = path.join(dataDir(), 'server.lock');
-  // 旧锁存活检测：锁文件存在但 pid 已死 → 视为残留锁，允许覆盖后重建。
   try {
     const old = Number(fs.readFileSync(lockFile, 'utf8').trim());
     if (old > 0 && old !== process.pid) {
       try {
         process.kill(old, 0);
-        return false; // 旧进程仍存活
-      } catch { /* 旧进程已死，锁文件是残留，继续走原子重建 */ }
+        return false;
+      } catch {
+        /* 残留锁 */
+      }
     }
-  } catch { /* 无锁文件，首次启动 */ }
-  // 原子创建（O_CREAT|O_EXCL）：两个实例同时启动时只有一个能建立锁文件，
-  // 另一个进 EEXIST 分支复核对方 pid，消除原来「读-检-写」之间的竞态窗口。
+  } catch {
+    /* 首次启动 */
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = fs.openSync(lockFile, 'wx');
@@ -595,61 +192,65 @@ function acquireLock(): boolean {
       } finally {
         fs.closeSync(fd);
       }
-      break; // 抢锁成功
+      break;
     } catch (e: unknown) {
       const code = (e as NodeJS.ErrnoException)?.code;
-      if (code !== 'EEXIST') throw e; // 其他错误（目录不可写等）按原行为上抛
-      // 锁文件已被并发实例抢先创建：复核其中 pid 是否存活
+      if (code !== 'EEXIST') throw e;
       let other = 0;
-      try { other = Number(fs.readFileSync(lockFile, 'utf8').trim()); } catch { /* ignore */ }
+      try {
+        other = Number(fs.readFileSync(lockFile, 'utf8').trim());
+      } catch {
+        /* ignore */
+      }
       if (!(other > 0) || other === process.pid) {
-        // 内容为空/异常（抢先者刚建文件还没写入，或残留损坏）：删掉重试一次
-        try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+        try {
+          fs.rmSync(lockFile, { force: true });
+        } catch {
+          /* ignore */
+        }
         continue;
       }
       try {
         process.kill(other, 0);
-        return false; // 抢先者存活：本实例退出
+        return false;
       } catch {
-        // 抢先者已死：清残留后重试原子创建
-        try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+        try {
+          fs.rmSync(lockFile, { force: true });
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
-  // 循环耗尽仍未确认持锁（并发实例同时清残留/重建锁文件的极小概率竞态）：
-  // 以锁文件内容为准复核，避免两个实例同时以「成功」跑起来
   let locked = false;
   try {
     locked = Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid;
   } catch {
-    /* 锁文件读不到：视为未持锁 */
+    /* ignore */
   }
   if (!locked) return false;
-  // 退出时清锁（kill -9 等异常退出会留残留文件，由上面的存活检测兜底）
   process.on('exit', () => {
     try {
-      if (Number(fs.readFileSync(lockFile, 'utf8').trim()) === process.pid) fs.rmSync(lockFile, { force: true });
-    } catch { /* ignore */ }
+      const cur = Number(fs.readFileSync(lockFile, 'utf8').trim());
+      if (cur === process.pid) fs.rmSync(lockFile, { force: true });
+    } catch {
+      /* ignore */
+    }
   });
   return true;
 }
 
-/** 把实际端口写进数据目录，供启动器/快捷方式读取后打开浏览器。
- *  原子写：先写临时文件再 rename——launcher 每 2s 轮询读，
- *  直接 writeFileSync 会让 launcher 读到截断内容返回 null 误判服务未起。 */
 function writePortFile(port: number): void {
   try {
     const target = path.join(dataDir(), 'port.txt');
     const tmp = `${target}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, String(port));
     fs.renameSync(tmp, target);
-  } catch { /* 数据目录不可写时忽略：仅影响自动开浏览器 */ }
+  } catch {
+    /* 仅影响自动开浏览器 */
+  }
 }
 
-/**
- * 依次尝试首选端口起的连续若干个端口；成功后写 port.txt 并返回 server。
- * ORANGE_BIND=0.0.0.0 时按原行为监听全部网卡（服务管理器隧道场景需要显式开启）。
- */
 function listenOn(firstPort: number, tries: number): Promise<{ server: http.Server; port: number }> {
   const host = appConfig.bindHost === 'localhost' ? '127.0.0.1' : appConfig.bindHost;
   return new Promise((resolve, reject) => {
@@ -674,20 +275,18 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
   const firstPort = PORT;
   const { server, port } = await listenOn(firstPort, 20);
   writePortFile(port);
-  const actualPort = port;
-  console.log(`zhanhui-jxc server listening on http://127.0.0.1:${actualPort}`);
-  if (actualPort !== firstPort) {
-    console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${actualPort}（port.txt 已更新）。`);
+  console.log(`zhanhui-jxc server listening on http://127.0.0.1:${port}`);
+  if (port !== firstPort) {
+    console.log(`[端口] 首选端口 ${firstPort} 被占用，已自动改用 ${port}（port.txt 已更新）。`);
   }
-  // 自写 pid 文件：不论服务器由谁启动（管理器 / 命令行 / 后台任务），
-  // 服务管理器都能据此识别进程并停止它，不必依赖 netstat/tasklist
   try {
     const runtimeDir = path.join(__dirname, '..', '..', '.tools');
     fs.mkdirSync(runtimeDir, { recursive: true });
     fs.writeFileSync(path.join(runtimeDir, 'server.pid'), String(process.pid));
-  } catch { /* 无权限或目录不可写时忽略，不影响服务本身 */ }
-  // B-安18：优雅停机——停止接受新连接，等在途请求完成（10 秒超时兜底，不能无限等），
-  // 再 wal_checkpoint(TRUNCATE) 后 db.close() 退出。
+  } catch {
+    /* ignore */
+  }
+
   let shuttingDown = false;
   const gracefulShutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
@@ -698,29 +297,20 @@ function listenOn(firstPort: number, tries: number): Promise<{ server: http.Serv
         new Promise<void>((resolve) => server.close(() => resolve())),
         new Promise<void>((resolve) => setTimeout(resolve, 10000)),
       ]);
-    } catch { /* 关闭失败仍继续停机 */ }
+    } catch {
+      /* ignore */
+    }
     tryCheckpoint(db);
-    try { db.close(); } catch { /* 关库失败不阻塞退出 */ }
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
     console.log('[停机] 数据库已关闭，进程退出。');
     process.exit(0);
   };
+  shutdownHandler = gracefulShutdown;
   process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
-  // B-安18：跨平台优雅停机触发。Windows 没有真正的 SIGTERM：Node 的
-  // process.kill(pid, 'SIGTERM') 在 Windows 上等于 TerminateProcess，
-  // SIGTERM 处理器根本跑不到，WAL 检查点和锁清理都不会发生，回归测试
-  // B-安18 在 Windows 上因此长红，桌面端退出时也是同样问题。
-  // 提供一个仅本机 + 需登录的停机接口，走同一套 gracefulShutdown：
-  // 先回 200，再停机（回环地址校验 + requireAuth 双重限制，见下）。
-  api.post('/admin/shutdown', requireAuth, (req, res) => {
-    const remote = req.socket.remoteAddress;
-    if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
-      return res.status(403).json({ error: '仅允许本机调用' });
-    }
-    res.json({ ok: true });
-    setTimeout(() => void gracefulShutdown('HTTP'), 50);
-    return;
-  });
-  // keep a reference so the server handle is not GC'd / lint-dead
   void server;
 })();
