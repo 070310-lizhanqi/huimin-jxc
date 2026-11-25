@@ -11,23 +11,31 @@
   },
   "scripts": {
     "build": "tsc -p server/tsconfig.json",
-    "lint": "tsc --noEmit -p server/tsconfig.json",
+    "typecheck": "tsc --noEmit -p server/tsconfig.json",
+    "lint": "eslint server electron web/js",
+    "format": "prettier --write \"server/src/config/**/*.ts\" \"server/tests/**/*.ts\" eslint.config.mjs",
+    "format:check": "prettier --check \"server/src/config/**/*.ts\" \"server/tests/**/*.ts\" eslint.config.mjs",
     "dev:server": "ts-node server/src/index.ts",
     "serve": "node dist/server/index.js",
     "test": "node tools/run-tests.cjs",
+    "test:unit": "tsc -p server/tsconfig.test.json && node --test --test-reporter=spec dist-test/tests/*.test.js",
     "dist:electron": "electron-builder --win --publish never",
     "dev:electron": "electron .",
     "pack": "electron-builder --dir"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/express": "^4.17.21",
     "@types/express-serve-static-core": "^4.19.9",
     "@types/node": "^22.0.0",
     "electron": "^45.0.0",
     "electron-builder": "^26.0.0",
+    "eslint": "^10.15.0",
     "playwright": "^1.64.1",
+    "prettier": "^3.10.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.74.0"
   },
   "dependencies": {
     "electron-updater": "^6.8.11",

@@ -2,6 +2,7 @@
  * 数据库初始化与连接（node:sqlite，零原生依赖）
  */
 import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
 import path from 'node:path';
 
 export type DB = DatabaseSync;
@@ -84,8 +85,6 @@ export function createWindowLimiter(limit: number, windowMs: number): (key: stri
  * 这里 rename 出的又是一份当前库快照，两者内容相同、互为冗余。
  */
 function applyPendingRestore(dbPath: string): void {
-  const fs = require('node:fs') as typeof import('node:fs');
-  const path = require('node:path') as typeof import('node:path');
   const pending = `${dbPath}.restore-pending`;
   if (!fs.existsSync(pending)) return;
   const stamp = (() => {
@@ -123,7 +122,6 @@ function applyPendingRestore(dbPath: string): void {
 
 export function openDb(dbPath?: string): DB {
   const p = dbPath ?? path.join(dataDir(), 'huimin-clone.db');
-  const fs = require('node:fs') as typeof import('node:fs');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   applyPendingRestore(p);
   const db = new DatabaseSync(p);

@@ -27,13 +27,6 @@ function rangeOf(req: Request): { from: string; to: string; error: string | null
   return { from, to, error: null };
 }
 
-/** 单据类型归类：正负方向用于进销存统计
- *  - 入库：采购入库 / 其它入库 / 销售退货 / 期初库存 / 生产组装产出行
- *  - 出库：销售出库 / 其它出库 / 采购退货 / 生产组装耗用行
- */
-const IN_TYPES = ['stockin', 'otherin', 'sret', 'stockinit'];
-const OUT_TYPES = ['stockout', 'otherout', 'pin'];
-
 export function mountJxcReports(router: Router, db: DatabaseSync): void {
   /**
    * 进销存统计：按商品或按单据类型汇总期间内的入/出数量与金额。

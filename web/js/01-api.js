@@ -75,8 +75,8 @@ async function req(method, path, body, params) {
     r = await fetch(url, opt);
   } catch (e) {
     clearTimeout(timer);
-    if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
-    throw new Error('网络异常，请检查服务是否可用');
+    if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试', { cause: e });
+    throw new Error('网络异常，请检查服务是否可用', { cause: e });
   }
   clearTimeout(timer);
   let data = null;
@@ -102,8 +102,8 @@ const api = {
       r = await fetch('/api' + path, { signal: ctl.signal });
     } catch (e) {
       clearTimeout(timer);
-      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
-      throw new Error('网络异常，请检查服务是否可用');
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试', { cause: e });
+      throw new Error('网络异常，请检查服务是否可用', { cause: e });
     }
     if (!r.ok) {
       clearTimeout(timer);
@@ -116,8 +116,8 @@ const api = {
       blob = await r.blob();
     } catch (e) {
       clearTimeout(timer);
-      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试');
-      throw new Error('网络异常，请检查服务是否可用');
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请检查网络或稍后重试', { cause: e });
+      throw new Error('网络异常，请检查服务是否可用', { cause: e });
     }
     clearTimeout(timer);
     const cd = r.headers.get('content-disposition') || '';

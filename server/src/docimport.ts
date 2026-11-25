@@ -169,7 +169,7 @@ function detectTypeByText(text: string): string | null {
 function parseQty(raw: string): number | null {
   const s0 = String(raw ?? '');
   if (/[eE]/.test(s0)) return null;
-  const s = s0.replace(/[,\s，]/g, '').replace(/[^0-9.\-]/g, '');
+  const s = s0.replace(/[,\s，]/g, '').replace(/[^0-9.-]/g, '');
   if (s === '' || s === '-' || s === '.') return null;
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
@@ -439,8 +439,8 @@ export function mountDocImport(router: Router, db: DatabaseSync): void {
         // 必须放在往来单位/商品自动建档**之前**：自动建档发生在事务外（autocommit），
         // 若先建档再因仓库无效跳单，档案没有对应的单据，也不会被 ROLLBACK 清理——
         // 用户会得到一个自己没录过的「幽灵客户」
-        let warehouseId: number | null = null;
-        let warehouseName = '';
+        let warehouseId: number;
+        let warehouseName: string;
         if (first.warehouseName) {
           const hit = warehouses.find((w) => w.name === first.warehouseName);
           if (!hit) {

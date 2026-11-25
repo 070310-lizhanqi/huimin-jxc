@@ -3,7 +3,7 @@
  * 现收敛到此独立小模块。无循环依赖：本模块只 import settings/db，
  * settings 与 db 均不 import 本模块。
  */
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { localDate } from './db';
 import { BILL_NO_PREFIXES, loadNoMode, loadPrefix } from './settings';
 import type { NoMode } from './settings';
@@ -20,7 +20,7 @@ export function loadBillNoConfig(db: DatabaseSync, teamId: number): BillNoConfig
 }
 
 /** 单号 upsert 语句缓存：按 db 实例缓存（多库测试进程下各库独立编译） */
-const stmtCache = new WeakMap<DatabaseSync, import('node:sqlite').StatementSync>();
+const stmtCache = new WeakMap<DatabaseSync, StatementSync>();
 
 export function nextBillNo(db: DatabaseSync, teamId: number, type: string, cfg?: BillNoConfig): string {
   // 前缀与重置方式支持 team 级配置（功能设置 → 单据编号）；

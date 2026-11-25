@@ -133,7 +133,7 @@ const DocPage = {
     /** 驳回：待审核 -> 草稿（需填原因） */
     async function rejectDoc(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt('请输入驳回原因（可留空）', `驳回 ${row.billNo}`, {
           confirmButtonText: '确认驳回', cancelButtonText: '取消',
@@ -197,7 +197,7 @@ const DocPage = {
     }
     async function voidDoc(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt(
           `作废「${row.billNo}」将反向冲回库存与往来余额，确认作废？可填写作废原因留痕。`,

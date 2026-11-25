@@ -79,7 +79,7 @@ const ReportPage = {
       const map = new Map((sales.value.days || []).map((d) => [d.day, d]));
       const cats = [];
       const net = [];
-      let d = new Date(range[0] + 'T00:00:00');
+      const d = new Date(range[0] + 'T00:00:00');
       const end = new Date(range[1] + 'T00:00:00');
       while (d <= end) {
         const key = fmtD(d);

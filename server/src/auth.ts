@@ -13,11 +13,10 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { localDate } from './db';
 import { safeHandler } from './safe-handler';
+import { getConfig } from './config/env';
 
 /** 令牌有效期（秒）：7 天 */
 const TOKEN_TTL = 7 * 24 * 3600;
-/** 签名密钥：优先环境变量，否则用固定本地密钥（单机部署可接受） */
-const SECRET = process.env.ORANGE_JWT_SECRET ?? 'huimin-clone-local-secret-v1';
 
 /** 浏览器会话 Cookie 名：与旧 localStorage 键同名，便于对照 */
 const COOKIE_NAME = 'oc_token';
@@ -97,7 +96,8 @@ const DUMMY_HASH = 'scrypt$00000000000000000000000000000000$00000000000000000000
 const b64url = (buf: Buffer): string =>
   buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-const sign = (data: string): string => b64url(crypto.createHmac('sha256', SECRET).update(data).digest());
+const sign = (data: string): string =>
+  b64url(crypto.createHmac('sha256', getConfig().jwtSecret).update(data).digest());
 
 export function issueToken(user: AuthUser): string {
   const payload = { ...user, jti: crypto.randomBytes(8).toString('hex'), exp: Math.floor(Date.now() / 1000) + TOKEN_TTL };

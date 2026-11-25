@@ -570,8 +570,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       const settleErr = checkSettle(totalAmount, paidAmount, deposit);
       if (settleErr) return res.status(400).json({ error: settleErr });
     }
-    let docId = 0;
-    let billNo = '';
+    let docId: number;
+    let billNo: string;
     // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
     // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
     try {
@@ -668,10 +668,10 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
       reservoirId: number | null;
       remark: string | null;
     }>;
-    let newId = 0;
-    let billNo = '';
-    let partial = false;
-    let converted: Array<{ productId: number; qty: number }> = [];
+    let newId: number;
+    let billNo: string;
+    let partial: boolean;
+    let converted: Array<{ productId: number; qty: number }>;
     // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
     // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
     try {
@@ -791,8 +791,8 @@ export function mountDocs(router: Router, db: DatabaseSync): void {
         }
       | undefined;
     if (!doc) return res.status(404).json({ error: '单据不存在' });
-    let newId = 0;
-    let billNo = '';
+    let newId: number;
+    let billNo: string;
     // BEGIN 单独 try：BEGIN 失败（SQLITE_BUSY）时直接返回 503 可重试错误，
     // 不进主 try、不执行 ROLLBACK（此时无事务在途，ROLLBACK 会二次抛错掩盖原始错误）。
     try {

@@ -82,7 +82,7 @@ function rmbUpper(cents) {
   const n = Math.round(Number(cents) || 0);
   if (n === 0) return '零元整';
   const NEG = n < 0;
-  let v = Math.abs(n);
+  const v = Math.abs(n);
   const DIGITS = '零壹贰叁肆伍陆柒捌玖';
   const UNITS = ['', '拾', '佰', '仟'];
   const GROUPS = ['', '万', '亿', '万亿'];
@@ -102,8 +102,7 @@ function rmbUpper(cents) {
       continue;
     }
     let gs = '';
-    let z = num;
-    let unitPos = 0;
+    const z = num;
     let lastZero = false;
     for (let p = 3; p >= 0; p--) {
       const d = Math.floor(z / (10 ** p)) % 10;
@@ -114,7 +113,6 @@ function rmbUpper(cents) {
         gs += DIGITS[d] + UNITS[p];
         lastZero = false;
       }
-      void unitPos;
     }
     gs = gs.replace(/零+$/, '');
     out += gs + GROUPS[g];

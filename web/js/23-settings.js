@@ -311,7 +311,7 @@ const SettingsPage = {
         '恢复备份',
       ))) return;
       // 二次验密：恢复不可逆，要求再输一次当前账号密码（服务端同样强校验）
-      let password = '';
+      let password;
       try {
         const r = await ElMessageBox.prompt('恢复会整体覆盖当前数据且不可撤销，请输入你的登录密码以确认：', '安全确认', {
           confirmButtonText: '确认恢复', cancelButtonText: '取消',

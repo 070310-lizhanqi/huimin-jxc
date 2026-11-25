@@ -45,11 +45,6 @@ function stripCdata(s: string): string {
 
 // ============================ ZIP ============================
 
-interface ZipEntry {
-  name: string;
-  data: Buffer;
-}
-
 /** zip 条目解压体积上限（80MB）：恶意 xlsx 可以用 2MB 压缩体声明数十 GB 解压内容（zip 炸弹），
  *  inflateRawSync 不限长会把内存吃满。正常单据表远小于此值。 */
 const MAX_ENTRY_BYTES = 80 * 1024 * 1024;

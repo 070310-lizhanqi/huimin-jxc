@@ -1,0 +1,11 @@
+dist/
+dist-electron/
+node_modules/
+data/
+web/vendor/
+installer/
+assets/
+docs/
+tools/
+*.log
+pnpm-lock.yaml

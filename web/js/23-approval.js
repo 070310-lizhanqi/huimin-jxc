@@ -64,7 +64,7 @@ const ApprovalPage = {
 
     async function doReject(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt('请输入驳回原因', `驳回 ${row.billNo}`, {
           confirmButtonText: '确认驳回', cancelButtonText: '取消',

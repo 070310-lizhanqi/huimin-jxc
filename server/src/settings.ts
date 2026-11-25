@@ -76,7 +76,7 @@ export function loadNoMode(db: DatabaseSync, teamId: number): NoMode {
 
 /** 取打印抬头配置 */
 export function loadPrint(db: DatabaseSync, teamId: number): PrintConf {
-  const raw = getSetting(db, teamId, 'print');
+  const raw = getSetting(db, teamId, PRINT_KEY);
   if (!raw) return { ...DEFAULT_PRINT };
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -119,7 +119,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
   router.get('/setting/get', (req, res) => {
     const teamId = Number(req.query.teamId);
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    res.json({
+    return res.json({
       prefix: loadPrefix(db, teamId),
       noMode: loadNoMode(db, teamId),
       print: loadPrint(db, teamId),
@@ -146,7 +146,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       clean[k] = s.toUpperCase();
     }
     setSetting(db, teamId, 'prefix', JSON.stringify(clean));
-    res.json({ ok: true, prefix: loadPrefix(db, teamId) });
+    return res.json({ ok: true, prefix: loadPrefix(db, teamId) });
   });
 
   /** 保存编号重置模式 */
@@ -159,7 +159,7 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       return res.status(400).json({ error: '编号重置方式不合法' });
     }
     setSetting(db, teamId, 'noMode', mode);
-    res.json({ ok: true, noMode: mode });
+    return res.json({ ok: true, noMode: mode });
   });
 
   /** 保存打印抬头 */
@@ -176,8 +176,8 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
       footer: String(p.footer ?? '').trim().slice(0, 200),
       showLogo: p.showLogo !== false,
     };
-    setSetting(db, teamId, 'print', JSON.stringify(conf));
-    res.json({ ok: true, print: conf });
+    setSetting(db, teamId, PRINT_KEY, JSON.stringify(conf));
+    return res.json({ ok: true, print: conf });
   });
 
   /** 恢复默认（清掉 team 级覆盖） */
@@ -187,8 +187,8 @@ export function mountSettings(router: Router, db: DatabaseSync): void {
     if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
     const scope = String(req.body.scope ?? 'all');
     if (scope === 'all' || scope === 'prefix') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'prefix'`).run(teamId);
-    if (scope === 'all' || scope === 'print') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'print'`).run(teamId);
+    if (scope === 'all' || scope === PRINT_KEY) db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = ?`).run(teamId, PRINT_KEY);
     if (scope === 'all' || scope === 'noMode') db.prepare(`DELETE FROM setting WHERE teamId = ? AND key = 'noMode'`).run(teamId);
-    res.json({ ok: true, prefix: loadPrefix(db, teamId), noMode: loadNoMode(db, teamId), print: loadPrint(db, teamId) });
+    return res.json({ ok: true, prefix: loadPrefix(db, teamId), noMode: loadNoMode(db, teamId), print: loadPrint(db, teamId) });
   });
 }
