@@ -87,7 +87,13 @@ function openDb() {
 let child = null;
 let childOut = '';
 function spawnServer() {
-  const env = { ...process.env, NODE_ENV: 'development', PORT: String(PORT), ORANGE_DATA_DIR: DATA_DIR };
+  const env = {
+    ...process.env,
+    NODE_ENV: 'development',
+    ORANGE_ENV_FILE: '',
+    PORT: String(PORT),
+    ORANGE_DATA_DIR: DATA_DIR,
+  };
   delete env.ORANGE_JWT_SECRET; // 伪造令牌测试依赖默认密钥
   delete env.ORANGE_REQUIRE_SECRET;
   childOut = '';

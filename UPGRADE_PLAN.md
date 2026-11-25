@@ -8,14 +8,14 @@
 
 ## 一、现状体检与关键问题清单
 
-通过全量扫描 `server/src/`（18 个 TS 模块）、`web/`（`index.html` + 31 个前端脚本）、`electron/`（7 个桌面进程模块）、`tools/`（49 个测试与运维脚本）及构建/流水线配置，识别出以下核心工程与业务域风险：
+通过全量扫描改造前仓库 `server/src/`（18 个 TS 模块，升级后拆分为 37 个模块 + `schema.md`）、`web/`（`index.html` + 31 个前端脚本）、`electron/`（7 个桌面进程模块）、`tools/`（49 个测试与运维脚本）及构建/流水线配置，识别出以下核心工程与业务域风险：
 
 ### 1.1 架构与可维护性问题
 | 问题文件 | 现状问题 | 改造目标 |
 | --- | --- | --- |
 | `server/src/docs.ts` (2057 行) | HTTP 路由、参数校验、库存过账/FIFO 扣减、盘点快照、单据自动结算、CSV 导出全部混在单文件；`/stock/ledger/export` 错放在 `docs.ts` | 拆分为 `services/stock-service.ts`、`services/doc-service.ts`、`shared/money.ts`，`docs.ts` 仅保留路由适配与导出 |
-| `server/src/index.ts` (750 行) | 杂糅启动校验、安全头、CORS、gzip 中间件、9 张档案 CRUD 挂载、`/product/import` 业务实现、单实例锁、端口监听与优雅停机；`/admin/shutdown` 在 IIFE 中注册且缺管理员角色校验 | 抽离 `config/env.ts`、`middleware/security.ts`、`routes/archives.ts`、`services/product-import-service.ts`、`infra/lifecycle.ts`，`/admin/shutdown` 补齐 `admin` RBAC |
-| `server/src/auth.ts` (932 行) | 加解密、令牌签发/吊销、限速器、邀请码迁移、认证路由、用户管理路由耦合；硬编码默认密钥 `'huimin-clone-local-secret-v1'` | 抽离 `middleware/rbac.ts`、`infra/rate-limit.ts`；消除源码硬编码密钥 |
+| `server/src/index.ts` (750 行) | 杂糅启动校验、安全头、CORS、gzip 中间件、9 张档案 CRUD 挂载、`/product/import` 业务实现、单实例锁、端口监听与优雅停机；`/admin/shutdown` 在 IIFE 中注册且缺管理员角色校验 | 抽离 `app.ts`、`config/env.ts`、`middleware/security.ts`、`routes/archives.ts`、`services/product-import-service.ts`，`/admin/shutdown` 补齐 `admin` RBAC |
+| `server/src/auth.ts` (932 行) | 加解密、令牌签发/吊销、限速器、邀请码迁移、认证路由、用户管理路由耦合；硬编码默认密钥 `'huimin-clone-local-secret-v1'` | 抽离 `middleware/rbac.ts`、复用 `db.ts` `createWindowLimiter` 限速器；消除源码硬编码密钥 |
 | `server/src/db.ts` & `price.ts` | `price_memory` 建表 DDL 散落在 `price.ts`；`migrate()` 无版本记录表 `schema_migrations`；`settlement.ts` 自建 `dbtransaction()` 而 `docs.ts`/`index.ts` 手写 `BEGIN/ROLLBACK`（部分 `catch` 缺安全回滚保护） | 统一 `schema_migrations` 版本化迁移；统一 `infra/tx.ts` 事务封装 |
 | `web/index.html` (792 行) & `web/js/*` | 约 740 行 CSS 内联在 HTML；`?v=0.5.2` 版本号滞后于 `0.5.3`；`07-doc-viewer.js` 重复定义 `escapeHtml`；`23-settings.js` 非管理员无法点击「修改我的密码」；`24-login.js` 使用 `v-html`；缺少前端请求追踪 ID 与操作审计界面 | 抽离 `web/css/app.css`；统一版本号与工具函数；修复员工改密入口；移除 `v-html`；补齐请求 `X-Request-Id` 与审计日志查看页 |
 
@@ -69,11 +69,12 @@
 ### Phase 3：核心架构重构与企业级加固
 - **改造内容**：
   1. 后端分层重构（保持 `dist/server/index.js`、`db.js`、`auth.js`、`settings.js`、`safe-handler.js` 兼容所有存量测试与 Electron 启动器）：
-     - `server/src/shared/money.ts`
-     - `server/src/infra/errors.ts`、`infra/validate.ts`、`infra/tx.ts`、`infra/audit-log.ts`、`infra/idempotency.ts`、`infra/lifecycle.ts`
+     - `server/src/app.ts`
+     - `server/src/shared/money.ts`、`shared/csv.ts`
+     - `server/src/infra/errors.ts`、`infra/validate.ts`、`infra/tx.ts`、`infra/audit-log.ts`、`infra/idempotency.ts`
      - `server/src/middleware/rbac.ts`、`middleware/security.ts`
      - `server/src/services/stock-service.ts`、`services/doc-service.ts`、`services/product-import-service.ts`
-     - `server/src/routes/archives.ts`、`routes/audit.ts`
+     - `server/src/routes/docs.ts`、`routes/archives.ts`、`routes/audit.ts`
   2. 统一全局异常捕获与错误码 `{ error, code, requestId }`（兼容前端与既有测试 `error` 字段），修正 JSON 解析 400 错误、CSRF Origin 检查、Cookie `Secure` 代理感知配置。
   3. 完善 `db.ts` 版本化迁移表 `schema_migrations` 与 CLI 工具 `tools/db-migrate.cjs`、`tools/db-seed.cjs`。
   4. 前端工程化改造：`web/css/app.css` 抽离、`01-api.js` 请求追踪与错误处理、移除 `v-html`、员工自助改密入口修复、管理端操作审计日志页签、基础键盘可访问性与 `aria-label`。

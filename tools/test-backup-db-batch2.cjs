@@ -92,9 +92,13 @@ async function stopServer() {
   // ---------- 0) 拉起测试服务 ----------
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  const childEnv = { ...process.env, ORANGE_ENV_FILE: '', PORT: String(PORT), ORANGE_DATA_DIR: DATA_DIR };
+  if (childEnv.NODE_ENV === 'production' && !childEnv.ORANGE_JWT_SECRET) {
+    childEnv.ORANGE_JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+  }
   child = spawn(process.execPath, [path.join(ROOT, 'dist', 'server', 'index.js')], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), ORANGE_DATA_DIR: DATA_DIR },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const serverLog = fs.createWriteStream('/tmp/huimin-b2-test-server.log', { flags: 'w' });

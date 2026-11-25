@@ -1297,4 +1297,173 @@ describe('Phase 3 Integration Tests: Security, Validation, Concurrency, Idempote
       initConfig({ persistSecret: false });
     }
   });
+
+  it('extracts multi-hop client IP with ORANGE_TRUST_PROXY=2 and resists proxy/left-XFF spoofing', async () => {
+    const proxyTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jxc-trustproxy2-'));
+    let proxyDb: ReturnType<typeof openDb> | null = null;
+    let proxyServer: http.Server | null = null;
+    try {
+      process.env.ORANGE_DATA_DIR = proxyTmp;
+      process.env.ORANGE_TRUST_PROXY = '2';
+      resetConfigForTest();
+      const cfgTrust2 = initConfig({ persistSecret: false });
+      proxyDb = openDb(cfgTrust2.dbPath);
+      migrate(proxyDb);
+      const appTrust2 = createApp(proxyDb, cfgTrust2);
+      proxyServer = await new Promise<http.Server>((resolve) => {
+        const s = appTrust2.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const port2 = (proxyServer.address() as AddressInfo).port;
+
+      const regRes = await fetch(`http://127.0.0.1:${port2}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'tp2admin', password: 'StrongProxy!2026', teamName: '多跳代理测试' }),
+      });
+      assert.equal(regRes.status, 200);
+
+      const loginOk = await fetch(`http://127.0.0.1:${port2}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '10.0.0.1, 198.51.100.10, 198.51.100.77',
+        },
+        body: JSON.stringify({ username: 'tp2admin', password: 'StrongProxy!2026' }),
+      });
+      assert.equal(loginOk.status, 200);
+      const lastAudit = proxyDb
+        .prepare("SELECT ip FROM audit_log WHERE action = 'auth.login' ORDER BY id DESC LIMIT 1")
+        .get() as { ip: string };
+      assert.equal(lastAudit.ip, '198.51.100.10');
+
+      // Rotate both left spoofed IP and rightmost proxy hop while holding client hop 198.51.100.10 constant
+      let hit429 = false;
+      for (let i = 1; i <= 17; i++) {
+        const r = await fetch(`http://127.0.0.1:${port2}/api/auth/login`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': `10.0.0.${i}, 198.51.100.10, 198.51.100.${100 + i}`,
+          },
+          body: JSON.stringify({ username: 'tp2admin', password: 'WrongPassword!1' }),
+        });
+        if (r.status === 429) {
+          hit429 = true;
+          break;
+        }
+        assert.equal(r.status, 401);
+      }
+      assert.equal(hit429, true);
+    } finally {
+      if (proxyServer) await new Promise<void>((resolve) => proxyServer!.close(() => resolve()));
+      if (proxyDb) proxyDb.close();
+      fs.rmSync(proxyTmp, { recursive: true, force: true });
+      process.env.ORANGE_DATA_DIR = tmpDir;
+      delete process.env.ORANGE_TRUST_PROXY;
+      resetConfigForTest();
+      initConfig({ persistSecret: false });
+    }
+  });
+
+  it('isolates customer sales reports and sale-rank from colliding vendor partnerType records', async () => {
+    const repTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jxc-repiso-'));
+    let repDb: ReturnType<typeof openDb> | null = null;
+    let repServer: http.Server | null = null;
+    try {
+      process.env.ORANGE_DATA_DIR = repTmp;
+      resetConfigForTest();
+      const cfgRep = initConfig({ persistSecret: false });
+      repDb = openDb(cfgRep.dbPath);
+      migrate(repDb);
+      const appRep = createApp(repDb, cfgRep);
+      repServer = await new Promise<http.Server>((resolve) => {
+        const s = appRep.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const rPort = (repServer.address() as AddressInfo).port;
+      const base = `http://127.0.0.1:${rPort}/api`;
+
+      const regRes = await fetch(`${base}/auth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'repadmin', password: 'StrongReport!2026', teamName: '报表隔离测试' }),
+      });
+      assert.equal(regRes.status, 200);
+      const regBody = (await regRes.json()) as { token: string; user: { teamId: number } };
+      const hdrs = { Authorization: `Bearer ${regBody.token}` };
+      const teamId = regBody.user.teamId;
+
+      const cid = Number(
+        repDb.prepare("INSERT INTO customer (teamId, name) VALUES (?, 'CustomerOne')").run(teamId).lastInsertRowid,
+      );
+      const vid = Number(
+        repDb.prepare("INSERT INTO vendor (teamId, name) VALUES (?, 'VendorOne')").run(teamId).lastInsertRowid,
+      );
+      assert.equal(cid, vid);
+
+      const d = new Date();
+      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const monthStart = `${today.slice(0, 7)}-01`;
+      repDb
+        .prepare(
+          "INSERT INTO doc (teamId, type, billNo, date, partnerId, partnerType, totalQty, totalAmount, status) VALUES (?, 'stockout', 'XS-REAL', ?, ?, 'cus', 3, 30000, 'audit')",
+        )
+        .run(teamId, today, cid);
+      repDb
+        .prepare(
+          "INSERT INTO doc (teamId, type, billNo, date, partnerId, partnerType, totalQty, totalAmount, status) VALUES (?, 'stockout', 'XS-ANOM', ?, ?, 'ven', 5, 50000, 'audit')",
+        )
+        .run(teamId, today, vid);
+      repDb
+        .prepare(
+          "INSERT INTO doc (teamId, type, billNo, date, partnerId, partnerType, totalQty, totalAmount, status) VALUES (?, 'stockout', 'XS-NULL', ?, NULL, NULL, 2, 10000, 'audit')",
+        )
+        .run(teamId, today);
+
+      const salesRes = await fetch(`${base}/report/sales?from=${monthStart}&to=${today}&partnerId=${cid}`, {
+        headers: hdrs,
+      });
+      assert.equal(salesRes.status, 200);
+      const salesJson = (await salesRes.json()) as {
+        totals: { saleAmount: number; saleQty: number; orderCount: number };
+      };
+      assert.equal(salesJson.totals.saleAmount, 30000);
+      assert.equal(salesJson.totals.saleQty, 3);
+      assert.equal(salesJson.totals.orderCount, 1);
+
+      const custRes = await fetch(`${base}/report/customer?from=${monthStart}&to=${today}`, { headers: hdrs });
+      assert.equal(custRes.status, 200);
+      const custJson = (await custRes.json()) as {
+        rows: Array<{ cusId: number | null; cusName: string | null; saleAmount: number; orderCount: number }>;
+      };
+      const realCust = custJson.rows.find((r) => r.cusId === cid);
+      const nullCust = custJson.rows.find((r) => r.cusId === null);
+      assert.ok(realCust);
+      assert.equal(realCust.cusName, 'CustomerOne');
+      assert.equal(realCust.saleAmount, 30000);
+      assert.equal(realCust.orderCount, 1);
+      assert.ok(nullCust);
+      assert.equal(nullCust.saleAmount, 10000);
+
+      const rankRes = await fetch(`${base}/report/sale-rank?range=month&by=cus`, { headers: hdrs });
+      assert.equal(rankRes.status, 200);
+      const rankJson = (await rankRes.json()) as {
+        rows: Array<{ key: number | null; name: string; amount: number; count: number }>;
+      };
+      const rankReal = rankJson.rows.find((r) => r.key === cid);
+      const rankNull = rankJson.rows.find((r) => r.key === null);
+      assert.ok(rankReal);
+      assert.equal(rankReal.name, 'CustomerOne');
+      assert.equal(rankReal.amount, 30000);
+      assert.equal(rankReal.count, 1);
+      assert.ok(rankNull);
+      assert.equal(rankNull.amount, 10000);
+    } finally {
+      if (repServer) await new Promise<void>((resolve) => repServer!.close(() => resolve()));
+      if (repDb) repDb.close();
+      fs.rmSync(repTmp, { recursive: true, force: true });
+      process.env.ORANGE_DATA_DIR = tmpDir;
+      resetConfigForTest();
+      initConfig({ persistSecret: false });
+    }
+  });
 });

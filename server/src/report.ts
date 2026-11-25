@@ -100,7 +100,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     ];
     const args: Value[] = [teamId, from, to];
     if (partnerRes.value !== null) {
-      conds.push('d.partnerId = ?');
+      conds.push("d.partnerId = ? AND (d.partnerType = 'cus' OR d.partnerType IS NULL)");
       args.push(partnerRes.value);
     }
     const days = db
@@ -258,8 +258,9 @@ export function mountReports(router: Router, db: DatabaseSync): void {
                 SUM(CASE WHEN d.type = 'stockout' THEN d.totalAmount ELSE 0 END) AS saleAmount,
                 SUM(CASE WHEN d.type = 'sret' THEN d.totalAmount ELSE 0 END) AS retAmount,
                 COUNT(CASE WHEN d.type = 'stockout' THEN 1 END) AS orderCount
-         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId
+         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
          WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ('stockout', 'sret')
+           AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
            AND d.date >= ? AND d.date <= ?
          GROUP BY d.partnerId ORDER BY saleAmount DESC`,
       )

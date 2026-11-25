@@ -259,8 +259,9 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalQty ELSE d.totalQty END) AS qty,
                 COUNT(*) AS count
-         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId
+         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
          WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ${docTypes}
+           AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
            AND d.date >= ? AND d.date <= ?
          GROUP BY d.partnerId ORDER BY amount DESC LIMIT ?`,
       )
