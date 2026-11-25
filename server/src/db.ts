@@ -540,8 +540,9 @@ export function migrate(db: DB): void {
     }
     // 幂等兜底：确保 rebuild-clean 等场景下唯一索引仍在
     ensureUniqueFallbackIndexes(db);
-    // 兼容存量库/旧种子脚本遗留的账户类型与客户价格等级简写值
+    // 兼容存量库/旧种子脚本遗留的账户类型、空期初余额与客户价格等级简写值
     db.prepare(`UPDATE account SET type = 'wechat' WHERE type = 'wx'`).run();
+    db.prepare(`UPDATE account SET balance = 0 WHERE balance IS NULL`).run();
     db.prepare(`UPDATE customer SET priceLevel = 'wholePrice' WHERE priceLevel = 'whole'`).run();
     db.prepare(`UPDATE customer SET priceLevel = 'retailPrice' WHERE priceLevel = 'retail'`).run();
     db.exec('COMMIT');

@@ -1389,6 +1389,134 @@ describe('Phase 3 Integration Tests: Security, Validation, Concurrency, Idempote
     assert.equal(rB?.amount, 600);
     assert.equal(rA?.qty, 0.1);
     assert.equal(rB?.qty, 0.2);
+
+    // 4. /api/report/sale-rank?by=prod works as alias for product and cus/clerk round qty sums (0.1 + 0.2 = 0.3)
+    const prodAliasRank = await req<{ by: string; rows: Array<{ key: number; amount: number; qty: number }> }>(
+      '/api/report/sale-rank?range=month&dimension=out&by=prod&limit=50',
+      { token: adminToken },
+    );
+    assert.equal(prodAliasRank.status, 200);
+    assert.equal(prodAliasRank.json.by, 'product');
+    assert.equal(prodAliasRank.json.rows.find((r) => r.key === rankP1.json.id)?.amount, 300);
+
+    const qtyCusRes = await req<{ id: number }>('/api/customer', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '浮点聚合验证客户' },
+    });
+    assert.equal(qtyCusRes.status, 200);
+    const clerkRes = await req<{ id: number }>('/api/clerk', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '浮点聚合验证业务员' },
+    });
+    assert.equal(clerkRes.status, 200);
+    for (const q of [0.1, 0.2]) {
+      const dRes = await req<{ id: number }>('/api/doc/create', {
+        method: 'POST',
+        token: adminToken,
+        body: {
+          teamId,
+          type: 'stockout',
+          date: today,
+          warehouseId: whId,
+          partnerType: 'cus',
+          partnerId: qtyCusRes.json.id,
+          clerkId: clerkRes.json.id,
+          items: [{ productId: rankP1.json.id, qty: q, price: 1000 }],
+        },
+      });
+      assert.equal(dRes.status, 200);
+      assert.equal(
+        (await req('/api/doc/audit', { method: 'POST', token: adminToken, body: { id: dRes.json.id, teamId } })).status,
+        200,
+      );
+    }
+    const cusRank = await req<{ rows: Array<{ key: number; qty: number }> }>(
+      '/api/report/sale-rank?range=month&dimension=out&by=cus&limit=50',
+      { token: adminToken },
+    );
+    assert.equal(cusRank.status, 200);
+    assert.equal(cusRank.json.rows.find((r) => r.key === qtyCusRes.json.id)?.qty, 0.3);
+    const clerkRank = await req<{ rows: Array<{ key: number; qty: number }> }>(
+      '/api/report/sale-rank?range=month&dimension=out&by=clerk&limit=50',
+      { token: adminToken },
+    );
+    assert.equal(clerkRank.status, 200);
+    assert.equal(clerkRank.json.rows.find((r) => r.key === clerkRes.json.id)?.qty, 0.3);
+
+    // 5. Account created without balance defaults to 0 (never NULL) and huge balance is rejected
+    const badAcc = await req<{ code: string }>('/api/account', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '超限资金账户', type: 'bank', balance: 1e30 },
+    });
+    assert.equal(badAcc.status, 400);
+    assert.equal(badAcc.json.code, 'VALIDATION_ERROR');
+
+    const zeroAcc = await req<{ id: number }>('/api/account', {
+      method: 'POST',
+      token: adminToken,
+      body: { teamId, name: '省略期初账户', type: 'bank' },
+    });
+    assert.equal(zeroAcc.status, 200);
+    const zeroAccRow = (
+      await req<Array<{ id: number; balance: number }>>('/api/account', { token: adminToken })
+    ).json.find((a) => a.id === zeroAcc.json.id);
+    assert.equal(zeroAccRow?.balance, 0);
+
+    const accRec = await req('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'receipt',
+        partnerType: 'cus',
+        partnerId: cusId,
+        accountId: zeroAcc.json.id,
+        amount: 5000,
+        date: today,
+      },
+    });
+    assert.equal(accRec.status, 200);
+    const afterRecRow = (
+      await req<Array<{ id: number; balance: number }>>('/api/account', { token: adminToken })
+    ).json.find((a) => a.id === zeroAcc.json.id);
+    assert.equal(afterRecRow?.balance, 5000);
+
+    const accOverPay = await req('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'payment',
+        partnerType: 'ven',
+        partnerId: venId,
+        accountId: zeroAcc.json.id,
+        amount: 6000,
+        date: today,
+      },
+    });
+    assert.equal(accOverPay.status, 400);
+
+    const accOkPay = await req('/api/settlement/create', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        teamId,
+        type: 'payment',
+        partnerType: 'ven',
+        partnerId: venId,
+        accountId: zeroAcc.json.id,
+        amount: 2000,
+        date: today,
+      },
+    });
+    assert.equal(accOkPay.status, 200);
+    const afterPayRow = (
+      await req<Array<{ id: number; balance: number }>>('/api/account', { token: adminToken })
+    ).json.find((a) => a.id === zeroAcc.json.id);
+    assert.equal(afterPayRow?.balance, 3000);
   });
 
   it('rejects backup symlinks on restore/delete and resists X-Forwarded-For spoofing under ORANGE_TRUST_PROXY=1', async () => {

@@ -352,6 +352,9 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
       assert.deepEqual(checkField('catId', '12'), { value: 12 });
       assert.deepEqual(checkField('archived', 1), { value: 1 });
       assert.deepEqual(checkField('archived', '0'), { value: 0 });
+      assert.deepEqual(checkField('balance', -5000), { value: -5000 });
+      assert.deepEqual(checkField('balance', '-0'), { value: 0 });
+      assert.deepEqual(checkField('balance', -0), { value: 0 });
 
       for (const [field, bad] of [
         ['salePrice', true],
@@ -364,6 +367,10 @@ describe('Phase 3 Unit Tests: Money, Validation, Transactions, Migrations, Produ
         ['archived', 2],
         ['salePrice', Number.NaN],
         ['salePrice', Number.POSITIVE_INFINITY],
+        ['balance', 1e30],
+        ['balance', -1e30],
+        ['balance', '9'.repeat(20)],
+        ['balance', '1e5'],
       ] as const) {
         const res = checkField(field, bad);
         assert.equal('error' in res, true, `Expected ${field}=${JSON.stringify(bad)} to fail validation`);

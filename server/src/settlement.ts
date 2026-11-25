@@ -188,12 +188,13 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           // 锁内校验账户与余额
           if (accountId) {
             const account = db
-              .prepare(`SELECT id, balance FROM account WHERE id = ? AND teamId = ?`)
+              .prepare(`SELECT id, COALESCE(balance, 0) AS balance FROM account WHERE id = ? AND teamId = ?`)
               .get(accountId, teamId) as { id: number; balance: number } | undefined;
             if (!account) throw new ValidationError('资金账户不存在');
-            if (type === 'payment' && amount > account.balance) {
+            const availBal = Number(account.balance ?? 0);
+            if (type === 'payment' && amount > availBal) {
               throw new ValidationError(
-                `账户余额不足：可用 ${(account.balance / 100).toFixed(2)} 元，本次付款 ${(amount / 100).toFixed(2)} 元`,
+                `账户余额不足：可用 ${(availBal / 100).toFixed(2)} 元，本次付款 ${(amount / 100).toFixed(2)} 元`,
               );
             }
           }
@@ -210,7 +211,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, partnerType, partnerId, -amount);
           if (accountId) {
             const inc = type === 'receipt' ? amount : -amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+            db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id = ? AND teamId = ?`).run(
               inc,
               accountId,
               teamId,
@@ -313,24 +314,26 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
 
           if (old.accountId && old.type === 'receipt') {
             const oldAcc = db
-              .prepare(`SELECT balance FROM account WHERE id = ? AND teamId = ?`)
+              .prepare(`SELECT COALESCE(balance, 0) AS balance FROM account WHERE id = ? AND teamId = ?`)
               .get(old.accountId, teamId) as { balance: number } | undefined;
             if (oldAcc) {
+              const oldBal = Number(oldAcc.balance ?? 0);
               const backNeed = old.accountId === accountId ? Math.max(0, old.amount - amount) : old.amount;
-              if (oldAcc.balance < backNeed) {
+              if (oldBal < backNeed) {
                 throw new ValidationError(
-                  `该笔收款已被支用，旧账户当前余额 ${(oldAcc.balance / 100).toFixed(2)} 元，不足以冲回 ${(backNeed / 100).toFixed(2)} 元。请先调整资金或换用其他账户。`,
+                  `该笔收款已被支用，旧账户当前余额 ${(oldBal / 100).toFixed(2)} 元，不足以冲回 ${(backNeed / 100).toFixed(2)} 元。请先调整资金或换用其他账户。`,
                 );
               }
             }
           }
           if (accountId !== null) {
             const account = db
-              .prepare(`SELECT id, balance FROM account WHERE id = ? AND teamId = ?`)
+              .prepare(`SELECT id, COALESCE(balance, 0) AS balance FROM account WHERE id = ? AND teamId = ?`)
               .get(accountId, teamId) as { id: number; balance: number } | undefined;
             if (!account) throw new ValidationError('资金账户不存在');
+            const curBal = Number(account.balance ?? 0);
             if (old.type === 'payment') {
-              const avail = old.accountId === accountId ? account.balance + old.amount : account.balance;
+              const avail = old.accountId === accountId ? curBal + old.amount : curBal;
               if (amount > avail) {
                 throw new ValidationError(
                   `账户余额不足：可用 ${(avail / 100).toFixed(2)} 元，本次付款 ${(amount / 100).toFixed(2)} 元`,
@@ -344,7 +347,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, old.partnerType, old.partnerId, old.amount - amount);
           if (old.accountId) {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+            db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id = ? AND teamId = ?`).run(
               back,
               old.accountId,
               teamId,
@@ -358,7 +361,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           if (upd.changes === 0) throw new NotFoundError('收付款记录不存在');
           if (accountId !== null) {
             const inc = old.type === 'receipt' ? amount : -amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+            db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id = ? AND teamId = ?`).run(
               inc,
               accountId,
               teamId,
@@ -412,11 +415,12 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           }
           if (old.accountId && old.type === 'receipt') {
             const acc = db
-              .prepare(`SELECT balance FROM account WHERE id = ? AND teamId = ?`)
+              .prepare(`SELECT COALESCE(balance, 0) AS balance FROM account WHERE id = ? AND teamId = ?`)
               .get(old.accountId, teamId) as { balance: number } | undefined;
-            if (acc && acc.balance < old.amount) {
+            if (acc && Number(acc.balance ?? 0) < old.amount) {
+              const bal = Number(acc.balance ?? 0);
               throw new ValidationError(
-                `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(old.amount / 100).toFixed(2)} 元。请先调整资金或改为修改金额。`,
+                `该笔收款已被支用，账户当前余额 ${(bal / 100).toFixed(2)} 元，不足以冲回 ${(old.amount / 100).toFixed(2)} 元。请先调整资金或改为修改金额。`,
               );
             }
           }
@@ -428,7 +432,7 @@ export function mountSettlements(router: Router, db: DatabaseSync): void {
           ).run(teamId, old.partnerType, old.partnerId, old.amount);
           if (old.accountId) {
             const back = old.type === 'receipt' ? -old.amount : old.amount;
-            db.prepare(`UPDATE account SET balance = balance + ? WHERE id = ? AND teamId = ?`).run(
+            db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id = ? AND teamId = ?`).run(
               back,
               old.accountId,
               teamId,

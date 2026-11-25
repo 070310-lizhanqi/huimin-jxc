@@ -203,7 +203,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       return;
     }
 
-    if (by === 'product') {
+    if (by === 'product' || by === 'prod') {
       // 金额必须与单据净额口径一致：整单折扣会让 doc.totalAmount < 明细合计，
       // 因此按「该行金额 / 本单明细合计」比例把单据净额分摊到各商品行。
       // dt 派生表先按 (teamId,status,type,date) 过滤再聚合：原先全表扫 doc_item 再 JOIN，
@@ -233,15 +233,15 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
         .all(teamId, from, to, teamId, from, to, limit) as unknown as RankRow[];
       const rows = rawRows.map((r) => ({
         ...r,
-        amount: roundHalfAwayFromZero(Number(r.amount) || 0),
-        qty: roundQty(Number(r.qty) || 0),
+        amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+        qty: roundQty(Number(r.qty) || 0) || 0,
       }));
-      res.json({ dimension, by, from, to, rows });
+      res.json({ dimension, by: 'product', from, to, rows });
       return;
     }
 
     if (by === 'clerk') {
-      const rows = db
+      const rawRows = db
         .prepare(
           `SELECT d.clerkId AS key, COALESCE(k.name, '未指定业务员') AS name,
                   SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
@@ -253,12 +253,17 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
            GROUP BY d.clerkId ORDER BY amount DESC LIMIT ?`,
         )
         .all(teamId, from, to, limit) as unknown as RankRow[];
+      const rows = rawRows.map((r) => ({
+        ...r,
+        amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+        qty: roundQty(Number(r.qty) || 0) || 0,
+      }));
       res.json({ dimension, by, from, to, rows });
       return;
     }
 
     // 默认按客户
-    const rows = db
+    const rawRows = db
       .prepare(
         `SELECT d.partnerId AS key, COALESCE(c.name, '未指定客户') AS name,
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
@@ -271,6 +276,11 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
          GROUP BY d.partnerId ORDER BY amount DESC LIMIT ?`,
       )
       .all(teamId, from, to, limit) as unknown as RankRow[];
+    const rows = rawRows.map((r) => ({
+      ...r,
+      amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+      qty: roundQty(Number(r.qty) || 0) || 0,
+    }));
     res.json({ dimension, by: 'cus', from, to, rows });
   });
 }

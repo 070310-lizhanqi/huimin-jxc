@@ -9,7 +9,7 @@ import { AppError, BusyError, NotFoundError, sendError, ValidationError } from '
 import { logger } from './infra/logger';
 import { withImmediateTx } from './infra/tx';
 import { parsePositiveInt } from './infra/validate';
-import { PRICE_CENTS_MAX, QTY_MAX, roundQty } from './shared/money';
+import { MAX_TOTAL_AMOUNT_CENTS, PRICE_CENTS_MAX, QTY_MAX, roundQty } from './shared/money';
 
 type Value = string | number | null;
 
@@ -65,9 +65,9 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
       const n = Math.round(Number(s));
       if (!Number.isFinite(n)) return { error: `「${field}」必须是数字（单位：分）` };
       if (field !== 'balance' && n < 0) return { error: `「${field}」不能为负数` };
-      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX)
-        return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
-      return { value: n };
+      const maxCents = field === 'balance' ? MAX_TOTAL_AMOUNT_CENTS : PRICE_CENTS_MAX;
+      if (!Number.isSafeInteger(n) || Math.abs(n) > maxCents) return { error: `「${field}」超出上限 ${maxCents} 分` };
+      return { value: n === 0 ? 0 : n };
     }
     if (QTY_FIELDS.has(field)) {
       const s = v.trim();
@@ -100,9 +100,9 @@ export function checkField(field: string, v: unknown): { value: Value } | { erro
     if (INT_CENTS_FIELDS.has(field)) {
       const n = Math.round(v);
       if (field !== 'balance' && n < 0) return { error: `「${field}」不能为负数` };
-      if (field !== 'balance' && Math.abs(n) > PRICE_CENTS_MAX)
-        return { error: `「${field}」超出上限 ${PRICE_CENTS_MAX} 分` };
-      return { value: n };
+      const maxCents = field === 'balance' ? MAX_TOTAL_AMOUNT_CENTS : PRICE_CENTS_MAX;
+      if (!Number.isSafeInteger(n) || Math.abs(n) > maxCents) return { error: `「${field}」超出上限 ${maxCents} 分` };
+      return { value: n === 0 ? 0 : n };
     }
     if (QTY_FIELDS.has(field)) {
       const n = roundQty(v);
@@ -225,7 +225,8 @@ export function mountCrud(router: Router, db: DatabaseSync, cfg: CrudConfig): vo
     for (const f of cfg.fields) {
       const checked = checkField(f, body[f]);
       if ('error' in checked) return sendError(req, res, 400, checked.error, 'VALIDATION_ERROR');
-      values.push(checked.value);
+      const val = cfg.table === 'account' && f === 'balance' && checked.value === null ? 0 : checked.value;
+      values.push(val);
     }
     try {
       const row = withImmediateTx(db, () => {

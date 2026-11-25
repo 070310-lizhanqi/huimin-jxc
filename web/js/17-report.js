@@ -41,7 +41,7 @@ const ReportPage = {
     const RANK_BY = [
       { key: 'cus', label: '按客户' },
       { key: 'clerk', label: '按业务员' },
-      { key: 'prod', label: '按商品' },
+      { key: 'product', label: '按商品' },
     ];
     const rankBy = ref('cus');
     const rankRows = ref([]);
@@ -217,7 +217,7 @@ const ReportPage = {
         // 排行 tab 按 sale-rank 口径导出（本年区间，与页面统计卡一致）
         const dim = RANK_DIMS[tab.value];
         const byLabel =
-          { cus: '客户', clerk: '业务员', prod: '商品' }[tab.value === 'receipt' ? 'cus' : rankBy.value] || '客户';
+          { cus: '客户', clerk: '业务员', product: '商品' }[tab.value === 'receipt' ? 'cus' : rankBy.value] || '客户';
         exportCsv(
           `${dim}_${now.getFullYear()}年.csv`,
           rankRows.value.map((r, i) => ({
@@ -385,7 +385,7 @@ const ReportPage = {
       </table>
 
       <table class="tbl" v-else-if="tab in RANK_DIMS">
-        <thead><tr><th class="r" style="width:52px">#</th><th>{{ tab === 'receipt' ? '客户' : (rankBy === 'clerk' ? '业务员' : rankBy === 'prod' ? '商品' : '客户') }}</th><th class="r">金额</th><th class="r">数量</th><th class="r">单数</th></tr></thead>
+        <thead><tr><th class="r" style="width:52px">#</th><th>{{ tab === 'receipt' ? '客户' : (rankBy === 'clerk' ? '业务员' : rankBy === 'product' ? '商品' : '客户') }}</th><th class="r">金额</th><th class="r">数量</th><th class="r">单数</th></tr></thead>
         <tbody>
           <tr v-for="(r, i) in rankRows" :key="r.key ?? 'none'">
             <td class="r muted">{{ i + 1 }}</td>

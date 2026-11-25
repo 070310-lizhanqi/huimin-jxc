@@ -571,12 +571,14 @@ export function settleOnAudit(
   }
   const balanceSign = RET_TYPES.has(doc.type) ? 1 : -1;
   if (doc.accountId && paid > 0) {
-    const acc = db.prepare(`SELECT id, balance FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as
-      { id: number; balance: number } | undefined;
+    const acc = db
+      .prepare(`SELECT id, COALESCE(balance, 0) AS balance FROM account WHERE id=? AND teamId=?`)
+      .get(doc.accountId, teamId) as { id: number; balance: number } | undefined;
     if (!acc) throw new StockError('收款账户不存在');
-    if (moneyType === 'payment' && acc.balance < paid) {
+    const availBal = Number(acc.balance ?? 0);
+    if (moneyType === 'payment' && availBal < paid) {
       throw new StockError(
-        `账户余额不足：可用 ${(acc.balance / 100).toFixed(2)} 元，本次付款 ${(paid / 100).toFixed(2)} 元`,
+        `账户余额不足：可用 ${(availBal / 100).toFixed(2)} 元，本次付款 ${(paid / 100).toFixed(2)} 元`,
       );
     }
   }
@@ -599,7 +601,11 @@ export function settleOnAudit(
   bumpPartnerBalance(db, teamId, doc.partnerType, doc.partnerId, balanceSign * (paid + dep));
   if (doc.accountId && paid > 0) {
     const inc = moneyType === 'receipt' ? paid : -paid;
-    db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
+    db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id=? AND teamId=?`).run(
+      inc,
+      doc.accountId,
+      teamId,
+    );
   }
 }
 
@@ -644,11 +650,13 @@ export function reverseSettleOnVoid(
     }
   }
   for (const [accountId, need] of receiptBack) {
-    const acc = db.prepare(`SELECT balance FROM account WHERE id=? AND teamId=?`).get(accountId, teamId) as
-      { balance: number } | undefined;
-    if (acc && acc.balance < need) {
+    const acc = db
+      .prepare(`SELECT COALESCE(balance, 0) AS balance FROM account WHERE id=? AND teamId=?`)
+      .get(accountId, teamId) as { balance: number } | undefined;
+    if (acc && Number(acc.balance ?? 0) < need) {
+      const bal = Number(acc.balance ?? 0);
       throw new StockError(
-        `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(need / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
+        `该笔收款已被支用，账户当前余额 ${(bal / 100).toFixed(2)} 元，不足以冲回 ${(need / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
       );
     }
   }
@@ -658,19 +666,29 @@ export function reverseSettleOnVoid(
   for (const s of autos) {
     if (!s.accountId) continue;
     const inc = s.type === 'receipt' ? -s.amount : s.amount;
-    db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, s.accountId, teamId);
+    db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id=? AND teamId=?`).run(
+      inc,
+      s.accountId,
+      teamId,
+    );
   }
   if (!autos.length && doc.accountId && paid > 0) {
     if (moneyType === 'receipt') {
-      const acc = db.prepare(`SELECT balance FROM account WHERE id=? AND teamId=?`).get(doc.accountId, teamId) as
-        { balance: number } | undefined;
-      if (acc && acc.balance < paid) {
+      const acc = db
+        .prepare(`SELECT COALESCE(balance, 0) AS balance FROM account WHERE id=? AND teamId=?`)
+        .get(doc.accountId, teamId) as { balance: number } | undefined;
+      if (acc && Number(acc.balance ?? 0) < paid) {
+        const bal = Number(acc.balance ?? 0);
         throw new StockError(
-          `该笔收款已被支用，账户当前余额 ${(acc.balance / 100).toFixed(2)} 元，不足以冲回 ${(paid / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
+          `该笔收款已被支用，账户当前余额 ${(bal / 100).toFixed(2)} 元，不足以冲回 ${(paid / 100).toFixed(2)} 元。请先调整资金（调账补足余额）后再作废。`,
         );
       }
     }
     const inc = moneyType === 'receipt' ? -paid : paid;
-    db.prepare(`UPDATE account SET balance = balance + ? WHERE id=? AND teamId=?`).run(inc, doc.accountId, teamId);
+    db.prepare(`UPDATE account SET balance = COALESCE(balance, 0) + ? WHERE id=? AND teamId=?`).run(
+      inc,
+      doc.accountId,
+      teamId,
+    );
   }
 }
