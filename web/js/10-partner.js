@@ -5,7 +5,15 @@ const PartnerPage = {
   setup() {
     const lockTab = route.q.tab === 'cus' || route.q.tab === 'ven' ? route.q.tab : '';
     const tab = ref(lockTab === 'ven' ? 'ven' : 'cus');
-    watch(() => route.q.tab, (t) => { if (t === 'cus' || t === 'ven') { tab.value = t; kw.value = ''; } });
+    watch(
+      () => route.q.tab,
+      (t) => {
+        if (t === 'cus' || t === 'ven') {
+          tab.value = t;
+          kw.value = '';
+        }
+      },
+    );
     const kw = ref('');
     /* editor/busy/busyDel 由下方的 useCrudEditor（B-前6）提供 */
 
@@ -13,7 +21,7 @@ const PartnerPage = {
       const src = tab.value === 'cus' ? store.customers : store.vendors;
       const k = kw.value.trim();
       // name 可能为 null（后端 CRUD 不强制非空）：includes 前先兜底
-      return k ? src.filter(x => String(x.name || '').includes(k) || String(x.mobile || '').includes(k)) : src;
+      return k ? src.filter((x) => String(x.name || '').includes(k) || String(x.mobile || '').includes(k)) : src;
     });
 
     /** B-前6：CRUD 骨架走 useCrudEditor；名称校验留在本页 validate */
@@ -27,7 +35,8 @@ const PartnerPage = {
         return id ? `/${table}/${id}` : `/${table}`;
       },
       confirmDelete: (p) => `删除「${p.name}」？被单据或收付款引用的将被拒绝。`,
-      deleteRequest: (p) => api.del(`/${tab.value === 'cus' ? 'customer' : 'vendor'}/${p.id}`, { teamId: store.teamId }),
+      deleteRequest: (p) =>
+        api.del(`/${tab.value === 'cus' ? 'customer' : 'vendor'}/${p.id}`, { teamId: store.teamId }),
       afterSave: async () => {
         // B-前1：只刷新被改的往来单位集合（旧 loadBase 重拉 9 个档案 + 打印设置 = 10 个请求）
         await refreshBase([tab.value === 'cus' ? 'customers' : 'vendors']);
@@ -39,15 +48,26 @@ const PartnerPage = {
     const editor = crud.editor;
     const busy = crud.busy;
     const busyDel = crud.busyDel;
+    const normLevel = (v) => (v === 'whole' ? 'wholePrice' : v === 'retail' ? 'retailPrice' : v || 'salePrice');
     function openNew() {
-      crud.openNew(tab.value === 'cus'
-        ? { name: '', mobile: '', address: '', remark: '', priceLevel: 'salePrice' }
-        : { name: '', mobile: '', address: '', remark: '' });
+      crud.openNew(
+        tab.value === 'cus'
+          ? { name: '', mobile: '', address: '', remark: '', priceLevel: 'salePrice' }
+          : { name: '', mobile: '', address: '', remark: '' },
+      );
     }
     function openEdit(p) {
-      crud.openEdit(p, (row) => (tab.value === 'cus'
-        ? { name: row.name, mobile: row.mobile || '', address: row.address || '', remark: row.remark || '', priceLevel: row.priceLevel || 'salePrice' }
-        : { name: row.name, mobile: row.mobile || '', address: row.address || '', remark: row.remark || '' }));
+      crud.openEdit(p, (row) =>
+        tab.value === 'cus'
+          ? {
+              name: row.name,
+              mobile: row.mobile || '',
+              address: row.address || '',
+              remark: row.remark || '',
+              priceLevel: normLevel(row.priceLevel),
+            }
+          : { name: row.name, mobile: row.mobile || '', address: row.address || '', remark: row.remark || '' },
+      );
     }
     const save = crud.save;
     const del = crud.del;
@@ -60,18 +80,38 @@ const PartnerPage = {
       exportCsv(
         `${isCus ? '客户' : '供应商'}_${todayStr()}.csv`,
         list.value.map((p) => ({
-          name: p.name || '', mobile: p.mobile || '', address: p.address || '',
-          level: isCus ? (LEVEL[p.priceLevel] || '标准售价') : '',
+          name: p.name || '',
+          mobile: p.mobile || '',
+          address: p.address || '',
+          level: isCus ? LEVEL[normLevel(p.priceLevel)] || '标准售价' : '',
           remark: p.remark || '',
         })),
         [
-          { key: 'name', label: '名称' }, { key: 'mobile', label: '手机' }, { key: 'address', label: '地址' },
+          { key: 'name', label: '名称' },
+          { key: 'mobile', label: '手机' },
+          { key: 'address', label: '地址' },
           ...(isCus ? [{ key: 'level', label: '价格等级' }] : []),
           { key: 'remark', label: '备注' },
         ],
       );
     }
-    return { tab, lockTab, kw, list, editor, openNew, openEdit, save, del, busy, busyDel, store, LEVEL, doExport };
+    return {
+      tab,
+      lockTab,
+      kw,
+      list,
+      editor,
+      openNew,
+      openEdit,
+      save,
+      del,
+      busy,
+      busyDel,
+      store,
+      LEVEL,
+      normLevel,
+      doExport,
+    };
   },
   template: `
   <div>
@@ -99,7 +139,7 @@ const PartnerPage = {
             <td style="font-weight:500">{{ p.name }}</td>
             <td class="muted">{{ p.mobile || '—' }}</td>
             <td class="muted">{{ p.address || '—' }}</td>
-            <td v-if="tab === 'cus'"><span class="tag" :class="p.priceLevel === 'wholePrice' ? 'ok' : p.priceLevel === 'retailPrice' ? 'warn' : ''">{{ LEVEL[p.priceLevel || 'salePrice'] || '标准售价' }}</span></td>
+            <td v-if="tab === 'cus'"><span class="tag" :class="normLevel(p.priceLevel) === 'wholePrice' ? 'ok' : normLevel(p.priceLevel) === 'retailPrice' ? 'warn' : ''">{{ LEVEL[normLevel(p.priceLevel)] || '标准售价' }}</span></td>
             <td class="muted">{{ p.remark || '—' }}</td>
             <td>
               <button class="btn sm" @click="openEdit(p)">编辑</button>
@@ -135,4 +175,3 @@ const PartnerPage = {
 
   </div>`,
 };
-

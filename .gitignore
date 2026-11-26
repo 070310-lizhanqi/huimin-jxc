@@ -101,6 +101,7 @@ installer/payload/
 installer/out/
 # Electron 打包产物（不入库）
 dist-electron/
+dist-test/
 # Inno OutputDir 曾误配成 installer\out 产生的嵌套目录（已修，留个 ignore 兜底）
 installer/installer/
 .tools/node.exe
@@ -113,5 +114,8 @@ port.txt
 server.lock
 launcher.pid
 .env*
+!.env.example
+PROGRESS.md
+coverage/
 .git-merge-msg.tmp
 *.tmp

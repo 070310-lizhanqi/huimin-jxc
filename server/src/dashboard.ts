@@ -10,7 +10,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
-import { allocateDocDiscounts } from './report';
+import { sendError } from './infra/errors';
+import { allocateDocDiscounts, roundHalfAwayFromZero, roundQty } from './shared/money';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -32,8 +33,8 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
   router.get('/stats/sales-summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const range = String(req.query.range ?? 'month');
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = rangeBounds(range);
@@ -111,9 +112,10 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       )
       .all(teamId, to) as Array<{ productId: number; avgCost: number }>;
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
-    const priceRows = db
-      .prepare('SELECT id, purchasePrice FROM product WHERE teamId = ?')
-      .all(teamId) as Array<{ id: number; purchasePrice: number }>;
+    const priceRows = db.prepare('SELECT id, purchasePrice FROM product WHERE teamId = ?').all(teamId) as Array<{
+      id: number;
+      purchasePrice: number;
+    }>;
     const priceMap = new Map<number, number>(priceRows.map((p) => [p.id, p.purchasePrice]));
 
     // 毛利：整单折扣按行金额占比分摊（与 /report/product 同口径）后按商品归集净量净额，
@@ -123,7 +125,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     for (const r of profitRows) {
       const a = perProd.get(r.productId) ?? { qty: 0, amt: 0 };
       const sign = r.type === 'stockout' ? 1 : -1;
-      a.qty += sign * r.qty;
+      a.qty = roundQty(a.qty + sign * r.qty);
       a.amt += sign * (netLine.get(`${r.docId}:${r.productId}`) ?? r.amount);
       perProd.set(r.productId, a);
     }
@@ -132,7 +134,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       const unitCost = costMap.get(pid) ?? priceMap.get(pid) ?? 0;
       grossProfitFloat += a.amt - a.qty * unitCost;
     }
-    const grossProfit = Math.round(grossProfitFloat);
+    const grossProfit = roundHalfAwayFromZero(grossProfitFloat);
 
     res.json({
       range,
@@ -142,7 +144,7 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       orderAmount: order.amt,
       outCount: out.cnt,
       outAmount: out.saleAmt - out.retAmt,
-      outQty: out.saleQty - out.retQty,
+      outQty: roundQty(out.saleQty - out.retQty),
       receiptAmount: receipt.amt,
       receiptCount: receipt.cnt,
       grossProfit,
@@ -166,8 +168,8 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
     const rawLimit = Number(req.query.limit ?? 10);
     const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 10;
     const { from, to } = rangeBounds(String(req.query.range ?? 'month'));
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
 
@@ -201,16 +203,16 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
       return;
     }
 
-    if (by === 'product') {
+    if (by === 'product' || by === 'prod') {
       // 金额必须与单据净额口径一致：整单折扣会让 doc.totalAmount < 明细合计，
       // 因此按「该行金额 / 本单明细合计」比例把单据净额分摊到各商品行。
       // dt 派生表先按 (teamId,status,type,date) 过滤再聚合：原先全表扫 doc_item 再 JOIN，
       // 大团队卡死接口；NULLIF 防 sumAmt=0 除零（虽然 0 金额单罕见但导入数据可能存在）。
-      const rows = db
+      const rawRows = db
         .prepare(
           `SELECT i.productId AS key, p.name AS name,
-                  SUM(CASE WHEN dt.sumAmt IS NULL OR dt.sumAmt = 0 THEN 0
-                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / NULLIF(dt.sumAmt, 0) END) AS amount,
+                  CAST(ROUND(SUM(CASE WHEN dt.sumAmt IS NULL OR dt.sumAmt = 0 THEN 0
+                           ELSE ${sign} * i.amount * 1.0 * d.totalAmount / NULLIF(dt.sumAmt, 0) END), 0) AS INTEGER) AS amount,
                   SUM(CASE WHEN d.type = 'sret' THEN -i.qty ELSE i.qty END) AS qty,
                   COUNT(DISTINCT d.id) AS count
            FROM doc_item i
@@ -229,12 +231,17 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
            GROUP BY i.productId ORDER BY amount DESC LIMIT ?`,
         )
         .all(teamId, from, to, teamId, from, to, limit) as unknown as RankRow[];
-      res.json({ dimension, by, from, to, rows });
+      const rows = rawRows.map((r) => ({
+        ...r,
+        amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+        qty: roundQty(Number(r.qty) || 0) || 0,
+      }));
+      res.json({ dimension, by: 'product', from, to, rows });
       return;
     }
 
     if (by === 'clerk') {
-      const rows = db
+      const rawRows = db
         .prepare(
           `SELECT d.clerkId AS key, COALESCE(k.name, '未指定业务员') AS name,
                   SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
@@ -246,23 +253,34 @@ export function mountDashboard(router: Router, db: DatabaseSync): void {
            GROUP BY d.clerkId ORDER BY amount DESC LIMIT ?`,
         )
         .all(teamId, from, to, limit) as unknown as RankRow[];
+      const rows = rawRows.map((r) => ({
+        ...r,
+        amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+        qty: roundQty(Number(r.qty) || 0) || 0,
+      }));
       res.json({ dimension, by, from, to, rows });
       return;
     }
 
     // 默认按客户
-    const rows = db
+    const rawRows = db
       .prepare(
         `SELECT d.partnerId AS key, COALESCE(c.name, '未指定客户') AS name,
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalAmount ELSE d.totalAmount END) AS amount,
                 SUM(CASE WHEN d.type = 'sret' THEN -d.totalQty ELSE d.totalQty END) AS qty,
                 COUNT(*) AS count
-         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId
+         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
          WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ${docTypes}
+           AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
            AND d.date >= ? AND d.date <= ?
          GROUP BY d.partnerId ORDER BY amount DESC LIMIT ?`,
       )
       .all(teamId, from, to, limit) as unknown as RankRow[];
+    const rows = rawRows.map((r) => ({
+      ...r,
+      amount: roundHalfAwayFromZero(Number(r.amount) || 0) || 0,
+      qty: roundQty(Number(r.qty) || 0) || 0,
+    }));
     res.json({ dimension, by: 'cus', from, to, rows });
   });
 }

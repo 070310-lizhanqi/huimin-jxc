@@ -2,9 +2,18 @@
 /* web/js/04-state.js —— 由 app.js 拆分（lines 137-181） */
 /* ================= 共享状态 ================= */
 const store = reactive({
-  teamId: null, team: null, teams: [],
-  cats: [], products: [], warehouses: [], reservoirs: [],
-  customers: [], vendors: [], clerks: [], accounts: [], units: [],
+  teamId: null,
+  team: null,
+  teams: [],
+  cats: [],
+  products: [],
+  warehouses: [],
+  reservoirs: [],
+  customers: [],
+  vendors: [],
+  clerks: [],
+  accounts: [],
+  units: [],
   print: { company: '', address: '', phone: '', footer: '', showLogo: true },
   loaded: false,
   /* 低库存角标（顶栏铃铛）：pickTeam 后刷新，数据来自 /stats/dashboard */
@@ -24,13 +33,22 @@ async function refreshLowStock() {
       ...r,
       prodName: byId(store.products, r.productId)?.name || `#${r.productId}`,
     }));
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 /** 档案集合 key → 接口路径（loadBase 与 refreshBase 共用，顺序与旧 loadBase 一致） */
 const ARCHIVE_PATHS = {
-  cats: '/cat', products: '/product', warehouses: '/warehouse', reservoirs: '/reservoir',
-  customers: '/customer', vendors: '/vendor', clerks: '/clerk', accounts: '/account', units: '/unit',
+  cats: '/cat',
+  products: '/product',
+  warehouses: '/warehouse',
+  reservoirs: '/reservoir',
+  customers: '/customer',
+  vendors: '/vendor',
+  clerks: '/clerk',
+  accounts: '/account',
+  units: '/unit',
 };
 async function loadBase() {
   const t = store.teamId;
@@ -41,14 +59,19 @@ async function loadBase() {
   const failed = [];
   results.forEach((r, i) => {
     if (r.status === 'fulfilled') store[keys[i]] = r.value;
-    else { store[keys[i]] = []; failed.push(ARCHIVE_PATHS[keys[i]]); }
+    else {
+      store[keys[i]] = [];
+      failed.push(ARCHIVE_PATHS[keys[i]]);
+    }
   });
   if (failed.length) console.warn('[loadBase] 部分档案加载失败：', failed.join(', '));
   // 打印抬头（失败不阻塞主流程）
   try {
     const s = await api.get('/setting/get', { teamId: t });
     if (s && s.print) store.print = s.print;
-  } catch { /* 忽略 */ }
+  } catch {
+    /* 忽略 */
+  }
 }
 /**
  * B-前1 局部刷新：增删改后只重拉被改的那一个档案集合（如改商品只拉 /product），
@@ -66,7 +89,10 @@ async function refreshBase(keys) {
   const failed = [];
   results.forEach((r, i) => {
     if (r.status === 'fulfilled') store[wanted[i]] = r.value;
-    else { store[wanted[i]] = []; failed.push(ARCHIVE_PATHS[wanted[i]]); }
+    else {
+      store[wanted[i]] = [];
+      failed.push(ARCHIVE_PATHS[wanted[i]]);
+    }
   });
   if (failed.length) console.warn('[refreshBase] 部分档案加载失败：', failed.join(', '));
 }
@@ -95,7 +121,7 @@ async function loadTeams() {
 }
 async function pickTeam(id) {
   store.teamId = id;
-  store.team = store.teams.find(t => t.id === id) || null;
+  store.team = store.teams.find((t) => t.id === id) || null;
   localStorage.setItem('oc_teamId', String(id));
   await loadBase();
   store.loaded = true;
@@ -108,4 +134,3 @@ async function ensureTeam() {
   if (!id) throw new Error('当前账号未关联账套');
   await pickTeam(id);
 }
-

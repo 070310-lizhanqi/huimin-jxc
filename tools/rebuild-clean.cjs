@@ -81,7 +81,7 @@ try {
   const acct = (name, type, balance) =>
     db.prepare('INSERT INTO account (teamId, name, type, balance) VALUES (?, ?, ?, ?)').run(teamId, name, type, balance);
   acct('现金', 'cash', 500000);
-  acct('微信收款', 'wx', 0);
+  acct('微信收款', 'wechat', 0);
   acct('对公账户', 'bank', 2000000);
 
   // 分类
@@ -122,11 +122,11 @@ try {
   // 客户
   const cus = (name, mobile, address, priceLevel) =>
     Number(db.prepare('INSERT INTO customer (teamId, name, mobile, address, priceLevel) VALUES (?, ?, ?, ?, ?)').run(teamId, name, mobile, address, priceLevel).lastInsertRowid);
-  cus('鲜果超市（总店）', '13900139001', '市区人民路 88 号', 'whole');
-  cus('果篮水果店', '13900139002', '城东果蔬市场 A12', 'whole');
-  cus('橙心橙意水果连锁', '13900139003', '新区商业街 26 号', 'whole');
-  cus('王先生（个人）', '13900139004', '幸福小区 3 栋', 'retail');
-  cus('甜蜜时光烘焙坊', '13900139005', '工业园北路 9 号', 'whole');
+  cus('鲜果超市（总店）', '13900139001', '市区人民路 88 号', 'wholePrice');
+  cus('果篮水果店', '13900139002', '城东果蔬市场 A12', 'wholePrice');
+  cus('橙心橙意水果连锁', '13900139003', '新区商业街 26 号', 'wholePrice');
+  cus('王先生（个人）', '13900139004', '幸福小区 3 栋', 'retailPrice');
+  cus('甜蜜时光烘焙坊', '13900139005', '工业园北路 9 号', 'wholePrice');
 
   // 供应商
   const ven = (name, mobile, address) =>

@@ -33,10 +33,28 @@ const DashboardPage = {
       { k: 'product', label: '商品' },
     ];
     const RANK_CARDS = [
-      { k: 'order', label: '销售订单排行', dims: DIM_ALL, more: '#/doc/sale?type=sorder', emptyText: '本月还没有销售订单' },
-      { k: 'out', label: '销售出库排行', dims: DIM_ALL, more: '#/doc/sale?type=stockout', emptyText: '本月还没有销售出库' },
+      {
+        k: 'order',
+        label: '销售订单排行',
+        dims: DIM_ALL,
+        more: '#/doc/sale?type=sorder',
+        emptyText: '本月还没有销售订单',
+      },
+      {
+        k: 'out',
+        label: '销售出库排行',
+        dims: DIM_ALL,
+        more: '#/doc/sale?type=stockout',
+        emptyText: '本月还没有销售出库',
+      },
       // 收款排行只有「客户」维度：收款单无业务员，后端 receipt 维度强制按客户聚合
-      { k: 'receipt', label: '销售收款排行', dims: [{ k: 'cus', label: '客户' }], more: '#/finance', emptyText: '本月还没有收款记录' },
+      {
+        k: 'receipt',
+        label: '销售收款排行',
+        dims: [{ k: 'cus', label: '客户' }],
+        more: '#/finance',
+        emptyText: '本月还没有收款记录',
+      },
     ];
     const rankRange = ref('month');
     const rankData = reactive({ order: [], out: [], receipt: [] });
@@ -73,15 +91,26 @@ const DashboardPage = {
           const kept = arr.map((l) => map.get(l)).filter(Boolean);
           return kept.length ? kept : QUICK_DEFAULT.slice();
         }
-      } catch (e) { /* 忽略损坏的本地数据 */ }
+      } catch (e) {
+        /* 忽略损坏的本地数据 */
+      }
       return QUICK_DEFAULT.slice();
     }
     const QUICK = ref(loadQuick());
     // teamId 变化（换账套）时重新加载该账号的快捷配置
-    watch(() => store.teamId, () => { QUICK.value = loadQuick(); });
+    watch(
+      () => store.teamId,
+      () => {
+        QUICK.value = loadQuick();
+      },
+    );
 
     function persistQuick() {
-      try { localStorage.setItem(QUICK_KEY.value, JSON.stringify(QUICK.value.map((x) => x.label))); } catch (e) { /* 存储满时忽略 */ }
+      try {
+        localStorage.setItem(QUICK_KEY.value, JSON.stringify(QUICK.value.map((x) => x.label)));
+      } catch (e) {
+        /* 存储满时忽略 */
+      }
     }
     function removeQuick(label) {
       QUICK.value = QUICK.value.filter((x) => x.label !== label);
@@ -102,40 +131,86 @@ const DashboardPage = {
       const s = sales.value;
       if (!s) return [];
       return [
-        { label: '订单', num: Number(s.orderCount ?? 0), decimals: 0, unit: '张', sub: fmtMoney(s.orderAmount) + ' 元' },
+        {
+          label: '订单',
+          num: Number(s.orderCount ?? 0),
+          decimals: 0,
+          unit: '张',
+          sub: fmtMoney(s.orderAmount) + ' 元',
+        },
         { label: '出库', num: Number(s.outCount ?? 0), decimals: 0, unit: '张', sub: fmtMoney(s.outAmount) + ' 元' },
-        { label: '收款', num: Number(s.receiptCount ?? 0), decimals: 0, unit: '笔', sub: fmtMoney(s.receiptAmount) + ' 元' },
+        {
+          label: '收款',
+          num: Number(s.receiptCount ?? 0),
+          decimals: 0,
+          unit: '笔',
+          sub: fmtMoney(s.receiptAmount) + ' 元',
+        },
         // 毛利是金额不是张数：加 ¥ 前缀并降一号字，避免和上面三个计数挤在同一视觉层级
-        { label: '毛利', num: Number(s.grossProfit || 0) / 100, decimals: 2, unit: '', prefix: '¥', sub: '净销售额 − 成本', money: true },
+        {
+          label: '毛利',
+          num: Number(s.grossProfit || 0) / 100,
+          decimals: 2,
+          unit: '',
+          prefix: '¥',
+          sub: '净销售额 − 成本',
+          money: true,
+        },
       ];
     });
 
-    const lowStockItems = computed(() => (stats.value?.lowStockItems ?? []).map((r) => ({
-      ...r,
-      prodName: byId(store.products, r.productId)?.name || `#${r.productId}`,
-    })));
+    const lowStockItems = computed(() =>
+      (stats.value?.lowStockItems ?? []).map((r) => ({
+        ...r,
+        prodName: byId(store.products, r.productId)?.name || `#${r.productId}`,
+      })),
+    );
     /** 新手引导：空账套显示；「不再显示」按账套记忆（换账套/新建账套会重新出现） */
     const guideDoneKey = computed(() => 'oc.guide.done.' + (store.teamId ?? ''));
     const guideHidden = ref(false);
-    try { guideHidden.value = Boolean(localStorage.getItem('oc.guide.done.' + (store.teamId ?? ''))); } catch { /* ignore */ }
+    try {
+      guideHidden.value = Boolean(localStorage.getItem('oc.guide.done.' + (store.teamId ?? '')));
+    } catch {
+      /* ignore */
+    }
     function dismissGuide() {
       guideHidden.value = true;
-      try { localStorage.setItem(guideDoneKey.value, '1'); } catch { /* ignore */ }
+      try {
+        localStorage.setItem(guideDoneKey.value, '1');
+      } catch {
+        /* ignore */
+      }
     }
-    const showGuide = computed(() => !guideHidden.value && !store.products.length && stats.value
-      && Number(stats.value.draftCount ?? 0) === 0 && Number(stats.value.totalQty ?? 0) === 0);
+    const showGuide = computed(
+      () =>
+        !guideHidden.value &&
+        !store.products.length &&
+        stats.value &&
+        Number(stats.value.draftCount ?? 0) === 0 &&
+        Number(stats.value.totalQty ?? 0) === 0,
+    );
 
     /** 环形图公共配置（色板/标签与 22-aging 共享 AGING_* 常量） */
     const BUCKET_LABELS = AGING_LABELS;
     /* 图表统一用色（品牌橙系单色渐变）：账龄由深到浅表达「越老越严重」的递进，
        超 720 天一档用警示红；替代此前 AntV 默认蓝绿混搭（与品牌橙零关联） */
-    const C = { brand: '#f26f21', brandSoft: '#ff8a3d', brandLight: '#ffc08a', grayAxis: '#8a919c', grayText: '#5c6670', neg: '#e85656', outBar: '#b8c2cc' };
+    const C = {
+      brand: '#f26f21',
+      brandSoft: '#ff8a3d',
+      brandLight: '#ffc08a',
+      grayAxis: '#8a919c',
+      grayText: '#5c6670',
+      neg: '#e85656',
+      outBar: '#b8c2cc',
+    };
     const BUCKET_COLORS = AGING_COLORS;
     const BUCKET_KEYS = AGING_KEYS;
     /* 深色 tooltip：三处图表共用一套观感（此前趋势图是 ECharts 默认白底） */
     const CHART_TOOLTIP = {
-      backgroundColor: 'rgba(45,55,68,.94)', borderWidth: 0,
-      textStyle: { color: '#fff', fontSize: 12 }, padding: [7, 11],
+      backgroundColor: 'rgba(45,55,68,.94)',
+      borderWidth: 0,
+      textStyle: { color: '#fff', fontSize: 12 },
+      padding: [7, 11],
     };
 
     /**
@@ -146,7 +221,12 @@ const DashboardPage = {
      */
     async function donut(el, totals, unit, centerLabel) {
       if (!el) return null;
-      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      try {
+        await loadEcharts();
+      } catch (e) {
+        toast(e.message, 'error');
+        return null;
+      }
       if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const raw = BUCKET_KEYS.map((k) => Number(totals?.[k] ?? 0));
@@ -170,11 +250,17 @@ const DashboardPage = {
           ...CHART_TOOLTIP,
         },
         legend: {
-          orient: 'vertical', left: 2, top: 'middle',
-          itemWidth: 8, itemHeight: 8, itemGap: 9,
+          orient: 'vertical',
+          left: 2,
+          top: 'middle',
+          itemWidth: 8,
+          itemHeight: 8,
+          itemGap: 9,
           icon: 'circle',
           textStyle: {
-            fontSize: 12, color: '#5c6670', lineHeight: 15,
+            fontSize: 12,
+            color: '#5c6670',
+            lineHeight: 15,
             rich: {
               nm: { fontSize: 12, color: '#5c6670', width: 58 },
               pc: { fontSize: 12, color: '#303133', fontWeight: 600, align: 'right' },
@@ -188,22 +274,30 @@ const DashboardPage = {
             return `{nm|${name}}{pc|${pct}%}\n{am|${fmtMoney(d.rawValue)}}`;
           },
         },
-        series: [{
-          type: 'pie', radius: ['54%', '78%'], center: ['76%', '50%'],
-          avoidLabelOverlap: false,
-          label: {
-            show: true, position: 'center',
-            formatter: () => `${fmtMoney(sumNet)}\n{unit|${centerLabel || '未结合计'}}`,
-            rich: {
-              unit: { fontSize: 11, color: '#9aa3ad', lineHeight: 20 },
+        series: [
+          {
+            type: 'pie',
+            radius: ['54%', '78%'],
+            center: ['76%', '50%'],
+            avoidLabelOverlap: false,
+            label: {
+              show: true,
+              position: 'center',
+              formatter: () => `${fmtMoney(sumNet)}\n{unit|${centerLabel || '未结合计'}}`,
+              rich: {
+                unit: { fontSize: 11, color: '#9aa3ad', lineHeight: 20 },
+              },
+              color: '#303133',
+              fontSize: 15,
+              fontWeight: 600,
+              lineHeight: 20,
             },
-            color: '#303133', fontSize: 15, fontWeight: 600, lineHeight: 20,
+            labelLine: { show: false },
+            itemStyle: { borderColor: '#fff', borderWidth: 2 },
+            emphasis: { scale: true, scaleSize: 4 },
+            data,
           },
-          labelLine: { show: false },
-          itemStyle: { borderColor: '#fff', borderWidth: 2 },
-          emphasis: { scale: true, scaleSize: 4 },
-          data,
-        }],
+        ],
       });
       charts.push(c);
       return c;
@@ -223,14 +317,20 @@ const DashboardPage = {
      */
     async function barRank(el, rows, unit) {
       if (!el) return null;
-      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return null; }
+      try {
+        await loadEcharts();
+      } catch (e) {
+        toast(e.message, 'error');
+        return null;
+      }
       if (!document.body.contains(el)) return null;
       const c = echarts.init(el);
       const data = (rows || []).slice().reverse();
       c.setOption({
         grid: { left: 104, right: 52, top: 8, bottom: 8 },
         tooltip: {
-          trigger: 'axis', axisPointer: { type: 'shadow' },
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
           ...CHART_TOOLTIP,
           formatter: (p) => `${p[0].name}\n${fmtMoney(p[0].value)} ${unit}`,
         },
@@ -238,29 +338,37 @@ const DashboardPage = {
           type: 'value',
           splitLine: { lineStyle: { color: '#f2f3f5' } },
           axisLabel: { color: '#9aa3ad', fontSize: 11, formatter: (v) => (v === 0 ? '0' : fmtMoney(v)) },
-          axisLine: { show: false }, axisTick: { show: false },
+          axisLine: { show: false },
+          axisTick: { show: false },
         },
         yAxis: {
-          type: 'category', data: data.map((r) => r.name),
-          axisLine: { lineStyle: { color: '#e8eaed' } }, axisTick: { show: false },
+          type: 'category',
+          data: data.map((r) => r.name),
+          axisLine: { lineStyle: { color: '#e8eaed' } },
+          axisTick: { show: false },
           axisLabel: { color: '#5c6670', fontSize: 12, width: 96, overflow: 'truncate', ellipsis: '…' },
         },
-        series: [{
-          type: 'bar', barMaxWidth: 14,
-          data: data.map((r) => ({
-            value: r.amount,
-            itemStyle: {
-              color: r.amount < 0 ? C.neg : C.brand,
-              borderRadius: r.amount < 0 ? [3, 0, 0, 3] : [0, 3, 3, 0],
+        series: [
+          {
+            type: 'bar',
+            barMaxWidth: 14,
+            data: data.map((r) => ({
+              value: r.amount,
+              itemStyle: {
+                color: r.amount < 0 ? C.neg : C.brand,
+                borderRadius: r.amount < 0 ? [3, 0, 0, 3] : [0, 3, 3, 0],
+              },
+            })),
+            label: {
+              show: true,
+              position: 'right',
+              fontSize: 11,
+              color: (p) => (p.value < 0 ? C.neg : C.grayAxis),
+              formatter: (p) => fmtMoney(p.value),
             },
-          })),
-          label: {
-            show: true, position: 'right', fontSize: 11,
-            color: (p) => (p.value < 0 ? C.neg : C.grayAxis),
-            formatter: (p) => fmtMoney(p.value),
+            labelLayout: (params) => (params.rect && params.rect.width < 0 ? { x: params.rect.x - 8 } : {}),
           },
-          labelLayout: (params) => (params.rect && params.rect.width < 0 ? { x: params.rect.x - 8 } : {}),
-        }],
+        ],
       });
       charts.push(c);
       return c;
@@ -268,7 +376,12 @@ const DashboardPage = {
 
     async function renderTrend() {
       if (!trendEl.value) return;
-      try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+      try {
+        await loadEcharts();
+      } catch (e) {
+        toast(e.message, 'error');
+        return;
+      }
       if (!trendEl.value || !document.body.contains(trendEl.value)) return;
       const byDay = {};
       for (const r of trend.value) byDay[r.day] = r;
@@ -293,11 +406,28 @@ const DashboardPage = {
         grid: { left: 44, right: 12, top: 34, bottom: 26 },
         tooltip: { trigger: 'axis', ...CHART_TOOLTIP, valueFormatter: (v) => String(v) },
         legend: { data: ['入库', '出库'], right: 0, top: 0, itemWidth: 12, textStyle: { color: C.grayText } },
-        xAxis: { type: 'category', data: days, axisLine: { lineStyle: { color: '#e8eaed' } }, axisLabel: { color: C.grayAxis } },
+        xAxis: {
+          type: 'category',
+          data: days,
+          axisLine: { lineStyle: { color: '#e8eaed' } },
+          axisLabel: { color: C.grayAxis },
+        },
         yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f0f1f3' } }, axisLabel: { color: C.grayAxis } },
         series: [
-          { name: '入库', type: 'bar', data: inData, itemStyle: { color: C.brand, borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
-          { name: '出库', type: 'bar', data: outData, itemStyle: { color: C.outBar, borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16 },
+          {
+            name: '入库',
+            type: 'bar',
+            data: inData,
+            itemStyle: { color: C.brand, borderRadius: [3, 3, 0, 0] },
+            barMaxWidth: 16,
+          },
+          {
+            name: '出库',
+            type: 'bar',
+            data: outData,
+            itemStyle: { color: C.outBar, borderRadius: [3, 3, 0, 0] },
+            barMaxWidth: 16,
+          },
         ],
       });
       charts.push(c);
@@ -311,10 +441,17 @@ const DashboardPage = {
      */
     async function loadRank(kind) {
       const dim = kind === 'order' ? 'order' : kind === 'receipt' ? 'receipt' : 'out';
-      const by = dim === 'receipt' ? 'cus' : (rankBy[kind] || 'cus');
-      const rows = await api.get('/report/sale-rank', {
-        teamId: store.teamId, dimension: dim, by, range: rankRange.value, limit: 8,
-      }).then((r) => r.rows || []).catch(() => []);
+      const by = dim === 'receipt' ? 'cus' : rankBy[kind] || 'cus';
+      const rows = await api
+        .get('/report/sale-rank', {
+          teamId: store.teamId,
+          dimension: dim,
+          by,
+          range: rankRange.value,
+          limit: 8,
+        })
+        .then((r) => r.rows || [])
+        .catch(() => []);
       rankData[kind] = rows;
       await nextTick();
       const el = document.getElementById('rank-' + kind);
@@ -322,7 +459,12 @@ const DashboardPage = {
         // 先等 echarts 脚本下完再用它：三个排行卡是 Promise.all 并行加载，
         // 首次打开时数据可能先于 vendor 脚本回来，直接 getInstanceByDom 会报
         // ReferenceError（与 donut/renderTrend/renderAging 同一写法）
-        try { await loadEcharts(); } catch (e) { toast(e.message, 'error'); return; }
+        try {
+          await loadEcharts();
+        } catch (e) {
+          toast(e.message, 'error');
+          return;
+        }
         // dispose 后从 charts 数组移除旧实例：onResize 对已 disposed 实例 resize() 会报警告
         const inst = echarts.getInstanceByDom(el);
         if (inst) {
@@ -390,12 +532,38 @@ const DashboardPage = {
       await nextTick();
       if (mySeq !== loadSeq || disposed) return;
       // 重绘只对成功取到数据的区块进行；失败区块保持旧图，不白屏
-      if (t) { disposeChart(trendEl.value); renderTrend(); }
-      if (ar) { disposeChart(arEl.value); donut(arEl.value, ar.totals, '元', '应收未结'); }
-      if (ap) { disposeChart(apEl.value); donut(apEl.value, ap.totals, '元', '应付未结'); }
-      if (sa) { disposeChart(stockEl.value); donut(stockEl.value, sa.totals, '元', '库存货值'); }
-      if (arTop.value.length) { disposeChart(arTopEl.value); barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
-      if (apTop.value.length) { disposeChart(apTopEl.value); barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元'); }
+      if (t) {
+        disposeChart(trendEl.value);
+        renderTrend();
+      }
+      if (ar) {
+        disposeChart(arEl.value);
+        donut(arEl.value, ar.totals, '元', '应收未结');
+      }
+      if (ap) {
+        disposeChart(apEl.value);
+        donut(apEl.value, ap.totals, '元', '应付未结');
+      }
+      if (sa) {
+        disposeChart(stockEl.value);
+        donut(stockEl.value, sa.totals, '元', '库存货值');
+      }
+      if (arTop.value.length) {
+        disposeChart(arTopEl.value);
+        barRank(
+          arTopEl.value,
+          arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })),
+          '元',
+        );
+      }
+      if (apTop.value.length) {
+        disposeChart(apTopEl.value);
+        barRank(
+          apTopEl.value,
+          apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })),
+          '元',
+        );
+      }
       // 三张销售排行卡仍走 loadAllRanks（内部已 dispose 后重绘）
       await loadAllRanks();
     }
@@ -411,7 +579,9 @@ const DashboardPage = {
       }
     }
 
-    function onResize() { for (const c of charts) c.resize(); }
+    function onResize() {
+      for (const c of charts) c.resize();
+    }
 
     /* 自动刷新：前台收银场景页面常开，每 5 分钟静默刷新一次（页面隐藏时跳过） */
     let refreshTimer = 0;
@@ -437,15 +607,20 @@ const DashboardPage = {
       const [s, sum, t, d, ar, ap, sa] = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
       const failed = settled.filter((r) => r.status === 'rejected').length;
       if (failed) toast(`工作台有 ${failed} 个数据区块加载失败，可点右上角刷新重试`, 'warning');
-      stats.value = s; sales.value = sum; trend.value = t; recent.value = d;
-      arAging.value = ar; apAging.value = ap; stockAging.value = sa;
+      stats.value = s;
+      sales.value = sum;
+      trend.value = t;
+      recent.value = d;
+      arAging.value = ar;
+      apAging.value = ap;
+      stockAging.value = sa;
       const tops = await Promise.allSettled([
         api.get('/report/aging/top', { teamId: store.teamId, mode: 'ar', limit: 5 }),
         api.get('/report/aging/top', { teamId: store.teamId, mode: 'ap', limit: 5 }),
       ]);
       if (disposed) return;
-      arTop.value = tops[0].status === 'fulfilled' ? (tops[0].value.rows || []) : [];
-      apTop.value = tops[1].status === 'fulfilled' ? (tops[1].value.rows || []) : [];
+      arTop.value = tops[0].status === 'fulfilled' ? tops[0].value.rows || [] : [];
+      apTop.value = tops[1].status === 'fulfilled' ? tops[1].value.rows || [] : [];
       await nextTick();
       if (disposed) return;
       // 渲染只对成功取到数据的区块进行；失败区块保持骨架/空态
@@ -453,12 +628,27 @@ const DashboardPage = {
       if (ar) donut(arEl.value, ar.totals, '元', '应收未结');
       if (ap) donut(apEl.value, ap.totals, '元', '应付未结');
       if (sa) donut(stockEl.value, sa.totals, '元', '库存货值');
-      if (arTop.value.length) barRank(arTopEl.value, arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
-      if (apTop.value.length) barRank(apTopEl.value, apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })), '元');
+      if (arTop.value.length)
+        barRank(
+          arTopEl.value,
+          arTop.value.map((r) => ({ name: r.partnerName, amount: r.total })),
+          '元',
+        );
+      if (apTop.value.length)
+        barRank(
+          apTopEl.value,
+          apTop.value.map((r) => ({ name: r.partnerName, amount: r.total })),
+          '元',
+        );
       await loadAllRanks();
       if (disposed) return;
       window.addEventListener('resize', onResize);
-      refreshTimer = setInterval(() => { if (!document.hidden) reloadAll(); }, 5 * 60 * 1000);
+      refreshTimer = setInterval(
+        () => {
+          if (!document.hidden) reloadAll();
+        },
+        5 * 60 * 1000,
+      );
     });
     onBeforeUnmount(() => {
       disposed = true;
@@ -469,15 +659,55 @@ const DashboardPage = {
     });
 
     return {
-      stats, sales, range, trend, recent, viewerId, kpis, lowStockItems, showGuide, dismissGuide,
+      stats,
+      sales,
+      range,
+      trend,
+      recent,
+      viewerId,
+      kpis,
+      lowStockItems,
+      showGuide,
+      dismissGuide,
       goPurchase: () => nav('#/doc/purchase?type=stockin&new=1'),
-      arAging, apAging, stockAging, arTop, apTop,
-      trendEl, arEl, apEl, stockEl, arTopEl, apTopEl,
-      RANK_CARDS, rankData, rankRange, rankBy, rankRefs, loadAllRanks, loadRank,
-      QUICK, quickEdit, removeQuick, restoreQuick, resetQuick,
-      BUCKET_LABELS, BUCKET_COLORS, BUCKET_KEYS, hasAging,
-      reloadAll, loadSales, loadDash, store,
-      fmtMoney, prodLabel, partnerLabel, STATUS_TEXT, DOC_META, nav, whLabel,
+      arAging,
+      apAging,
+      stockAging,
+      arTop,
+      apTop,
+      trendEl,
+      arEl,
+      apEl,
+      stockEl,
+      arTopEl,
+      apTopEl,
+      RANK_CARDS,
+      rankData,
+      rankRange,
+      rankBy,
+      rankRefs,
+      loadAllRanks,
+      loadRank,
+      QUICK,
+      quickEdit,
+      removeQuick,
+      restoreQuick,
+      resetQuick,
+      BUCKET_LABELS,
+      BUCKET_COLORS,
+      BUCKET_KEYS,
+      hasAging,
+      reloadAll,
+      loadSales,
+      loadDash,
+      store,
+      fmtMoney,
+      prodLabel,
+      partnerLabel,
+      STATUS_TEXT,
+      DOC_META,
+      nav,
+      whLabel,
     };
   },
   template: `
@@ -698,4 +928,3 @@ const DashboardPage = {
     <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
   </div>`,
 };
-

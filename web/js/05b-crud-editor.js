@@ -47,7 +47,10 @@ function useCrudEditor(cfg) {
   }
   async function save() {
     const err = cfg.validate ? cfg.validate(editor.form, editor.id) : null;
-    if (err) { toast(err, 'error'); return false; }
+    if (err) {
+      toast(err, 'error');
+      return false;
+    }
     if (busy.value) return false;
     const isNew = !editor.id;
     const body = cfg.buildBody ? cfg.buildBody(editor.form, editor.id) : { teamId: store.teamId, ...editor.form };
@@ -56,11 +59,15 @@ function useCrudEditor(cfg) {
       if (editor.id) await api.put(cfg.url(editor.id, editor.form), body);
       else await api.post(cfg.url(null, editor.form), body);
       editor.open = false;
-      toast(typeof cfg.savedToast === 'function' ? cfg.savedToast(isNew) : (cfg.savedToast || '已保存'));
+      toast(typeof cfg.savedToast === 'function' ? cfg.savedToast(isNew) : cfg.savedToast || '已保存');
       if (cfg.afterSave) await cfg.afterSave(isNew, editor.form, editor.id);
       return true;
-    } catch (e) { toast(e.message, 'error'); return false; }
-    finally { busy.value = false; }
+    } catch (e) {
+      toast(e.message, 'error');
+      return false;
+    } finally {
+      busy.value = false;
+    }
   }
   async function del(row) {
     if (busyDel.value) return false;
@@ -71,8 +78,12 @@ function useCrudEditor(cfg) {
       toast('已删除');
       if (cfg.afterDelete) await cfg.afterDelete(row);
       return true;
-    } catch (e) { toast(e.message, 'error'); return false; }
-    finally { busyDel.value = null; }
+    } catch (e) {
+      toast(e.message, 'error');
+      return false;
+    } finally {
+      busyDel.value = null;
+    }
   }
   return { editor, busy, busyDel, openNew, openEdit, save, del };
 }
@@ -87,7 +98,10 @@ async function confirmDeleteRow(text, request, after, title) {
     toast('已删除');
     if (after) await after();
     return true;
-  } catch (e) { toast(e.message, 'error'); return false; }
+  } catch (e) {
+    toast(e.message, 'error');
+    return false;
+  }
 }
 
 /** 分 → 元字符串（两位小数）；null/undefined/'' → ''（余额可为负，负数正常转，如 -500 → '-5.00'） */

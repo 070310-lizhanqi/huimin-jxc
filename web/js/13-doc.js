@@ -41,26 +41,43 @@ const DocPage = {
     }
     function toggleOne(id, ev) {
       const set = new Set(selected.value);
-      if (ev.target.checked) set.add(id); else set.delete(id);
+      if (ev.target.checked) set.add(id);
+      else set.delete(id);
       selected.value = [...set];
     }
 
     const meta = computed(() => DOC_META[activeType.value]);
-    const partners = computed(() => meta.value.partner === 'ven' ? store.vendors : store.customers);
+    const partners = computed(() => (meta.value.partner === 'ven' ? store.vendors : store.customers));
     const pages = computed(() => Math.max(1, Math.ceil(total.value / rows.value)));
     const pageBtns = computed(() => {
-      const n = pages.value, c = page.value, arr = [];
+      const n = pages.value,
+        c = page.value,
+        arr = [];
       for (let p = 1; p <= n; p++) if (p === 1 || p === n || Math.abs(p - c) <= 2) arr.push(p);
       return arr;
     });
-    function onRowsChange(e) { rows.value = Number(e.target.value) || 20; pageSizeSave('doc', rows.value); page.value = 1; load(); }
+    function onRowsChange(e) {
+      rows.value = Number(e.target.value) || 20;
+      pageSizeSave('doc', rows.value);
+      page.value = 1;
+      load();
+    }
 
     /* 列表页底部合计（数量按 fmtQty 归一：0.1+0.2 的浮点和会显示成 0.30000000000000004） */
-    const sumQty = computed(() => fmtQty(list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0), 4));
+    const sumQty = computed(() =>
+      fmtQty(
+        list.value.reduce((s, d) => s + (Number(d.totalQty) || 0), 0),
+        4,
+      ),
+    );
     const sumAmount = computed(() => list.value.reduce((s, d) => s + (Number(d.totalAmount) || 0), 0));
-    const sumPaid = computed(() => list.value.reduce((s, d) => s + (Number(d.paidAmount) || 0) + (Number(d.deposit) || 0), 0));
+    const sumPaid = computed(() =>
+      list.value.reduce((s, d) => s + (Number(d.paidAmount) || 0) + (Number(d.deposit) || 0), 0),
+    );
     /** 表尾合计行的前置单元格数：单号+日期+商品摘要+备注 = 4，另加可选的往来单位/仓库列 */
-    const sumCols = computed(() => 4 + (meta.value.partner ? 1 : 0) + (meta.value.warehouse ? 1 : 0) + (meta.value.toWarehouse ? 1 : 0));
+    const sumCols = computed(
+      () => 4 + (meta.value.partner ? 1 : 0) + (meta.value.warehouse ? 1 : 0) + (meta.value.toWarehouse ? 1 : 0),
+    );
     /* 结算类单据显示「已收/已付」列（含订金）；报价/订单无收付语义不显示 */
     const showPaid = computed(() => Boolean(meta.value.partner) && SETTLE_TYPES.has(activeType.value));
     const listCols = computed(() => sumCols.value + 4 + (showPaid.value ? 1 : 0));
@@ -70,13 +87,19 @@ const DocPage = {
       const my = loadGuard.begin();
       try {
         const r = await api.get('/doc/list', {
-          teamId: store.teamId, type: activeType.value, status: status.value,
-          kw: kw.value, page: page.value, rows: rows.value,
-          from: filterFrom.value || '', to: filterTo.value || '',
+          teamId: store.teamId,
+          type: activeType.value,
+          status: status.value,
+          kw: kw.value,
+          page: page.value,
+          rows: rows.value,
+          from: filterFrom.value || '',
+          to: filterTo.value || '',
           partnerId: filterPartner.value || '',
         });
         if (!loadGuard.isCurrent(my)) return;
-        list.value = r.rows; total.value = r.total;
+        list.value = r.rows;
+        total.value = r.total;
         statusCount.value = r.statusCount || { draft: 0, pending: 0, audit: 0, void: 0 };
         // 翻页/筛选后清空复选：否则「已选 N 单」含已不可见的行
         selected.value = [];
@@ -87,14 +110,25 @@ const DocPage = {
       }
     }
     function resetFilter() {
-      kw.value = ''; status.value = ''; filterFrom.value = ''; filterTo.value = '';
-      filterPartner.value = null; page.value = 1; load();
+      kw.value = '';
+      status.value = '';
+      filterFrom.value = '';
+      filterTo.value = '';
+      filterPartner.value = null;
+      page.value = 1;
+      load();
     }
 
-    watch(activeType, () => { page.value = 1; load(); });
-    watch(() => route.q.type, (t) => {
-      if (t && DOC_META[t] && grp.types.includes(t) && t !== activeType.value) activeType.value = t;
+    watch(activeType, () => {
+      page.value = 1;
+      load();
     });
+    watch(
+      () => route.q.type,
+      (t) => {
+        if (t && DOC_META[t] && grp.types.includes(t) && t !== activeType.value) activeType.value = t;
+      },
+    );
     onMounted(() => {
       // 账龄页「看单据」带 ?partnerId= 过滤：select 的 option 值是数字 id
       if (route.q.partnerId) filterPartner.value = Number(route.q.partnerId) || null;
@@ -112,39 +146,64 @@ const DocPage = {
       editorEditId.value = row ? row.id : 0;
       editorOpen.value = true;
     }
-    function closeEditor() { editorOpen.value = false; load(); }
+    function closeEditor() {
+      editorOpen.value = false;
+      load();
+    }
 
     async function audit(row) {
       if (busyId.value) return;
       if (!(await confirmBox(`审核后「${row.billNo}」将过账写入库存与往来余额，确认审核？`))) return;
       busyId.value = row.id;
-      try { await api.post('/doc/audit', { teamId: store.teamId, id: row.id, auditBy: store.team?.name || '管理员' }); toast('已审核'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/audit', { teamId: store.teamId, id: row.id, auditBy: store.team?.name || '管理员' });
+        toast('已审核');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 提交审核：草稿 -> 待审核 */
     async function submitDoc(row) {
       if (busyId.value) return;
       busyId.value = row.id;
-      try { await api.post('/doc/submit', { teamId: store.teamId, id: row.id }); toast('已提交审核'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/submit', { teamId: store.teamId, id: row.id });
+        toast('已提交审核');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 驳回：待审核 -> 草稿（需填原因） */
     async function rejectDoc(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt('请输入驳回原因（可留空）', `驳回 ${row.billNo}`, {
-          confirmButtonText: '确认驳回', cancelButtonText: '取消',
-          inputPlaceholder: '如：价格录错，请核对后重新提交', inputValue: '',
+          confirmButtonText: '确认驳回',
+          cancelButtonText: '取消',
+          inputPlaceholder: '如：价格录错，请核对后重新提交',
+          inputValue: '',
         });
         reason = (r.value || '').trim();
-      } catch { return; }
+      } catch {
+        return;
+      }
       busyId.value = row.id;
-      try { await api.post('/doc/reject', { teamId: store.teamId, id: row.id, reason }); toast('已驳回，单据回到草稿'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/reject', { teamId: store.teamId, id: row.id, reason });
+        toast('已驳回，单据回到草稿');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 批量提交当前页草稿（勾选了就只提交勾选的，否则当前页全部草稿） */
     async function submitAllDrafts() {
@@ -161,13 +220,18 @@ const DocPage = {
         const r = await api.post('/doc/submit-batch', { teamId: store.teamId, ids });
         toast(`已提交 ${r.done} 张${r.skipped?.length ? `，跳过 ${r.skipped.length} 张` : ''}`);
         load();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 批量审核勾选的单据（草稿/待审）：逐张调用既有审核接口，失败的单据收集后汇总提示 */
     async function auditSelected() {
       if (busyId.value) return;
-      const pool = list.value.filter((d) => selected.value.includes(d.id) && (d.status === 'draft' || d.status === 'pending'));
+      const pool = list.value.filter(
+        (d) => selected.value.includes(d.id) && (d.status === 'draft' || d.status === 'pending'),
+      );
       if (!pool.length) return toast('请先勾选要审核的草稿/待审单据', 'warning');
       if (!(await confirmBox(`审核 ${pool.length} 张单据？审核后立即过账写入库存与往来余额。`))) return;
       busyId.value = 'batch';
@@ -190,36 +254,60 @@ const DocPage = {
           }
         }
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, () => worker()));
-        if (failed.length) toast(`已审核 ${done} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${failed.length > 3 ? ' …' : ''}`, 'warning');
+        if (failed.length)
+          toast(
+            `已审核 ${done} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${failed.length > 3 ? ' …' : ''}`,
+            'warning',
+          );
         else toast(`已审核 ${done} 张`);
         load();
-      } finally { busyId.value = null; }
+      } finally {
+        busyId.value = null;
+      }
     }
     async function voidDoc(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt(
           `作废「${row.billNo}」将反向冲回库存与往来余额，确认作废？可填写作废原因留痕。`,
-          '作废单据', {
-            confirmButtonText: '确认作废', cancelButtonText: '取消', type: 'warning',
-            inputPlaceholder: '作废原因（可留空，如：录错价格重开）', inputValue: '',
+          '作废单据',
+          {
+            confirmButtonText: '确认作废',
+            cancelButtonText: '取消',
+            type: 'warning',
+            inputPlaceholder: '作废原因（可留空，如：录错价格重开）',
+            inputValue: '',
           },
         );
         reason = (r.value || '').trim();
-      } catch { return; }
+      } catch {
+        return;
+      }
       busyId.value = row.id;
-      try { await api.post('/doc/void', { teamId: store.teamId, id: row.id, reason }); toast('已作废'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/void', { teamId: store.teamId, id: row.id, reason });
+        toast('已作废');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     async function delDoc(row) {
       if (busyId.value) return;
       if (!(await confirmBox(`删除草稿「${row.billNo}」？删除后不可恢复。`))) return;
       busyId.value = row.id;
-      try { await api.del(`/doc/${row.id}`, { teamId: store.teamId }); toast('已删除'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.del(`/doc/${row.id}`, { teamId: store.teamId });
+        toast('已删除');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     async function convert(row) {
       if (busyId.value) return;
@@ -235,15 +323,21 @@ const DocPage = {
         const entry = Object.entries(DOC_GROUPS).find(([, g]) => g.types.includes(m.convertTo));
         if (entry) nav(`#/doc/${entry[0]}?type=${m.convertTo}`);
         else activeType.value = m.convertTo;
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 明细视图数据：展开当前页所有单据的商品行（一次批量取，不再逐单请求） */
     const flatItems = ref([]);
     const flatLoading = ref(false);
     const flatGuard = seqGuard();
     async function loadFlatItems() {
-      if (!list.value.length) { flatItems.value = []; return; }
+      if (!list.value.length) {
+        flatItems.value = [];
+        return;
+      }
       flatLoading.value = true;
       const my = flatGuard.begin();
       // 发请求前固化当前页：响应回来后若已翻页/切筛选，旧 items 不再拼进新页
@@ -254,24 +348,35 @@ const DocPage = {
         if (!flatGuard.isCurrent(my)) return;
         const rows = [];
         for (const d of curList) {
-          for (const it of (map?.[String(d.id)] || [])) {
+          for (const it of map?.[String(d.id)] || []) {
             rows.push({
-              docId: d.id, billNo: d.billNo, date: d.date, status: d.status,
+              docId: d.id,
+              billNo: d.billNo,
+              date: d.date,
+              status: d.status,
               partnerName: partnerLabel(d),
               prodName: it.prodName || prodLabel(it.productId),
-              spec: it.spec || specOf(it.productId), unit: it.unit || unitOf(it.productId),
-              qty: it.qty, price: it.price, amount: it.amount,
+              spec: it.spec || specOf(it.productId),
+              unit: it.unit || unitOf(it.productId),
+              qty: it.qty,
+              price: it.price,
+              amount: it.amount,
             });
           }
         }
         flatItems.value = rows;
       } catch (e) {
-        if (flatGuard.isCurrent(my)) { toast('明细加载失败：' + e.message, 'error'); flatItems.value = []; }
+        if (flatGuard.isCurrent(my)) {
+          toast('明细加载失败：' + e.message, 'error');
+          flatItems.value = [];
+        }
       } finally {
         if (flatGuard.isCurrent(my)) flatLoading.value = false;
       }
     }
-    watch(viewTab, (v) => { if (v === 'summary') loadFlatItems(); });
+    watch(viewTab, (v) => {
+      if (v === 'summary') loadFlatItems();
+    });
 
     async function copyDoc(row) {
       if (busyId.value) return;
@@ -280,51 +385,100 @@ const DocPage = {
         const r = await api.post('/doc/copy', { teamId: store.teamId, id: row.id });
         toast(`已复制为草稿 ${r.billNo}（批次/库位未复制，请编辑确认后审核）`);
         load();
-      } catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
     /** 操作列「更多」下拉的统一分发：按 command 调对应动作 */
     function moreAction(cmd, row) {
       switch (cmd) {
-        case 'audit': audit(row); break;
-        case 'edit': openEditor(row); break;
-        case 'view': viewerId.value = row.id; break;
-        case 'copy': copyDoc(row); break;
-        case 'delete': delDoc(row); break;
-        case 'void': voidDoc(row); break;
-        default: break;
+        case 'audit':
+          audit(row);
+          break;
+        case 'edit':
+          openEditor(row);
+          break;
+        case 'view':
+          viewerId.value = row.id;
+          break;
+        case 'copy':
+          copyDoc(row);
+          break;
+        case 'delete':
+          delDoc(row);
+          break;
+        case 'void':
+          voidDoc(row);
+          break;
+        default:
+          break;
       }
     }
     function doExport() {
       // 明细视图导出的是展开后的商品行（按商品对数用），不是单据汇总
       if (viewTab.value === 'summary') {
         if (!flatItems.value.length) return toast('没有可导出的明细', 'warning');
-        exportCsv(`${DOC_META[activeType.value].label}明细.csv`, flatItems.value.map((r) => moneyRow({
-          billNo: r.billNo, date: (r.date || '').slice(0, 10), partner: r.partnerName || '',
-          prod: r.prodName, spec: r.spec === '—' ? '' : r.spec, unit: r.unit === '—' ? '' : r.unit,
-          qty: r.qty, price: r.price, amount: r.amount,
-          status: STATUS_TEXT[r.status] || r.status,
-        }, ['price', 'amount'])), [
-          { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' }, { key: 'partner', label: '往来单位' },
-          { key: 'prod', label: '商品' }, { key: 'spec', label: '规格' }, { key: 'unit', label: '单位' },
-          { key: 'qty', label: '数量' }, { key: 'price', label: '单价(元)' }, { key: 'amount', label: '金额(元)' },
-          { key: 'status', label: '状态' },
-        ]);
+        exportCsv(
+          `${DOC_META[activeType.value].label}明细.csv`,
+          flatItems.value.map((r) =>
+            moneyRow(
+              {
+                billNo: r.billNo,
+                date: (r.date || '').slice(0, 10),
+                partner: r.partnerName || '',
+                prod: r.prodName,
+                spec: r.spec === '—' ? '' : r.spec,
+                unit: r.unit === '—' ? '' : r.unit,
+                qty: r.qty,
+                price: r.price,
+                amount: r.amount,
+                status: STATUS_TEXT[r.status] || r.status,
+              },
+              ['price', 'amount'],
+            ),
+          ),
+          [
+            { key: 'billNo', label: '单号' },
+            { key: 'date', label: '日期' },
+            { key: 'partner', label: '往来单位' },
+            { key: 'prod', label: '商品' },
+            { key: 'spec', label: '规格' },
+            { key: 'unit', label: '单位' },
+            { key: 'qty', label: '数量' },
+            { key: 'price', label: '单价(元)' },
+            { key: 'amount', label: '金额(元)' },
+            { key: 'status', label: '状态' },
+          ],
+        );
         return;
       }
       if (!list.value.length) return toast('没有可导出的数据', 'warning');
       const head = [
-        { key: 'billNo', label: '单号' }, { key: 'date', label: '日期' },
-        { key: 'partner', label: '往来单位' }, { key: 'warehouse', label: '仓库' },
-        { key: 'totalQty', label: '合计数量' }, { key: 'totalAmount', label: '合计金额(元)' },
-        { key: 'status', label: '状态' }, { key: 'remark', label: '备注' },
+        { key: 'billNo', label: '单号' },
+        { key: 'date', label: '日期' },
+        { key: 'partner', label: '往来单位' },
+        { key: 'warehouse', label: '仓库' },
+        { key: 'totalQty', label: '合计数量' },
+        { key: 'totalAmount', label: '合计金额(元)' },
+        { key: 'status', label: '状态' },
+        { key: 'remark', label: '备注' },
       ];
-      const mapRow = (d) => moneyRow({
-        billNo: d.billNo, date: (d.date || '').slice(0, 10),
-        partner: partnerLabel(d) || '', warehouse: whLabel(d.warehouseId) || '',
-        totalQty: d.totalQty, totalAmount: d.totalAmount,
-        status: STATUS_TEXT[d.status] || d.status, remark: d.remark || '',
-      }, ['totalAmount']);
+      const mapRow = (d) =>
+        moneyRow(
+          {
+            billNo: d.billNo,
+            date: (d.date || '').slice(0, 10),
+            partner: partnerLabel(d) || '',
+            warehouse: whLabel(d.warehouseId) || '',
+            totalQty: d.totalQty,
+            totalAmount: d.totalAmount,
+            status: STATUS_TEXT[d.status] || d.status,
+            remark: d.remark || '',
+          },
+          ['totalAmount'],
+        );
       // 分页时默认只导出当前页容易误解（财务对账要的是「这批筛选结果的全部」）：
       // 超过一页就询问，确认后走后端批量导出接口（/doc/export，一次请求返回筛选结果 CSV），
       // 不再串行逐页拉取（B-前4：1 万条原来要发 50 个串行请求）。
@@ -333,7 +487,12 @@ const DocPage = {
           `当前只显示了第 ${page.value} 页的 ${list.value.length} 条，共 ${total.value} 条。\n是否导出全部 ${total.value} 条（按当前筛选条件）？`,
           '导出范围',
         ).then(async (all) => {
-          if (!all) return exportCsv(`${DOC_META[activeType.value].label}列表_第${page.value}页.csv`, list.value.map(mapRow), head);
+          if (!all)
+            return exportCsv(
+              `${DOC_META[activeType.value].label}列表_第${page.value}页.csv`,
+              list.value.map(mapRow),
+              head,
+            );
           try {
             const q = new URLSearchParams({ teamId: String(store.teamId), type: activeType.value });
             if (status.value) q.set('status', status.value);
@@ -341,25 +500,82 @@ const DocPage = {
             if (filterFrom.value) q.set('from', filterFrom.value);
             if (filterTo.value) q.set('to', filterTo.value);
             if (filterPartner.value) q.set('partnerId', String(filterPartner.value));
-            await api.download(`/doc/export?${q.toString()}`, `${DOC_META[activeType.value].label}列表_全部${total.value}条.csv`);
-          } catch (e) { toast('导出失败：' + e.message, 'error'); }
+            await api.download(
+              `/doc/export?${q.toString()}`,
+              `${DOC_META[activeType.value].label}列表_全部${total.value}条.csv`,
+            );
+          } catch (e) {
+            toast('导出失败：' + e.message, 'error');
+          }
         });
         return;
       }
       exportCsv(`${DOC_META[activeType.value].label}列表.csv`, list.value.map(mapRow), head);
     }
     return {
-      grp, activeType, status, statusCount, kw, page, rows, list, total, pages, pageBtns, viewerId,
-      meta, partners, busyId,
-      load, openEditor, closeEditor,
-      viewTab, selected, selAll, toggleAll, toggleOne, flatItems, flatLoading, loadFlatItems,
+      grp,
+      activeType,
+      status,
+      statusCount,
+      kw,
+      page,
+      rows,
+      list,
+      total,
+      pages,
+      pageBtns,
+      viewerId,
+      meta,
+      partners,
+      busyId,
+      load,
+      openEditor,
+      closeEditor,
+      viewTab,
+      selected,
+      selAll,
+      toggleAll,
+      toggleOne,
+      flatItems,
+      flatLoading,
+      loadFlatItems,
       flatSumQty: computed(() => flatItems.value.reduce((s, r) => s + (Number(r.qty) || 0), 0)),
       flatSumAmount: computed(() => flatItems.value.reduce((s, r) => s + (Number(r.amount) || 0), 0)),
-      audit, submitDoc, rejectDoc, submitAllDrafts, auditSelected, voidDoc, delDoc, convert, copyDoc, doExport, onRowsChange, moreAction,
+      audit,
+      submitDoc,
+      rejectDoc,
+      submitAllDrafts,
+      auditSelected,
+      voidDoc,
+      delDoc,
+      convert,
+      copyDoc,
+      doExport,
+      onRowsChange,
+      moreAction,
       fmtQty,
-      filterFrom, filterTo, filterPartner, resetFilter, sumQty, sumAmount, sumPaid, sumCols, showPaid, listCols,
-      editorOpen, editorEditId, impOpen,
-      fmtMoney, partnerLabel, whLabel, prodLabel, store, STATUS_TEXT, DOC_META, specOf, unitOf,
+      filterFrom,
+      filterTo,
+      filterPartner,
+      resetFilter,
+      sumQty,
+      sumAmount,
+      sumPaid,
+      sumCols,
+      showPaid,
+      listCols,
+      editorOpen,
+      editorEditId,
+      impOpen,
+      fmtMoney,
+      partnerLabel,
+      whLabel,
+      prodLabel,
+      store,
+      STATUS_TEXT,
+      DOC_META,
+      specOf,
+      unitOf,
     };
   },
   // 模板必须单根：外层 <transition mode="out-in"> 要求组件只有一个根元素才能完成「离场→入场」，

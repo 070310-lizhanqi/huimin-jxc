@@ -17,20 +17,46 @@ const ApprovalPage = {
     const viewerId = ref(null);
 
     const TYPE_LABEL = {
-      stockin: '采购入库', stockout: '销售出库', transfer: '转仓调拨', adjust: '库存调整', stocktake: '库存盘点',
-      porder: '采购订单', sorder: '销售订单', pin: '采购退货', sret: '销售退货',
-      otherin: '其它入库', otherout: '其它出库', assembly: '生产组装', stockinit: '期初库存', quo: '报价单',
-      outapply: '出库申请单', prodtask: '生产任务',
+      stockin: '采购入库',
+      stockout: '销售出库',
+      transfer: '转仓调拨',
+      adjust: '库存调整',
+      stocktake: '库存盘点',
+      porder: '采购订单',
+      sorder: '销售订单',
+      pin: '采购退货',
+      sret: '销售退货',
+      otherin: '其它入库',
+      otherout: '其它出库',
+      assembly: '生产组装',
+      stockinit: '期初库存',
+      quo: '报价单',
+      outapply: '出库申请单',
+      prodtask: '生产任务',
     };
     const TYPE_COLOR = {
-      stockin: '#52a552', stockout: '#f26f21', transfer: '#5b8ff9', adjust: '#e6a23c',
-      stocktake: '#8fd16a', porder: '#9b8afb', sorder: '#f56c6c', pin: '#6dc8ec',
-      sret: '#5ad8a6', otherin: '#4dabf7', otherout: '#ffa94d', assembly: '#cc5de8',
-      stockinit: '#20c997', quo: '#868e96', outapply: '#f783ac', prodtask: '#e8b339',
+      stockin: '#52a552',
+      stockout: '#f26f21',
+      transfer: '#5b8ff9',
+      adjust: '#e6a23c',
+      stocktake: '#8fd16a',
+      porder: '#9b8afb',
+      sorder: '#f56c6c',
+      pin: '#6dc8ec',
+      sret: '#5ad8a6',
+      otherin: '#4dabf7',
+      otherout: '#ffa94d',
+      assembly: '#cc5de8',
+      stockinit: '#20c997',
+      quo: '#868e96',
+      outapply: '#f783ac',
+      prodtask: '#e8b339',
     };
 
     /** 当前筛选下要显示的行：不筛选 = 全部待审；按类型 = 该类型 */
-    const shown = computed(() => (filterType.value ? allRows.value.filter((d) => d.type === filterType.value) : allRows.value));
+    const shown = computed(() =>
+      filterType.value ? allRows.value.filter((d) => d.type === filterType.value) : allRows.value,
+    );
 
     async function load() {
       loading.value = true;
@@ -43,39 +69,62 @@ const ApprovalPage = {
           if (!map.has(d.type)) map.set(d.type, []);
           map.get(d.type).push(d);
         }
-        byType.value = [...map.entries()].map(([type, rs]) => ({
-          type, label: TYPE_LABEL[type] || type, count: rs.length,
-          amount: rs.reduce((s, x) => s + (x.totalAmount || 0), 0),
-        })).sort((a, b) => b.count - a.count);
+        byType.value = [...map.entries()]
+          .map(([type, rs]) => ({
+            type,
+            label: TYPE_LABEL[type] || type,
+            count: rs.length,
+            amount: rs.reduce((s, x) => s + (x.totalAmount || 0), 0),
+          }))
+          .sort((a, b) => b.count - a.count);
         allRows.value = rows;
         list.value = byType.value;
-      } catch (e) { toast(e.message, 'error'); }
-      finally { loading.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        loading.value = false;
+      }
     }
 
     async function doAudit(row) {
       if (busyId.value) return;
       if (!(await confirmBox(`审核「${row.billNo}」将过账写入库存与往来余额，确认？`))) return;
       busyId.value = row.id;
-      try { await api.post('/doc/audit', { teamId: store.teamId, id: row.id, auditBy: store.team?.name || '管理员' }); toast('已审核'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/audit', { teamId: store.teamId, id: row.id, auditBy: store.team?.name || '管理员' });
+        toast('已审核');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
 
     async function doReject(row) {
       if (busyId.value) return;
-      let reason = '';
+      let reason;
       try {
         const r = await ElMessageBox.prompt('请输入驳回原因', `驳回 ${row.billNo}`, {
-          confirmButtonText: '确认驳回', cancelButtonText: '取消',
-          inputPlaceholder: '如：价格录错，请核对后重新提交', inputValue: '',
+          confirmButtonText: '确认驳回',
+          cancelButtonText: '取消',
+          inputPlaceholder: '如：价格录错，请核对后重新提交',
+          inputValue: '',
         });
         reason = (r.value || '').trim();
-      } catch { return; }
+      } catch {
+        return;
+      }
       busyId.value = row.id;
-      try { await api.post('/doc/reject', { teamId: store.teamId, id: row.id, reason }); toast('已驳回'); load(); }
-      catch (e) { toast(e.message, 'error'); }
-      finally { busyId.value = null; }
+      try {
+        await api.post('/doc/reject', { teamId: store.teamId, id: row.id, reason });
+        toast('已驳回');
+        load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        busyId.value = null;
+      }
     }
 
     /** 一键审核当前筛选下的全部 */
@@ -92,10 +141,15 @@ const ApprovalPage = {
         try {
           await api.post('/doc/audit', { teamId: store.teamId, id: r.id, auditBy: store.team?.name || '管理员' });
           okCount++;
-        } catch (e) { errs.push(`${r.billNo || '#' + r.id}：${e.message}`); }
+        } catch (e) {
+          errs.push(`${r.billNo || '#' + r.id}：${e.message}`);
+        }
       }
       auditProgress.value = '';
-      toast(`审核成功 ${okCount} 张${errs.length ? `，失败 ${errs.length} 张` : ''}`, errs.length ? 'warning' : 'success');
+      toast(
+        `审核成功 ${okCount} 张${errs.length ? `，失败 ${errs.length} 张` : ''}`,
+        errs.length ? 'warning' : 'success',
+      );
       // 失败明细此前只打 console，用户根本看不到：这里弹窗列出，方便逐张处理
       if (errs.length) {
         const body = errs.slice(0, 20).join('\n') + (errs.length > 20 ? `\n…其余 ${errs.length - 20} 张` : '');
@@ -109,7 +163,28 @@ const ApprovalPage = {
     }
 
     onMounted(load);
-    return { list, allRows, byType, filterType, shown, loading, busyId, viewerId, load, doAudit, doReject, auditAll, auditProgress, TYPE_LABEL, TYPE_COLOR, store, fmtMoney, partnerLabel, whLabel, STATUS_TEXT };
+    return {
+      list,
+      allRows,
+      byType,
+      filterType,
+      shown,
+      loading,
+      busyId,
+      viewerId,
+      load,
+      doAudit,
+      doReject,
+      auditAll,
+      auditProgress,
+      TYPE_LABEL,
+      TYPE_COLOR,
+      store,
+      fmtMoney,
+      partnerLabel,
+      whLabel,
+      STATUS_TEXT,
+    };
   },
   template: `
   <div class="page-card">
@@ -161,6 +236,3 @@ const ApprovalPage = {
     <doc-viewer :doc-id="viewerId" @close="viewerId = null"/>
   </div>`,
 };
-
-
-

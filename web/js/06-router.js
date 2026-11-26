@@ -13,5 +13,6 @@ function parseHash() {
 }
 window.addEventListener('hashchange', parseHash);
 parseHash();
-function nav(hash) { location.hash = hash; }
-
+function nav(hash) {
+  location.hash = hash;
+}

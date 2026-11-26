@@ -85,17 +85,17 @@ async function call(method, path, body) {
   // ---------- 2. 单据全类型开单-审核链路 ----------
   const TYPES = [
     { type: 'stockin',    sign: +1, needs: ['warehouse'] },
-    { type: 'stockout',   sign: -1, needs: ['warehouse', 'partner'] },
-    { type: 'porder',     sign: +1, needs: ['partner'] },
-    { type: 'sorder',     sign: -1, needs: ['partner'] },
-    { type: 'quo',        sign: -1, needs: ['partner'] },
-    { type: 'outapply',   sign: +1, needs: ['partner'] },
+    { type: 'stockout',   sign: -1, needs: ['warehouse', 'partner'], partner: 'cus' },
+    { type: 'porder',     sign: +1, needs: ['partner'], partner: 'ven' },
+    { type: 'sorder',     sign: -1, needs: ['partner'], partner: 'cus' },
+    { type: 'quo',        sign: -1, needs: ['partner'], partner: 'cus' },
+    { type: 'outapply',   sign: +1, needs: ['partner'], partner: 'cus' },
     { type: 'prodtask',   sign: +1, needs: [] },
     { type: 'transfer',   sign: +1, needs: ['toWarehouse'] },
     { type: 'adjust',     sign: 0, needs: ['warehouse'] },
     { type: 'stocktake',  sign: 0, needs: ['warehouse'] },
-    { type: 'pin',        sign: -1, needs: ['warehouse', 'partner'] },
-    { type: 'sret',       sign: -1, needs: ['warehouse', 'partner'] },
+    { type: 'pin',        sign: -1, needs: ['warehouse', 'partner'], partner: 'ven' },
+    { type: 'sret',       sign: -1, needs: ['warehouse', 'partner'], partner: 'cus' },
     { type: 'otherin',    sign: +1, needs: ['warehouse'] },
     { type: 'otherout',   sign: -1, needs: ['warehouse'] },
     { type: 'assembly',   sign: 0, needs: ['warehouse'] },
@@ -104,11 +104,12 @@ async function call(method, path, body) {
   const created = {};
   for (const t of TYPES) {
     const toWh = t.needs.includes('toWarehouse') ? (await ensure('warehouse', (x) => x.name === '回归仓库2', { name: '回归仓库2' })).id : null;
+    const pType = t.needs.includes('partner') ? t.partner : null;
     const doc = {
       teamId: TEAM, type: t.type, date: '2026-10-17',
       warehouseId: t.needs.includes('warehouse') || t.needs.includes('toWarehouse') ? wh.id : null,
-      partnerType: t.needs.includes('partner') ? (t.sign > 0 ? 'ven' : 'cus') : null,
-      partnerId: t.needs.includes('partner') ? (t.sign > 0 ? ven.id : cus.id) : null,
+      partnerType: pType,
+      partnerId: pType ? (pType === 'ven' ? ven.id : cus.id) : null,
       clerkId: clerk.id,
       remark: `回归-${t.type}`,
       // 调往仓库是行级字段（与前端 13-doc.js 一致）：单据头没有 toWarehouseId 列，

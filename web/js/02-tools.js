@@ -15,7 +15,10 @@ function loadEcharts() {
     const s = document.createElement('script');
     s.src = 'vendor/echarts.min.js?v=0.5.2';
     s.onload = () => resolve(window.echarts);
-    s.onerror = () => { echartsPromise = null; reject(new Error('图表组件加载失败，请检查网络后重试')); };
+    s.onerror = () => {
+      echartsPromise = null;
+      reject(new Error('图表组件加载失败，请检查网络后重试'));
+    };
     document.head.appendChild(s);
   });
   return echartsPromise;
@@ -23,10 +26,14 @@ function loadEcharts() {
 async function confirmBox(msg, tip = '提示') {
   try {
     await ElMessageBox.confirm(msg, tip, {
-      type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消',
+      type: 'warning',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
     });
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 function fmtMoney(cents) {
   if (cents == null) return '—';
@@ -47,7 +54,11 @@ function pageSizeOf(pageKey, fallback = 20) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 function pageSizeSave(pageKey, n) {
-  try { localStorage.setItem('oc.rows.' + pageKey, String(n)); } catch { /* ignore */ }
+  try {
+    localStorage.setItem('oc.rows.' + pageKey, String(n));
+  } catch {
+    /* ignore */
+  }
 }
 
 /* 请求序守卫：连点筛选/页签时，先发的慢响应不得覆盖新选择。
@@ -55,8 +66,12 @@ function pageSizeSave(pageKey, n) {
 function seqGuard() {
   let seq = 0;
   return {
-    begin() { return ++seq; },
-    isCurrent(my) { return my === seq; },
+    begin() {
+      return ++seq;
+    },
+    isCurrent(my) {
+      return my === seq;
+    },
   };
 }
 
@@ -69,12 +84,16 @@ function fmtQty(n, decimals = 0) {
 
 /* 异步动作防抖：返回包装函数，执行时置 flag 为 true，模板用 :disabled="flag" 禁用按钮 */
 function busyFn(flagRef) {
-  return (fn) => async (...args) => {
-    if (flagRef.value) return;
-    flagRef.value = true;
-    try { return await fn(...args); }
-    finally { flagRef.value = false; }
-  };
+  return (fn) =>
+    async (...args) => {
+      if (flagRef.value) return;
+      flagRef.value = true;
+      try {
+        return await fn(...args);
+      } finally {
+        flagRef.value = false;
+      }
+    };
 }
 
 /* 分 → 中文金额大写（打印凭证用）：零壹贰叁肆伍陆柒捌玖 + 拾佰仟万亿，支持到千亿 */
@@ -82,7 +101,7 @@ function rmbUpper(cents) {
   const n = Math.round(Number(cents) || 0);
   if (n === 0) return '零元整';
   const NEG = n < 0;
-  let v = Math.abs(n);
+  const v = Math.abs(n);
   const DIGITS = '零壹贰叁肆伍陆柒捌玖';
   const UNITS = ['', '拾', '佰', '仟'];
   const GROUPS = ['', '万', '亿', '万亿'];
@@ -93,20 +112,23 @@ function rmbUpper(cents) {
   // 整数部分按 4 位一组从低位到高位
   const groups = [];
   let rest = yuanPart;
-  while (rest > 0) { groups.push(rest % 10000); rest = Math.floor(rest / 10000); }
+  while (rest > 0) {
+    groups.push(rest % 10000);
+    rest = Math.floor(rest / 10000);
+  }
   let out = '';
   for (let g = groups.length - 1; g >= 0; g--) {
     const num = groups[g];
-    if (num === 0) { // 整组为 0：补「零」仅当后面还有非零组
+    if (num === 0) {
+      // 整组为 0：补「零」仅当后面还有非零组
       if (g > 0 && out && !out.endsWith('零')) out += '零';
       continue;
     }
     let gs = '';
-    let z = num;
-    let unitPos = 0;
+    const z = num;
     let lastZero = false;
     for (let p = 3; p >= 0; p--) {
-      const d = Math.floor(z / (10 ** p)) % 10;
+      const d = Math.floor(z / 10 ** p) % 10;
       if (d === 0) {
         if (gs && !lastZero) gs += '零';
         lastZero = true;
@@ -114,7 +136,6 @@ function rmbUpper(cents) {
         gs += DIGITS[d] + UNITS[p];
         lastZero = false;
       }
-      void unitPos;
     }
     gs = gs.replace(/零+$/, '');
     out += gs + GROUPS[g];
@@ -145,7 +166,9 @@ function rmbUpper(cents) {
 function exportCsv(filename, rows, headers) {
   if (Array.isArray(rows) && rows.length && (typeof rows[0] === 'string' || Array.isArray(rows[0]))) {
     console.warn('[exportCsv] 参数顺序错误（rows/headers 颠倒），已自动纠正：' + filename);
-    const t = rows; rows = headers; headers = t;
+    const t = rows;
+    rows = headers;
+    headers = t;
   }
   const esc = (v) => {
     const s = v == null ? '' : String(v);
@@ -179,27 +202,48 @@ const CountUp = {
   },
   setup(props) {
     const disp = ref(0);
-    let raf = 0, from = 0, startTs = 0;
-    const reduce = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let raf = 0,
+      from = 0,
+      startTs = 0;
+    const reduce =
+      typeof window !== 'undefined' &&
+      window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const target = () => Number(props.value || 0);
-    const fmt = (n) => Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: props.decimals, maximumFractionDigits: props.decimals });
+    const fmt = (n) =>
+      Number(n || 0).toLocaleString('zh-CN', {
+        minimumFractionDigits: props.decimals,
+        maximumFractionDigits: props.decimals,
+      });
     function step(ts) {
       if (!startTs) startTs = ts;
       const p = Math.min(1, (ts - startTs) / Math.max(1, props.duration));
       const e = 1 - Math.pow(1 - p, 3); // easeOutCubic
       disp.value = from + (target() - from) * e;
       if (p < 1) raf = requestAnimationFrame(step);
-      else { disp.value = target(); raf = 0; }
+      else {
+        disp.value = target();
+        raf = 0;
+      }
     }
     function run() {
       from = disp.value;
-      if (raf) { cancelAnimationFrame(raf); raf = 0; startTs = 0; }
-      if (reduce || props.duration <= 0) { disp.value = target(); return; }
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+        startTs = 0;
+      }
+      if (reduce || props.duration <= 0) {
+        disp.value = target();
+        return;
+      }
       raf = requestAnimationFrame(step);
     }
     watch(() => props.value, run);
     onMounted(run);
-    onBeforeUnmount(() => { if (raf) cancelAnimationFrame(raf); });
+    onBeforeUnmount(() => {
+      if (raf) cancelAnimationFrame(raf);
+    });
     return { disp, fmt };
   },
   template: '<span>{{ fmt(disp) }}</span>',
@@ -230,4 +274,3 @@ const SkChart = {
   props: { height: { type: String, default: '186px' } },
   template: `<div class="sk sk-chart" :style="{ height: height }"></div>`,
 };
-

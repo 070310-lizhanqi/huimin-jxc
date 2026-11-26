@@ -7,3 +7,10 @@ trustLockfile: true
 # "packages field missing or empty"（A-安1 升级 body-parser 时实测复现）。
 packages:
   - '.'
+
+allowBuilds:
+  electron-winstaller: false
+  electron: true
+
+overrides:
+  'minimatch@>=7.0.0 <11.0.1': '^11.0.9'

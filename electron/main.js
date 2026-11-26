@@ -164,9 +164,8 @@ async function restartServerFlow() {
  */
 function registerDownloadHandler() {
   session.defaultSession.on('will-download', (_event, item, _webContents) => {
-    const hinted = pendingDownloadFilename && Date.now() - pendingDownloadFilename.at < 30000
-      ? pendingDownloadFilename.name
-      : null;
+    const hinted =
+      pendingDownloadFilename && Date.now() - pendingDownloadFilename.at < 30000 ? pendingDownloadFilename.name : null;
     pendingDownloadFilename = null;
     const filename = hinted || item.getFilename() || '下载文件';
     const smokeDir = process.env.ZHANHUI_SMOKE_DOWNLOAD_DIR;
@@ -243,9 +242,7 @@ function createWindow(url) {
     y: useSaved ? saved.y : undefined,
     show: false,
     // Windows 下用应用图标；Linux 下 .ico 可能不被窗口管理器接受，留空用默认图标。
-    icon: process.platform === 'win32'
-      ? path.join(__dirname, '..', 'assets', 'icon-app.ico')
-      : undefined,
+    icon: process.platform === 'win32' ? path.join(__dirname, '..', 'assets', 'icon-app.ico') : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -286,9 +283,7 @@ function createWindow(url) {
           parent: win,
           show: true,
           title: '打印预览',
-          icon: process.platform === 'win32'
-            ? path.join(__dirname, '..', 'assets', 'icon-app.ico')
-            : undefined,
+          icon: process.platform === 'win32' ? path.join(__dirname, '..', 'assets', 'icon-app.ico') : undefined,
           webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -401,7 +396,9 @@ async function main() {
     return 1;
   }
   dataDir = dataInit.dataDir;
-  console.log(`[main] 数据目录 ${dataDir}（${dataInit.kind}${dataInit.migrated ? '，已迁移旧目录' : ''}${dataInit.fellBack ? '，迁移失败已回退旧目录' : ''}）`);
+  console.log(
+    `[main] 数据目录 ${dataDir}（${dataInit.kind}${dataInit.migrated ? '，已迁移旧目录' : ''}${dataInit.fellBack ? '，迁移失败已回退旧目录' : ''}）`,
+  );
 
   try {
     serverHandle = await startServerManaged({
@@ -477,8 +474,7 @@ async function main() {
       clickTrayMenu: (label) => trayHandle.clickMenu(label),
       isHiddenToTray: () => hiddenToTray,
       windowVisible: () => !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
-      childWindowCount: () =>
-        BrowserWindow.getAllWindows().filter((w) => w !== mainWindow && !w.isDestroyed()).length,
+      childWindowCount: () => BrowserWindow.getAllWindows().filter((w) => w !== mainWindow && !w.isDestroyed()).length,
       // 第三阶段：更新检查探针（冒烟脚本用本地 latest.yml 服务切换更新源）。
       lastUpdateResult: () => getLastResult(),
       setUpdateFeed: (url) => setTestFeedUrl(url),

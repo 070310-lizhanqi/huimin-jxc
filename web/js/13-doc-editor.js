@@ -24,18 +24,23 @@ const DocEditor = {
     let priceMemSeq = 0;
     async function loadPriceMem(pid) {
       const my = ++priceMemSeq;
-      if (!pid) { if (my === priceMemSeq) priceMem.value = {}; return; }
+      if (!pid) {
+        if (my === priceMemSeq) priceMem.value = {};
+        return;
+      }
       try {
         const r = await api.get('/price/memory', { teamId: store.teamId, partnerId: pid });
         if (my !== priceMemSeq) return;
         const m = {};
         for (const it of r.list || []) m[it.productId] = it.price;
         priceMem.value = m;
-      } catch { if (my === priceMemSeq) priceMem.value = {}; }
+      } catch {
+        if (my === priceMemSeq) priceMem.value = {};
+      }
     }
 
     const emeta = computed(() => DOC_META[props.type] || {});
-    const epartners = computed(() => emeta.value.partner === 'ven' ? store.vendors : store.customers);
+    const epartners = computed(() => (emeta.value.partner === 'ven' ? store.vendors : store.customers));
 
     /** 校验原始输入的金额字段：负数/非数必须在这里报错，不能交给 toCents——
      *  toCents 对负数静默返回 0，而界面合计按原始负值计算，
@@ -54,20 +59,37 @@ const DocEditor = {
       const priceCents = Math.round((Number(it.price) || 0) * 100);
       return Math.round((qtyScaled * priceCents) / 10000);
     };
-    const grossCents = computed(() => editor.form
-      ? editor.form.items.reduce((s, it) => s + lineCents(it), 0) : 0);
+    const grossCents = computed(() => (editor.form ? editor.form.items.reduce((s, it) => s + lineCents(it), 0) : 0));
     const grossAmt = computed(() => grossCents.value / 100);
-      const totalQty = computed(() => editor.form ? fmtQty(editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0), 4) : 0);
-    const totalCents = computed(() => Math.max(0, grossCents.value - Math.round((Number(editor.form?.discount) || 0) * 100)));
+    const totalQty = computed(() =>
+      editor.form
+        ? fmtQty(
+            editor.form.items.reduce((s, it) => s + (Number(it.qty) || 0), 0),
+            4,
+          )
+        : 0,
+    );
+    const totalCents = computed(() =>
+      Math.max(0, grossCents.value - Math.round((Number(editor.form?.discount) || 0) * 100)),
+    );
     const totalAmt = computed(() => totalCents.value / 100);
-    const oweCents = computed(() => Math.max(0,
-      totalCents.value - Math.round((Number(editor.form?.paidAmount) || 0) * 100) - Math.round((Number(editor.form?.deposit) || 0) * 100)));
+    const oweCents = computed(() =>
+      Math.max(
+        0,
+        totalCents.value -
+          Math.round((Number(editor.form?.paidAmount) || 0) * 100) -
+          Math.round((Number(editor.form?.deposit) || 0) * 100),
+      ),
+    );
     const oweAmt = computed(() => oweCents.value / 100);
 
     let stockSeq = 0;
     async function loadStock(warehouseId) {
       const my = ++stockSeq;
-      if (!warehouseId) { if (my === stockSeq) stockMap.value = {}; return; }
+      if (!warehouseId) {
+        if (my === stockSeq) stockMap.value = {};
+        return;
+      }
       // B-前3：只取 productId,qty 两列的轻量接口（旧 /stock/list 全量行只为建这个 Map，
       // 一次换仓就拉几千行）；口径与旧的本地 SUM 一致（同仓所有库存行按商品汇总）。
       // 请求序守卫（stockSeq）不动：快速连切仓库时慢响应仍不得覆盖新结果。
@@ -78,23 +100,31 @@ const DocEditor = {
       stockMap.value = m;
     }
 
-    watch(() => editor.form && editor.form.warehouseId, (w) => { if (emeta.value.warehouse) loadStock(w); });
+    watch(
+      () => editor.form && editor.form.warehouseId,
+      (w) => {
+        if (emeta.value.warehouse) loadStock(w);
+      },
+    );
     // 换客户：重新拉该客户的价格记忆，并把「未手改过」的行价刷成记忆价
-    watch(() => editor.form && editor.form.partnerId, async (pid, old) => {
-      if (!emeta.value.partner) return;
-      await loadPriceMem(pid);
-      const f = emeta.value.priceField;
-      // old === null 是 watcher 的初始基线（editor.form 初始为 null）。
-      // 打开已有单据时表单整体赋值会触发 (pid=单据客户, old=null)：
-      // 此时行价来自服务器单据本身，必须跳过刷新，否则被价格记忆静默改写。
-      if (!f || old === null || editor.id) return;
-      for (const it of editor.form.items) {
-        if (!it.productId) continue;
-        if (it._priceDirty) continue; // 用户已手改过单价的行不刷新
-        const mem = priceMem.value[it.productId];
-        if (mem != null) it.price = mem / 100;
-      }
-    });
+    watch(
+      () => editor.form && editor.form.partnerId,
+      async (pid, old) => {
+        if (!emeta.value.partner) return;
+        await loadPriceMem(pid);
+        const f = emeta.value.priceField;
+        // old === null 是 watcher 的初始基线（editor.form 初始为 null）。
+        // 打开已有单据时表单整体赋值会触发 (pid=单据客户, old=null)：
+        // 此时行价来自服务器单据本身，必须跳过刷新，否则被价格记忆静默改写。
+        if (!f || old === null || editor.id) return;
+        for (const it of editor.form.items) {
+          if (!it.productId) continue;
+          if (it._priceDirty) continue; // 用户已手改过单价的行不刷新
+          const mem = priceMem.value[it.productId];
+          if (mem != null) it.price = mem / 100;
+        }
+      },
+    );
 
     /* 行唯一 id：v-for :key 不能用数组下标——删除中间行会让 Vue 就地复用
        行内下拉的展开态/聚焦态到错误的行上 */
@@ -106,13 +136,24 @@ const DocEditor = {
     const LAST_KEY = 'oc_last_doc_';
     function rememberLast(f) {
       try {
-        localStorage.setItem(LAST_KEY + props.type, JSON.stringify({
-          warehouseId: f.warehouseId || null, clerkId: f.clerkId || null, accountId: f.accountId || null,
-        }));
-      } catch { /* 隐私模式等场景忽略 */ }
+        localStorage.setItem(
+          LAST_KEY + props.type,
+          JSON.stringify({
+            warehouseId: f.warehouseId || null,
+            clerkId: f.clerkId || null,
+            accountId: f.accountId || null,
+          }),
+        );
+      } catch {
+        /* 隐私模式等场景忽略 */
+      }
     }
     function lastDefaults() {
-      try { return JSON.parse(localStorage.getItem(LAST_KEY + props.type) || '{}'); } catch { return {}; }
+      try {
+        return JSON.parse(localStorage.getItem(LAST_KEY + props.type) || '{}');
+      } catch {
+        return {};
+      }
     }
     function blankForm() {
       const last = lastDefaults();
@@ -124,8 +165,13 @@ const DocEditor = {
         clerkId: has(store.clerks, last.clerkId),
         warehouseId: has(store.warehouses, last.warehouseId) ?? store.warehouses[0]?.id ?? null,
         remark: '',
-        receiverName: '', receiverMobile: '', receiverAddress: '',
-        discount: 0, paidAmount: 0, accountId: has(store.accounts, last.accountId), deposit: 0,
+        receiverName: '',
+        receiverMobile: '',
+        receiverAddress: '',
+        discount: 0,
+        paidAmount: 0,
+        accountId: has(store.accounts, last.accountId),
+        deposit: 0,
         items: [blankItem()],
       };
     }
@@ -137,48 +183,66 @@ const DocEditor = {
       // 客户价格等级（批发价/零售价）优先，再退到单据默认价格字段
       if (emeta.value.partner === 'cus' && editor.form.partnerId) {
         const cus = byId(store.customers, editor.form.partnerId);
-        if (cus && cus.priceLevel && cus.priceLevel in p) f = cus.priceLevel;
+        const lv =
+          cus &&
+          (cus.priceLevel === 'whole' ? 'wholePrice' : cus.priceLevel === 'retail' ? 'retailPrice' : cus.priceLevel);
+        if (lv && lv in p) f = lv;
       }
       // 客户价格记忆优先于商品标准价（一客一价是批发场景的常态）
       const mem = priceMem.value[it.productId];
-      it.price = (mem != null ? mem : (p[f] || 0)) / 100;
+      it.price = (mem != null ? mem : p[f] || 0) / 100;
     }
 
     function init() {
       if (props.docId) {
-        api.get('/doc/info', { id: props.docId, teamId: store.teamId }).then(({ doc, items }) => {
-          editor.id = doc.id; editor.billNo = doc.billNo;
-          /*
-           * 只读态：已审核 / 已作废 / 待审核 的单据不允许再改内容。
-           * 之前完全没有这个判断，导致「查看明细」进去后能改数量单价再点「保存草稿」，
-           * 把已过账单据的库存与结算依据擅自改掉。
-           */
-          editor.status = doc.status;
-          editor.ro = doc.status !== 'draft';
-          editor.form = {
-            date: (doc.date || '').slice(0, 10),
-            partnerId: doc.partnerId, clerkId: doc.clerkId,
-            warehouseId: doc.warehouseId || store.warehouses[0]?.id || null,
-            remark: doc.remark || '',
-            receiverName: doc.receiverName || '', receiverMobile: doc.receiverMobile || '',
-            receiverAddress: doc.receiverAddress || '',
-            discount: (doc.discount || 0) / 100, paidAmount: (doc.paidAmount || 0) / 100,
-            accountId: doc.accountId || null, deposit: (doc.deposit || 0) / 100,
-            items: items.map(it => ({
-              _uid: ++uidSeq, productId: it.productId, qty: it.qty, price: (it.price || 0) / 100,
-              batchNo: it.batchNo || '', toWarehouseId: it.toWarehouseId, remark: it.remark || '',
-            })),
-          };
-          if (!editor.form.items.length) editor.form.items.push(blankItem());
-          // 库存快照与价格记忆由 watch(warehouseId/partnerId) 在表单赋值时统一加载，
-          // 此处不再显式调用（此前双发两个请求）
-          // 快照必须在表单赋值之后拍：异步加载前拍到的恒为 "null"，
-          // 会让「打开草稿不做任何修改」也弹「有未保存的修改」的假警报
-          snap();
-        }).catch(e => toast(e.message, 'error'));
+        api
+          .get('/doc/info', { id: props.docId, teamId: store.teamId })
+          .then(({ doc, items }) => {
+            editor.id = doc.id;
+            editor.billNo = doc.billNo;
+            /*
+             * 只读态：已审核 / 已作废 / 待审核 的单据不允许再改内容。
+             * 之前完全没有这个判断，导致「查看明细」进去后能改数量单价再点「保存草稿」，
+             * 把已过账单据的库存与结算依据擅自改掉。
+             */
+            editor.status = doc.status;
+            editor.ro = doc.status !== 'draft';
+            editor.form = {
+              date: (doc.date || '').slice(0, 10),
+              partnerId: doc.partnerId,
+              clerkId: doc.clerkId,
+              warehouseId: doc.warehouseId || store.warehouses[0]?.id || null,
+              remark: doc.remark || '',
+              receiverName: doc.receiverName || '',
+              receiverMobile: doc.receiverMobile || '',
+              receiverAddress: doc.receiverAddress || '',
+              discount: (doc.discount || 0) / 100,
+              paidAmount: (doc.paidAmount || 0) / 100,
+              accountId: doc.accountId || null,
+              deposit: (doc.deposit || 0) / 100,
+              items: items.map((it) => ({
+                _uid: ++uidSeq,
+                productId: it.productId,
+                qty: it.qty,
+                price: (it.price || 0) / 100,
+                batchNo: it.batchNo || '',
+                toWarehouseId: it.toWarehouseId,
+                remark: it.remark || '',
+              })),
+            };
+            if (!editor.form.items.length) editor.form.items.push(blankItem());
+            // 库存快照与价格记忆由 watch(warehouseId/partnerId) 在表单赋值时统一加载，
+            // 此处不再显式调用（此前双发两个请求）
+            // 快照必须在表单赋值之后拍：异步加载前拍到的恒为 "null"，
+            // 会让「打开草稿不做任何修改」也弹「有未保存的修改」的假警报
+            snap();
+          })
+          .catch((e) => toast(e.message, 'error'));
       } else {
-        editor.id = null; editor.billNo = '';
-        editor.status = 'draft'; editor.ro = false;
+        editor.id = null;
+        editor.billNo = '';
+        editor.status = 'draft';
+        editor.ro = false;
         editor.form = blankForm();
         snap();
       }
@@ -202,11 +266,19 @@ const DocEditor = {
      */
     const snapshot = ref('');
     function snap() {
-      try { snapshot.value = JSON.stringify(editor.form || null); } catch { snapshot.value = ''; }
+      try {
+        snapshot.value = JSON.stringify(editor.form || null);
+      } catch {
+        snapshot.value = '';
+      }
     }
     const isDirty = computed(() => {
       if (editor.ro || !editor.form) return false;
-      try { return JSON.stringify(editor.form) !== snapshot.value; } catch { return false; }
+      try {
+        return JSON.stringify(editor.form) !== snapshot.value;
+      } catch {
+        return false;
+      }
     });
     async function backToList() {
       if (isDirty.value) {
@@ -215,7 +287,9 @@ const DocEditor = {
       }
       emit('close');
     }
-    function addItem() { editor.form.items.push(blankItem()); }
+    function addItem() {
+      editor.form.items.push(blankItem());
+    }
     function removeItem(idx) {
       if (editor.form.items.length <= 1) return toast('至少保留一行明细', 'error');
       editor.form.items.splice(idx, 1);
@@ -224,11 +298,13 @@ const DocEditor = {
     function scanBarcode(code) {
       const s = String(code || '').trim();
       if (!s || !editor.form) return;
-      const p = store.products.find((x) => (x.barcode || '').trim() === s)
-        || store.products.find((x) => x.name === s);
+      const p = store.products.find((x) => (x.barcode || '').trim() === s) || store.products.find((x) => x.name === s);
       if (!p) return toast(`未找到条码或同名商品「${s}」`, 'warning');
       const hit = editor.form.items.find((it) => it.productId === p.id);
-      if (hit) { hit.qty = (Number(hit.qty) || 0) + 1; return toast(`${p.name} 数量 +1`); }
+      if (hit) {
+        hit.qty = (Number(hit.qty) || 0) + 1;
+        return toast(`${p.name} 数量 +1`);
+      }
       // 复用末尾空行
       const empty = editor.form.items.find((it) => !it.productId);
       const row = empty || blankItem();
@@ -244,19 +320,33 @@ const DocEditor = {
       scanBarcode(scanCode.value);
       scanCode.value = '';
     }
-    function lineAmt(it) { return (lineCents(it) / 100).toFixed(2); }
-    function stockOf(pid) { return stockMap.value[pid] ?? 0; }
+    function lineAmt(it) {
+      return (lineCents(it) / 100).toFixed(2);
+    }
+    function stockOf(pid) {
+      return stockMap.value[pid] ?? 0;
+    }
 
     /* 下拉选项过滤：名称/手机/条码/规格任一命中，且单次最多渲染 50 条——
        此前每行渲染全量 el-option（20 行 × 1000 商品 = 2 万个选项组件），商品多的账套明显卡顿。
        拼音首字母匹配需要内嵌码表，暂不支持（placeholder 已如实改为名称/编码） */
     const rowKw = reactive({});
-    function filterRow(it, field, q) { rowKw[field + it._uid] = String(q || ''); }
+    function filterRow(it, field, q) {
+      rowKw[field + it._uid] = String(q || '');
+    }
     function rowOpts(it, field, list, fields) {
-      const kw = String(rowKw[field + it._uid] || '').trim().toLowerCase();
+      const kw = String(rowKw[field + it._uid] || '')
+        .trim()
+        .toLowerCase();
       let out = list;
       if (kw) {
-        out = list.filter((p) => fields.some((f) => String(p[f] || '').toLowerCase().includes(kw)));
+        out = list.filter((p) =>
+          fields.some((f) =>
+            String(p[f] || '')
+              .toLowerCase()
+              .includes(kw),
+          ),
+        );
       }
       return out.slice(0, 50);
     }
@@ -264,12 +354,24 @@ const DocEditor = {
       return rowOpts(it, 'p', store.products, ['name', 'barcode', 'spec']);
     }
     /* 往来单位下拉是单实例，用固定 key */
-    function partnerFilter(q) { rowKw.pt0 = String(q || ''); }
+    function partnerFilter(q) {
+      rowKw.pt0 = String(q || '');
+    }
     function partnerOptsFixed() {
-      const kw = String(rowKw.pt0 || '').trim().toLowerCase();
+      const kw = String(rowKw.pt0 || '')
+        .trim()
+        .toLowerCase();
       let out = epartners.value;
-      if (kw) out = out.filter((p) => String(p.name || '').toLowerCase().includes(kw)
-        || String(p.mobile || '').toLowerCase().includes(kw));
+      if (kw)
+        out = out.filter(
+          (p) =>
+            String(p.name || '')
+              .toLowerCase()
+              .includes(kw) ||
+            String(p.mobile || '')
+              .toLowerCase()
+              .includes(kw),
+        );
       return out.slice(0, 50);
     }
     function setFullPaid() {
@@ -304,8 +406,11 @@ const DocEditor = {
         throw new Error('本次收款 + 抵扣订金不能超过应收金额');
       }
       const body = {
-        teamId: store.teamId, type: props.type, date: f.date,
-        partnerType: m.partner || null, partnerId: f.partnerId || null,
+        teamId: store.teamId,
+        type: props.type,
+        date: f.date,
+        partnerType: m.partner || null,
+        partnerId: f.partnerId || null,
         clerkId: f.clerkId || null,
         warehouseId: m.warehouse ? f.warehouseId : null,
         remark: f.remark || null,
@@ -316,9 +421,13 @@ const DocEditor = {
         paidAmount: toCents(f.paidAmount),
         accountId: f.accountId || null,
         deposit: toCents(f.deposit),
-        items: f.items.map(it => ({
-          productId: it.productId, qty: Number(it.qty), price: toCents(it.price),
-          batchNo: it.batchNo || null, toWarehouseId: it.toWarehouseId || null, remark: it.remark || null,
+        items: f.items.map((it) => ({
+          productId: it.productId,
+          qty: Number(it.qty),
+          price: toCents(it.price),
+          batchNo: it.batchNo || null,
+          toWarehouseId: it.toWarehouseId || null,
+          remark: it.remark || null,
         })),
       };
       if (editor.id) {
@@ -326,7 +435,8 @@ const DocEditor = {
         return editor.id;
       }
       const r = await api.post('/doc/create', body);
-      editor.id = r.id; editor.billNo = r.billNo;
+      editor.id = r.id;
+      editor.billNo = r.billNo;
       return r.id;
     }
 
@@ -338,8 +448,11 @@ const DocEditor = {
         rememberLast(editor.form);
         toast('已保存');
         emit('close');
-      } catch (e) { toast(e.message, 'error'); }
-      finally { saving.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
     }
 
     async function saveAndAudit() {
@@ -351,16 +464,52 @@ const DocEditor = {
         await api.post('/doc/audit', { teamId: store.teamId, id });
         toast('已保存并审核');
         emit('close');
-      } catch (e) { toast(e.message, 'error'); }
-      finally { saving.value = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
     }
 
     return {
-      type: props.type, editor, saving, emeta, epartners, grossAmt, totalQty, totalAmt, oweAmt, SETTLE_TYPES,
-      stockMap, priceMem, loadPriceMem, addItem, removeItem, onPick, lineAmt, stockOf,
-      scanCode, doScan, scanBarcode, setFullPaid, fullDiscount, save, saveAndAudit, backToList, isDirty,
-      rowKw, filterRow, prodOpts, partnerFilter, partnerOptsFixed,
-      fmtMoney, store, STATUS_TEXT, DOC_META, specOf, unitOf,
+      type: props.type,
+      editor,
+      saving,
+      emeta,
+      epartners,
+      grossAmt,
+      totalQty,
+      totalAmt,
+      oweAmt,
+      SETTLE_TYPES,
+      stockMap,
+      priceMem,
+      loadPriceMem,
+      addItem,
+      removeItem,
+      onPick,
+      lineAmt,
+      stockOf,
+      scanCode,
+      doScan,
+      scanBarcode,
+      setFullPaid,
+      fullDiscount,
+      save,
+      saveAndAudit,
+      backToList,
+      isDirty,
+      rowKw,
+      filterRow,
+      prodOpts,
+      partnerFilter,
+      partnerOptsFixed,
+      fmtMoney,
+      store,
+      STATUS_TEXT,
+      DOC_META,
+      specOf,
+      unitOf,
     };
   },
   template: `

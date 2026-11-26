@@ -4,18 +4,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { localDate } from './db';
-
-/** 历史采购均价（估算）标量子查询（与 report.ts / dashboard.ts / aging.ts 同口径，B-数4 修后）：
- *  仅统计已审核采购入库单、入库日期 ≤ 今天的流水；零价入库（unitCost<=0，如赠品/价缺省）
- *  不计入分母；全零价商品返回 NULL，调用方用 COALESCE 回落到 purchasePrice。
- *  注意：这是按商品全局取价，未分仓库/批次，多仓不同采购价时仍失真——彻底修需按仓/批取价，见 C-数1。
- *  另：聚合均价不再取单条“最近价”，旧 ORDER BY l.id（插入顺序，补录早日期入库单会成
- *  “最近价”）的问题随之消除——均价与行选取顺序无关，不再需要 ORDER BY d.date DESC, l.id DESC。 */
-const HIST_AVG_COST_SQL = `(SELECT SUM(CASE WHEN l.unitCost > 0 THEN l.qty * l.unitCost ELSE 0 END) * 1.0
-     / NULLIF(SUM(CASE WHEN l.unitCost > 0 THEN l.qty ELSE 0 END), 0)
-   FROM stock_ledger l JOIN doc d ON d.id = l.refDocId
-   WHERE l.teamId = s.teamId AND l.productId = s.productId AND l.direction = 'in'
-     AND d.type = 'stockin' AND d.status = 'audit' AND d.date <= date('now', 'localtime'))`;
+import { sendError } from './infra/errors';
+import { centsToYuan, csvCell, MAX_EXPORT_ROWS } from './shared/csv';
+import { HIST_AVG_COST_SQL } from './shared/money';
 
 export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 实时库存（可按仓库/商品/关键词过滤，聚合同商品多仓位批次）
@@ -32,7 +23,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // onlyLow=1：只看低库存商品；sort=qtyAsc|qtyDesc：按数量排序（默认按商品名，与旧口径一致）。
   router.get('/stock/list', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const warehouseId = req.query.warehouseId ? Number(req.query.warehouseId) : 0;
     const productId = req.query.productId ? Number(req.query.productId) : 0;
     const kw = typeof req.query.kw === 'string' ? req.query.kw : '';
@@ -61,7 +54,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     if (kw) {
       // 名称/条码/规格任一命中（扫码查库存时手上只有条码）
       const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      conds.push(`(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`);
+      conds.push(
+        `(p.name LIKE ? ESCAPE '\\' OR IFNULL(p.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p.spec,'') LIKE ? ESCAPE '\\')`,
+      );
       args.push(like, like, like);
     }
     if (hideZero) {
@@ -87,7 +82,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     }
     if (kw) {
       const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      lowConds.push(`(p2.name LIKE ? ESCAPE '\\' OR IFNULL(p2.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p2.spec,'') LIKE ? ESCAPE '\\')`);
+      lowConds.push(
+        `(p2.name LIKE ? ESCAPE '\\' OR IFNULL(p2.barcode,'') LIKE ? ESCAPE '\\' OR IFNULL(p2.spec,'') LIKE ? ESCAPE '\\')`,
+      );
       lowArgs.push(like, like, like);
     }
     const lowHaving = hideZero
@@ -139,7 +136,8 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
       const list = db.prepare(`${baseSelect}${orderBy}`).all(...allArgs) as Array<Record<string, unknown>>;
       if (groupProd) {
         // 汇总行自带 isLow（导出/全量模式用，与分页口径一致）
-        for (const r of list) r.isLow = (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0) ? 1 : 0;
+        for (const r of list)
+          r.isLow = (Number(r.lowQty) || 0) > 0 && (Number(r.qty) || 0) <= (Number(r.lowQty) || 0) ? 1 : 0;
       }
       return res.json(list);
     }
@@ -148,27 +146,25 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     const agg = (
       groupProd
         ? db
-          .prepare(
-            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty, COALESCE(SUM(value), 0) AS totalValue,
+            .prepare(
+              `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty, COALESCE(SUM(value), 0) AS totalValue,
                     COALESCE(SUM(CASE WHEN lowQty > 0 AND qty <= lowQty THEN 1 ELSE 0 END), 0) AS lowCount
              FROM (${baseSelect})`,
-          )
-          .get(...allArgs)
+            )
+            .get(...allArgs)
         : db
-          .prepare(
-            `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty,
+            .prepare(
+              `SELECT COUNT(*) AS total, COALESCE(SUM(qty), 0) AS totalQty,
                     COALESCE(SUM(qty * estUnitCost), 0) AS totalValue
              FROM (${baseSelect})`,
-          )
-          .get(...allArgs)
+            )
+            .get(...allArgs)
     ) as { total: number; totalQty: number; totalValue: number; lowCount?: number };
     // 明细口径的 lowCount 是商品级（不能从分组行直接加总），单独取低库存商品 id 集
     let lowCount = agg.lowCount ?? 0;
     let lowSet = new Set<number>();
     if (!groupProd) {
-      lowSet = new Set(
-        (db.prepare(lowSql).all(...lowArgs) as Array<{ productId: number }>).map((r) => r.productId),
-      );
+      lowSet = new Set((db.prepare(lowSql).all(...lowArgs) as Array<{ productId: number }>).map((r) => r.productId));
       lowCount = lowSet.size;
     }
     const pageRows = db
@@ -200,8 +196,12 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   router.get('/stock/qty-by-product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const warehouseId = Number(req.query.warehouseId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
-    if (!warehouseId) return res.status(400).json({ error: 'warehouseId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
+    if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
+      return sendError(req, res, 400, 'warehouseId 不能为空', 'VALIDATION_ERROR');
+    }
     const rows = db
       .prepare(
         `SELECT s.productId, SUM(s.qty) AS qty FROM stock s
@@ -214,7 +214,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 工作台统计卡片
   router.get('/stats/dashboard', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const stockAgg = db
       .prepare(
         `SELECT COALESCE(SUM(qty),0) AS totalQty, COUNT(DISTINCT productId) AS skuCount
@@ -302,7 +304,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
   // 近 14 天出入库趋势（工作台图表用）
   router.get('/stats/trend', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const rows = db
       .prepare(
         `SELECT substr(date,1,10) AS day,
@@ -327,7 +331,9 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
    */
   router.get('/stock/ledger', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const productId = Number(req.query.productId);
     const warehouseId = Number(req.query.warehouseId);
     const conds: string[] = ['teamId = ?'];
@@ -366,16 +372,104 @@ export function mountStockQueries(router: Router, db: DatabaseSync): void {
     return res.json({ rows: list, total, page, rowsPerPage: rows });
   });
 
+  // 库存流水 CSV 导出（由 docs.ts 迁回库存模块，与 /stock/ledger 共用筛选口径）
+  router.get('/stock/ledger/export', (req: Request, res: Response) => {
+    const teamId = Number(req.query.teamId);
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
+    const conds: string[] = ['l.teamId = ?'];
+    const args: Array<string | number> = [teamId];
+    const productId = Number(req.query.productId);
+    const warehouseId = Number(req.query.warehouseId);
+    if (productId) {
+      conds.push('l.productId = ?');
+      args.push(productId);
+    }
+    if (warehouseId) {
+      conds.push('l.warehouseId = ?');
+      args.push(warehouseId);
+    }
+    const from = typeof req.query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : '';
+    const to = typeof req.query.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : '';
+    if (from) {
+      conds.push('substr(l.createdAt,1,10) >= ?');
+      args.push(from);
+    }
+    if (to) {
+      conds.push('substr(l.createdAt,1,10) <= ?');
+      args.push(to);
+    }
+    const where = conds.join(' AND ');
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM stock_ledger l WHERE ${where}`).get(...args) as { c: number };
+    if (total.c > MAX_EXPORT_ROWS) {
+      return sendError(
+        req,
+        res,
+        400,
+        `导出数据 ${total.c} 条，超过上限 ${MAX_EXPORT_ROWS} 条，请缩小筛选范围后再导出`,
+        'VALIDATION_ERROR',
+      );
+    }
+    const rows = db
+      .prepare(
+        `SELECT l.createdAt, l.direction, l.qty, l.unitCost, l.batchNo, l.refDocId,
+           (SELECT name FROM product WHERE id = l.productId) AS prodName,
+           (SELECT name FROM warehouse WHERE id = l.warehouseId) AS whName,
+           (SELECT billNo FROM doc WHERE id = l.refDocId) AS billNo
+         FROM stock_ledger l WHERE ${where} ORDER BY l.id DESC LIMIT ?`,
+      )
+      .all(...args, MAX_EXPORT_ROWS) as Array<{
+      createdAt: string;
+      direction: string;
+      qty: number;
+      unitCost: number | null;
+      batchNo: string | null;
+      refDocId: number;
+      prodName: string | null;
+      whName: string | null;
+      billNo: string | null;
+    }>;
+    const filename = `库存流水导出_${localDate().replace(/-/g, '')}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('X-Export-Total', String(total.c));
+    res.write(
+      '\ufeff' +
+        ['时间', '商品', '仓库', '批次', '方向', '数量', '成本单价(元)', '关联单据'].map(csvCell).join(',') +
+        '\r\n',
+    );
+    for (const r of rows) {
+      res.write(
+        [
+          r.createdAt,
+          r.prodName || '',
+          r.whName || '',
+          r.batchNo || '',
+          r.direction === 'in' ? '入库' : '出库',
+          r.qty,
+          centsToYuan(r.unitCost),
+          r.billNo || '#' + r.refDocId,
+        ]
+          .map(csvCell)
+          .join(',') + '\r\n',
+      );
+    }
+    return res.end();
+  });
+
   // 汇总仪表盘：SKU 数、库存总量、库存货值（历史采购均价（估算），与报表同口径，B-数8）
   router.get('/stock/summary', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const sku = db
       .prepare(`SELECT COUNT(DISTINCT productId) AS c FROM stock WHERE teamId=? AND qty != 0`)
       .get(teamId) as { c: number };
-    const total = db
-      .prepare(`SELECT SUM(qty) AS q FROM stock WHERE teamId=? AND qty != 0`)
-      .get(teamId) as { q: number | null };
+    const total = db.prepare(`SELECT SUM(qty) AS q FROM stock WHERE teamId=? AND qty != 0`).get(teamId) as {
+      q: number | null;
+    };
     const value = db
       .prepare(
         `SELECT SUM(s.qty * COALESCE(${HIST_AVG_COST_SQL},

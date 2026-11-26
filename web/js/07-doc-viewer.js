@@ -6,27 +6,39 @@ const DocViewer = {
   emits: ['close'],
   setup(props, { emit }) {
     const data = ref(null);
-    watch(() => props.docId, async (v) => {
-      data.value = null;
-      if (!v) return;
-      // 竞态守卫：快速连点两条单据时，旧请求的晚到响应不能覆盖新单据内容
-      const want = v;
-      try {
-        const r = await api.get('/doc/info', { id: v, teamId: store.teamId });
-        if (want !== props.docId) return;
-        data.value = r;
-      } catch (e) {
-        if (want !== props.docId) return;
-        toast(e.message, 'error'); emit('close');
-      }
-    }, { immediate: true });
+    watch(
+      () => props.docId,
+      async (v) => {
+        data.value = null;
+        if (!v) return;
+        // 竞态守卫：快速连点两条单据时，旧请求的晚到响应不能覆盖新单据内容
+        const want = v;
+        try {
+          const r = await api.get('/doc/info', { id: v, teamId: store.teamId });
+          if (want !== props.docId) return;
+          data.value = r;
+        } catch (e) {
+          if (want !== props.docId) return;
+          toast(e.message, 'error');
+          emit('close');
+        }
+      },
+      { immediate: true },
+    );
     const close = () => emit('close');
+    function onEscClose(e) {
+      if (e && e.key === 'Escape' && props.docId) close();
+    }
+    onMounted(() => window.addEventListener('keydown', onEscClose));
+    onBeforeUnmount(() => window.removeEventListener('keydown', onEscClose));
     function printDoc() {
       const d = data.value;
       if (!d) return;
       const w = window.open('', '_blank', 'width=820,height=900');
       if (!w) return toast('浏览器拦截了打印窗口，请允许弹出窗口', 'error');
-      const items = d.items.map((it) => `<tr>
+      const items = d.items
+        .map(
+          (it) => `<tr>
         <td>${escapeHtml(prodLabel(it.productId))}</td>
         <td style="text-align:right">${escapeHtml(String(it.qty))}</td>
         <td style="text-align:right">${fmtMoney(it.price)}</td>
@@ -34,17 +46,20 @@ const DocViewer = {
         <td>${escapeHtml(it.batchNo || '')}</td>
         <td>${it.toWarehouseId ? escapeHtml(whLabel(it.toWarehouseId) || '') : ''}</td>
         <td>${escapeHtml(it.remark || '')}</td>
-      </tr>`).join('');
+      </tr>`,
+        )
+        .join('');
       const conf = store.print || {};
-      const headHtml = (conf.company || conf.address || conf.phone)
-        ? `<div class="head">
+      const headHtml =
+        conf.company || conf.address || conf.phone
+          ? `<div class="head">
              ${conf.showLogo ? '<span class="logo">惠</span>' : ''}
              <div>
                ${conf.company ? `<div class="co">${escapeHtml(conf.company)}</div>` : ''}
                <div class="co-sub">${escapeHtml(conf.address || '')}${conf.phone ? (conf.address ? ' · ' : '') + escapeHtml(conf.phone) : ''}</div>
              </div>
            </div>`
-        : '';
+          : '';
       w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(d.doc.billNo)}</title>
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; font-src 'none'">
         <style>
@@ -95,27 +110,37 @@ const DocViewer = {
       w.focus();
       w.print();
     }
-    function escapeHtml(s) {
-      return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-    }
     /** 打印页合计数量：null/undefined 不许印出字面 'null' */
     function fmtQtyPrint(v) {
       const n = Number(v);
       return Number.isFinite(n) ? n : 0;
     }
-    return { data, close, printDoc, fmtMoney, fmtQtyPrint, prodLabel, partnerLabel, whLabel, clerkLabel, STATUS_TEXT, DOC_META, accountLabel,
+    return {
+      data,
+      close,
+      printDoc,
+      fmtMoney,
+      fmtQtyPrint,
+      prodLabel,
+      partnerLabel,
+      whLabel,
+      clerkLabel,
+      STATUS_TEXT,
+      DOC_META,
+      accountLabel,
       oweOf: computed(() => {
         const d = data.value && data.value.doc;
         if (!d) return 0;
         return Math.max(0, (d.totalAmount || 0) - (d.paidAmount || 0) - (d.deposit || 0));
-      }) };
+      }),
+    };
   },
   template: `
-  <div class="modal-mask" v-if="docId" @click.self="close">
+  <div class="modal-mask" v-if="docId" @click.self="close" role="dialog" aria-modal="true" aria-label="单据详情">
     <div class="modal">
       <div class="modal-head">
         <span class="mt">{{ data ? (DOC_META[data.doc.type]?.label || data.doc.type) + ' ' + data.doc.billNo : '单据详情' }}</span>
-        <span class="x" @click="close">×</span>
+        <button type="button" class="x" aria-label="关闭" style="background:none;border:0" @click="close">×</button>
       </div>
       <div class="modal-body" v-if="data">
         <div class="form-grid">
@@ -174,4 +199,3 @@ const DocViewer = {
     </div>
   </div>`,
 };
-

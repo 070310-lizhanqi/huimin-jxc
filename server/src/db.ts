@@ -2,7 +2,9 @@
  * 数据库初始化与连接（node:sqlite，零原生依赖）
  */
 import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
 import path from 'node:path';
+import { logger } from './infra/logger';
 
 export type DB = DatabaseSync;
 
@@ -84,8 +86,6 @@ export function createWindowLimiter(limit: number, windowMs: number): (key: stri
  * 这里 rename 出的又是一份当前库快照，两者内容相同、互为冗余。
  */
 function applyPendingRestore(dbPath: string): void {
-  const fs = require('node:fs') as typeof import('node:fs');
-  const path = require('node:path') as typeof import('node:path');
   const pending = `${dbPath}.restore-pending`;
   if (!fs.existsSync(pending)) return;
   const stamp = (() => {
@@ -109,21 +109,28 @@ function applyPendingRestore(dbPath: string): void {
     fs.renameSync(pending, dbPath);
   } catch (e) {
     // 回退：已到位的 dbPath（若有）先清掉，再把移走的文件按原路搬回
-    try { if (fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true }); } catch { /* ignore */ }
-    for (const [from, to] of moved.reverse()) {
-      try { fs.renameSync(to, from); } catch { /* 尽力回退 */ }
+    try {
+      if (fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true });
+    } catch {
+      /* ignore */
     }
-    console.error('[恢复] 替换库文件失败，已回滚到恢复前状态，本次启动继续使用当前库:', e);
+    for (const [from, to] of moved.reverse()) {
+      try {
+        fs.renameSync(to, from);
+      } catch {
+        /* 尽力回退 */
+      }
+    }
+    logger.error('Failed to apply pending restore; rolled back to previous DB', { err: e });
     return;
   }
   // 成功：旧库已是 backups/pre-restore-<时间戳>.db（与 scheduleRestore 事先复制的那份互为冗余，
   // 均保留，用户确认恢复无误后可手工删除旧份）；-wal/-shm 副产物随旧库一并保留
-  console.log(`[恢复] 已从备份文件还原数据库（旧库已备份为 ${backupName}），服务以恢复后的数据启动。`);
+  logger.info('Database restored from pending backup', { backupName });
 }
 
 export function openDb(dbPath?: string): DB {
   const p = dbPath ?? path.join(dataDir(), 'huimin-clone.db');
-  const fs = require('node:fs') as typeof import('node:fs');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   applyPendingRestore(p);
   const db = new DatabaseSync(p);
@@ -148,19 +155,64 @@ export function openDb(dbPath?: string): DB {
 export function tryCheckpoint(db: DB): boolean {
   try {
     const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
-      | { busy: number; log: number; checkpointed: number }
-      | undefined;
+      { busy: number; log: number; checkpointed: number } | undefined;
     return !!row && row.busy !== 1 && row.checkpointed >= row.log;
   } catch {
     return false;
   }
 }
 
-export function migrate(db: DB): void {
-  // B-安19④：migrate 包进事务（SQLite DDL 可事务化），中途失败整体回滚不留半迁移状态
-  db.exec('BEGIN IMMEDIATE');
+export interface SchemaMigrationRecord {
+  version: number;
+  name: string;
+  appliedAt: string;
+}
+
+interface MigrationDef {
+  version: number;
+  name: string;
+  up: (db: DB) => void;
+}
+
+function addColumnIfMissing(db: DB, table: string, col: string, ddl: string): void {
   try {
-  db.exec(`
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+  } catch (e) {
+    if (/duplicate column/i.test((e as Error).message)) return; /* 列已存在 */
+    throw e;
+  }
+}
+
+function ensureUniqueFallbackIndexes(db: DB): void {
+  // 用户名唯一性兜底：老库已有重名时创建失败可跳过
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_name ON "user"(name)`);
+  } catch {
+    /* 老库存在重名用户：跳过唯一索引，业务层预检仍然生效 */
+  }
+  // 商品名唯一性兜底：老库已有同名时跳过
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_team_name ON product(teamId, name)`);
+  } catch {
+    /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
+  }
+  // 外部单号原子唯一性兜底（仅针对非空 srcBillNo）
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_team_type_src_billno_uniq
+       ON doc(teamId, type, srcBillNo) WHERE srcBillNo IS NOT NULL AND srcBillNo != ''`,
+    );
+  } catch {
+    /* 老库存在重复外部单号：跳过唯一索引，业务层幂等检查仍然生效 */
+  }
+}
+
+const MIGRATIONS: readonly MigrationDef[] = [
+  {
+    version: 1,
+    name: '001_baseline_schema',
+    up: (db) => {
+      db.exec(`
   CREATE TABLE IF NOT EXISTS team (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -237,7 +289,6 @@ export function migrate(db: DB): void {
     type TEXT NOT NULL DEFAULT 'cash',
     balance INTEGER DEFAULT 0
   );
-  -- 商品单位档案（对齐原产品「资料 - 商品单位」，建档案后开单可下拉选择）
   CREATE TABLE IF NOT EXISTS unit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     teamId INTEGER NOT NULL,
@@ -344,111 +395,163 @@ export function migrate(db: DB): void {
     PRIMARY KEY (teamId, key)
   );
   `);
-  // 轻量列迁移：老库补新列（列已存在时报错则忽略）
-  // B-安19③：catch 只忽略“duplicate column”错误，其余（如类型冲突、磁盘满）一律重抛，
-  // 否则迁移一半失败会被静默吞掉，查不出来。
-  const addColumn = (table: string, col: string, ddl: string) => {
-    try {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
-    } catch (e) {
-      if (/duplicate column/i.test((e as Error).message)) return; /* 列已存在 */
-      throw e;
+      addColumnIfMissing(db, 'product', 'lowQty', 'REAL DEFAULT 0');
+      addColumnIfMissing(db, 'product', 'wholePrice', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'customer', 'priceLevel', "TEXT DEFAULT 'salePrice'");
+      addColumnIfMissing(db, 'doc', 'refOrderId', 'INTEGER');
+      addColumnIfMissing(db, 'doc', 'submitAt', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'auditBy', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'rejectReason', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'receiverName', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'receiverMobile', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'receiverAddress', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'discount', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'doc', 'paidAmount', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'doc', 'accountId', 'INTEGER');
+      addColumnIfMissing(db, 'doc', 'deposit', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'doc_item', 'postQty', 'REAL');
+      addColumnIfMissing(db, 'doc', 'srcBillNo', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'voidAt', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'voidReason', 'TEXT');
+      addColumnIfMissing(db, 'doc', 'voidUserId', 'INTEGER');
+      addColumnIfMissing(db, 'user', 'password', 'TEXT');
+      addColumnIfMissing(db, 'user', 'createdAt', 'TEXT');
+      addColumnIfMissing(db, 'user', 'tokenVer', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'settlement', 'isAuto', 'INTEGER NOT NULL DEFAULT 0');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo);
+        CREATE INDEX IF NOT EXISTS idx_doc_team_status_type ON doc(teamId, status, type);
+        CREATE INDEX IF NOT EXISTS idx_doc_team_partner ON doc(teamId, partnerId, status);
+        CREATE INDEX IF NOT EXISTS idx_settlement_team_partner ON settlement(teamId, partnerType, partnerId);
+        CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir ON stock_ledger(teamId, productId, direction);
+        CREATE INDEX IF NOT EXISTS idx_doc_team_date ON doc(teamId, date);
+        CREATE INDEX IF NOT EXISTS idx_doc_item_product ON doc_item(productId);
+        CREATE INDEX IF NOT EXISTS idx_settlement_team_date ON settlement(teamId, date);
+        CREATE INDEX IF NOT EXISTS idx_ledger_team_wh_prod ON stock_ledger(teamId, warehouseId, productId);
+        CREATE INDEX IF NOT EXISTS idx_doc_team_status_type_date ON doc(teamId, status, type, date);
+        CREATE INDEX IF NOT EXISTS idx_doc_team_partner_date ON doc(teamId, partnerId, status, date);
+        CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir_id ON stock_ledger(teamId, productId, direction, id);
+        CREATE INDEX IF NOT EXISTS idx_doc_item_doc_prod ON doc_item(docId, productId);
+        CREATE INDEX IF NOT EXISTS idx_doc_ref_order ON doc(refOrderId, teamId, status);
+        CREATE INDEX IF NOT EXISTS idx_customer_team ON customer(teamId);
+        CREATE INDEX IF NOT EXISTS idx_customer_team_name ON customer(teamId, name);
+        CREATE INDEX IF NOT EXISTS idx_vendor_team ON vendor(teamId);
+        CREATE INDEX IF NOT EXISTS idx_vendor_team_name ON vendor(teamId, name);
+        CREATE INDEX IF NOT EXISTS idx_clerk_team ON clerk(teamId);
+        CREATE INDEX IF NOT EXISTS idx_account_team ON account(teamId);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_team ON warehouse(teamId);
+        CREATE INDEX IF NOT EXISTS idx_reservoir_team ON reservoir(teamId);
+        CREATE INDEX IF NOT EXISTS idx_unit_team ON unit(teamId);
+        CREATE INDEX IF NOT EXISTS idx_cat_team ON cat(teamId);
+      `);
+      ensureUniqueFallbackIndexes(db);
+    },
+  },
+  {
+    version: 2,
+    name: '002_price_memory_schema',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS price_memory (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          teamId INTEGER NOT NULL,
+          partnerId INTEGER NOT NULL,
+          productId INTEGER NOT NULL,
+          price INTEGER NOT NULL,
+          lastDate TEXT,
+          times INTEGER DEFAULT 1,
+          UNIQUE(teamId, partnerId, productId)
+        );
+        CREATE INDEX IF NOT EXISTS idx_price_memory_lookup
+          ON price_memory(teamId, partnerId, productId);
+      `);
+    },
+  },
+  {
+    version: 3,
+    name: '003_audit_log_and_idempotency',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS audit_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          teamId INTEGER NOT NULL,
+          userId INTEGER,
+          username TEXT,
+          action TEXT NOT NULL,
+          entityType TEXT NOT NULL,
+          entityId TEXT,
+          requestId TEXT,
+          ip TEXT,
+          detail TEXT,
+          createdAt TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_team_time ON audit_log(teamId, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(teamId, entityType, entityId);
+        CREATE TABLE IF NOT EXISTS idempotency_key (
+          teamId INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          key TEXT NOT NULL,
+          requestHash TEXT NOT NULL,
+          statusCode INTEGER NOT NULL,
+          responseBody TEXT NOT NULL,
+          createdAt INTEGER NOT NULL,
+          PRIMARY KEY (teamId, scope, key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_key(createdAt);
+      `);
+    },
+  },
+];
+
+export function listAppliedMigrations(db: DB): SchemaMigrationRecord[] {
+  const exists = db
+    .prepare(`SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='schema_migrations'`)
+    .get() as { ok: number } | undefined;
+  if (!exists) return [];
+  return db
+    .prepare(`SELECT version, name, appliedAt FROM schema_migrations ORDER BY version`)
+    .all() as unknown as SchemaMigrationRecord[];
+}
+
+export function getSchemaVersion(db: DB): number {
+  const rows = listAppliedMigrations(db);
+  return rows.length > 0 ? rows[rows.length - 1].version : 0;
+}
+
+export function migrate(db: DB): void {
+  // B-安19④：migrate 包进事务（SQLite DDL 可事务化），中途失败整体回滚不留半迁移状态
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        appliedAt TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+      );
+    `);
+    const applied = new Set(
+      (db.prepare(`SELECT version FROM schema_migrations`).all() as Array<{ version: number }>).map((r) => r.version),
+    );
+    const recStmt = db.prepare(`INSERT INTO schema_migrations (version, name) VALUES (?, ?)`);
+    for (const m of MIGRATIONS) {
+      if (applied.has(m.version)) continue;
+      m.up(db);
+      recStmt.run(m.version, m.name);
     }
-  };
-  addColumn('product', 'lowQty', 'REAL DEFAULT 0');
-  addColumn('product', 'wholePrice', 'INTEGER DEFAULT 0');
-  addColumn('customer', 'priceLevel', "TEXT DEFAULT 'salePrice'");
-  addColumn('doc', 'refOrderId', 'INTEGER');
-  // 审批流：提交时间 / 审核人 / 驳回原因
-  addColumn('doc', 'submitAt', 'TEXT');
-  addColumn('doc', 'auditBy', 'TEXT');
-  addColumn('doc', 'rejectReason', 'TEXT');
-  // 单据扩展字段（对齐原产品开单页）：收件人信息 / 整单折扣 / 本次收款 / 收款账户 / 抵扣订金
-  addColumn('doc', 'receiverName', 'TEXT');
-  addColumn('doc', 'receiverMobile', 'TEXT');
-  addColumn('doc', 'receiverAddress', 'TEXT');
-  addColumn('doc', 'discount', 'INTEGER DEFAULT 0');
-  addColumn('doc', 'paidAmount', 'INTEGER DEFAULT 0');
-  addColumn('doc', 'accountId', 'INTEGER');
-  addColumn('doc', 'deposit', 'INTEGER DEFAULT 0');
-  // 盘点单过账差额：审核前固化「实盘 - 账面」，作废时据此反向冲回
-  addColumn('doc_item', 'postQty', 'REAL');
-  // Excel 导入：外部原始单号（用于重复导入幂等跳过）
-  addColumn('doc', 'srcBillNo', 'TEXT');
-  // 作废留痕：账务系统作废应可追溯（谁在何时因何作废）
-  addColumn('doc', 'voidAt', 'TEXT');
-  addColumn('doc', 'voidReason', 'TEXT');
-  addColumn('doc', 'voidUserId', 'INTEGER');
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_src_billno ON doc(teamId, type, srcBillNo)`);
-  // 登录认证：密码哈希（scrypt）、创建时间与令牌版本（改密/删号后吊销旧令牌）
-  addColumn('user', 'password', 'TEXT');
-  addColumn('user', 'createdAt', 'TEXT');
-  addColumn('user', 'tokenVer', 'INTEGER NOT NULL DEFAULT 0');
-  // 结算记录：服务端专用标识（单据审核自动生成的「开单即收付」置 1）。
-  // 客户端不可伪造，作废冲回与改删守卫按此列判断，替代可被冒充的 remark 字符串。
-  addColumn('settlement', 'isAuto', 'INTEGER NOT NULL DEFAULT 0');
-  // 热门查询索引：仪表盘/报表按 团队+状态+类型 过滤、对账单按往来单位过滤、成本估价按商品流水
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_doc_team_status_type ON doc(teamId, status, type);
-    CREATE INDEX IF NOT EXISTS idx_doc_team_partner ON doc(teamId, partnerId, status);
-    CREATE INDEX IF NOT EXISTS idx_settlement_team_partner ON settlement(teamId, partnerType, partnerId);
-    CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir ON stock_ledger(teamId, productId, direction);
-  `);
-  // 报表/账龄/趋势按日期区间过滤与排序；库存流水按商品回溯；收付款按日期统计
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_doc_team_date ON doc(teamId, date);
-    CREATE INDEX IF NOT EXISTS idx_doc_item_product ON doc_item(productId);
-    CREATE INDEX IF NOT EXISTS idx_settlement_team_date ON settlement(teamId, date);
-    CREATE INDEX IF NOT EXISTS idx_ledger_team_wh_prod ON stock_ledger(teamId, warehouseId, productId);
-  `);
-  // 热门复合查询：
-  // - /doc/list 状态统计按 (teamId, status, type, date) 过滤
-  // - 账龄 FIFO 按 partnerId + 日期 拉单
-  // - 库存货值估算按 (teamId, productId, direction) 找最近流水
-  // - /doc/list 明细聚合按 docId 回表
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_doc_team_status_type_date ON doc(teamId, status, type, date);
-    CREATE INDEX IF NOT EXISTS idx_doc_team_partner_date ON doc(teamId, partnerId, status, date);
-    CREATE INDEX IF NOT EXISTS idx_ledger_team_prod_dir_id ON stock_ledger(teamId, productId, direction, id);
-    CREATE INDEX IF NOT EXISTS idx_doc_item_doc_prod ON doc_item(docId, productId);
-    CREATE INDEX IF NOT EXISTS idx_doc_ref_order ON doc(refOrderId, teamId, status);
-  `);
-  // 用户名唯一性兜底：注册/新增用户处有 SELECT 预检，但并发双击仍可能撞出重名
-  // （重名会让登录 SELECT name=? 命中错误行）。老库已有重名时本索引创建失败，忽略即可。
-  try {
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_name ON "user"(name)`);
-  } catch {
-    /* 老库存在重名用户：跳过唯一索引，业务层预检仍然生效 */
-  }
-  // 商品名唯一性兜底：商品导入预检 + 手工建档都按 (teamId, name) 判重，
-  // 并发写入仍可能撞出同名商品（报表按名称归组时会裂成两行）。老库已有重名时跳过。
-  try {
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_team_name ON product(teamId, name)`);
-  } catch {
-    /* 老库存在同名商品：跳过唯一索引，业务层预检仍然生效 */
-  }
-  // B-安11：档案表 teamId 索引。crud.ts 的 SELECT * FROM <表> WHERE teamId=?
-  // 与 docimport.ts 的往来单位按名查询此前全是全表扫描；product 已有
-  // idx_product_team_name (teamId, name) 覆盖 teamId 前缀，不再补；
-  // barcode 的 LIKE %…% 本来就走不了索引，不在此列。IF NOT EXISTS 幂等，
-  // 老库启动时自动建索引。customer/vendor 另补 (teamId, name) 供按名点查。
-  // 注：此处用普通索引而非唯一索引——存量档案可能已有同名行，唯一索引会在
-  // 老库上创建失败；判重仍由业务层预检负责。
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_customer_team ON customer(teamId);
-    CREATE INDEX IF NOT EXISTS idx_customer_team_name ON customer(teamId, name);
-    CREATE INDEX IF NOT EXISTS idx_vendor_team ON vendor(teamId);
-    CREATE INDEX IF NOT EXISTS idx_vendor_team_name ON vendor(teamId, name);
-    CREATE INDEX IF NOT EXISTS idx_clerk_team ON clerk(teamId);
-    CREATE INDEX IF NOT EXISTS idx_account_team ON account(teamId);
-    CREATE INDEX IF NOT EXISTS idx_warehouse_team ON warehouse(teamId);
-    CREATE INDEX IF NOT EXISTS idx_reservoir_team ON reservoir(teamId);
-    CREATE INDEX IF NOT EXISTS idx_unit_team ON unit(teamId);
-    CREATE INDEX IF NOT EXISTS idx_cat_team ON cat(teamId);
-  `);
+    // 幂等兜底：确保 rebuild-clean 等场景下唯一索引仍在
+    ensureUniqueFallbackIndexes(db);
+    // 兼容存量库/旧种子脚本遗留的账户类型、空期初余额与客户价格等级简写值
+    db.prepare(`UPDATE account SET type = 'wechat' WHERE type = 'wx'`).run();
+    db.prepare(`UPDATE account SET balance = 0 WHERE balance IS NULL`).run();
+    db.prepare(`UPDATE customer SET priceLevel = 'wholePrice' WHERE priceLevel = 'whole'`).run();
+    db.prepare(`UPDATE customer SET priceLevel = 'retailPrice' WHERE priceLevel = 'retail'`).run();
     db.exec('COMMIT');
   } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* 回滚失败时原错仍要抛出 */ }
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 回滚失败时原错仍要抛出 */
+    }
     throw e;
   }
 }

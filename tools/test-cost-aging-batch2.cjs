@@ -269,8 +269,12 @@ async function main() {
 
 (async () => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  const childEnv = { ...process.env, ORANGE_ENV_FILE: '', PORT: String(PORT), ORANGE_DATA_DIR: DATA_DIR };
+  if (childEnv.NODE_ENV === 'production' && !childEnv.ORANGE_JWT_SECRET) {
+    childEnv.ORANGE_JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+  }
   const child = spawn(process.execPath, [path.join(ROOT, 'dist', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), ORANGE_DATA_DIR: DATA_DIR },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '', err = '';

@@ -103,4 +103,3 @@ const HelpPage = {
     </div>
   </div>`,
 };
-

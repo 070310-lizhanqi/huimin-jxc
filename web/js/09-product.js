@@ -13,19 +13,31 @@ const ProductPage = {
     const total = ref(0);
     const pages = computed(() => Math.max(1, Math.ceil(total.value / rows.value)));
     const pageBtns = computed(() => {
-      const n = pages.value, c = page.value, arr = [];
+      const n = pages.value,
+        c = page.value,
+        arr = [];
       for (let p = 1; p <= n; p++) if (p === 1 || p === n || Math.abs(p - c) <= 2) arr.push(p);
       return arr;
     });
-    function onRowsChange(e) { rows.value = Number(e.target.value) || 50; pageSizeSave('product', rows.value); page.value = 1; load(); }
+    function onRowsChange(e) {
+      rows.value = Number(e.target.value) || 50;
+      pageSizeSave('product', rows.value);
+      page.value = 1;
+      load();
+    }
 
     async function load() {
       loading.value = true;
       try {
         const r = await api.get('/product', { teamId: store.teamId, kw: kw.value, page: page.value, rows: rows.value });
         // 分页对象 { rows, total }；数组是旧服务端/异常回落
-        if (Array.isArray(r)) { list.value = r; total.value = r.length; }
-        else { list.value = r.rows || []; total.value = r.total ?? list.value.length; }
+        if (Array.isArray(r)) {
+          list.value = r;
+          total.value = r.length;
+        } else {
+          list.value = r.rows || [];
+          total.value = r.total ?? list.value.length;
+        }
       } catch (e) {
         toast('商品列表加载失败：' + e.message, 'error');
       } finally {
@@ -33,7 +45,10 @@ const ProductPage = {
       }
     }
     /** 关键词查询从第 1 页开始（翻页时 load() 不重置页码） */
-    function search() { page.value = 1; load(); }
+    function search() {
+      page.value = 1;
+      load();
+    }
     onMounted(load);
     /** A-安3：商品批量导入仅管理员可用（后端 /product/import 同批加 requireAdmin 守卫） */
     const isAdmin = computed(() => auth.user?.role === 'admin');
@@ -50,7 +65,11 @@ const ProductPage = {
       },
       buildBody(f) {
         return {
-          teamId: store.teamId, name: f.name, barcode: f.barcode, unit: f.unit, spec: f.spec,
+          teamId: store.teamId,
+          name: f.name,
+          barcode: f.barcode,
+          unit: f.unit,
+          spec: f.spec,
           catId: f.catId || null,
           salePrice: toCents(f.salePrice) || 0,
           retailPrice: toCents(f.retailPrice) || 0,
@@ -68,27 +87,52 @@ const ProductPage = {
         await refreshBase(['products']);
         await load();
         // 新建的商品按 id 排在末页：跳到末页让用户直接看到它
-        if (isNew && page.value !== pages.value) { page.value = pages.value; await load(); }
+        if (isNew && page.value !== pages.value) {
+          page.value = pages.value;
+          await load();
+        }
       },
       afterDelete: async () => {
         // B-前1：只刷新商品集合；删空当前页时退回上一页
         await refreshBase(['products']);
         await load();
-        if (!list.value.length && page.value > 1) { page.value--; await load(); }
+        if (!list.value.length && page.value > 1) {
+          page.value--;
+          await load();
+        }
       },
     });
     const editor = crud.editor;
     const busy = crud.busy;
     const busyDel = crud.busyDel;
     function openNew() {
-      crud.openNew({ name: '', barcode: '', unit: '件', spec: '', catId: null, salePrice: 0, retailPrice: 0, wholePrice: 0, purchasePrice: 0, lowQty: 0, remark: '' });
+      crud.openNew({
+        name: '',
+        barcode: '',
+        unit: '件',
+        spec: '',
+        catId: null,
+        salePrice: 0,
+        retailPrice: 0,
+        wholePrice: 0,
+        purchasePrice: 0,
+        lowQty: 0,
+        remark: '',
+      });
     }
     function openEdit(p) {
       crud.openEdit(p, (row) => ({
-        name: row.name, barcode: row.barcode || '', unit: row.unit || '件', spec: row.spec || '',
-        catId: row.catId, salePrice: (row.salePrice || 0) / 100, retailPrice: (row.retailPrice || 0) / 100,
-        wholePrice: (row.wholePrice || 0) / 100, purchasePrice: (row.purchasePrice || 0) / 100,
-        lowQty: row.lowQty ?? 0, remark: row.remark || '',
+        name: row.name,
+        barcode: row.barcode || '',
+        unit: row.unit || '件',
+        spec: row.spec || '',
+        catId: row.catId,
+        salePrice: (row.salePrice || 0) / 100,
+        retailPrice: (row.retailPrice || 0) / 100,
+        wholePrice: (row.wholePrice || 0) / 100,
+        purchasePrice: (row.purchasePrice || 0) / 100,
+        lowQty: row.lowQty ?? 0,
+        remark: row.remark || '',
       }));
     }
     const save = crud.save;
@@ -97,19 +141,43 @@ const ProductPage = {
     /* ---- 批量导入 ---- */
     const imp = reactive({ open: false, text: '', result: null, busy: false });
     const IMP_COLS = ['名称', '单位', '分类', '条码', '规格', '进价', '售价', '零售价', '批发价', '安全库存', '备注'];
-    const IMP_MAP = { 名称: 'name', 单位: 'unit', 分类: 'catName', 条码: 'barcode', 规格: 'spec', 进价: 'purchasePrice', 售价: 'salePrice', 零售价: 'retailPrice', 批发价: 'wholePrice', 安全库存: 'lowQty', 备注: 'remark' };
+    const IMP_MAP = {
+      名称: 'name',
+      单位: 'unit',
+      分类: 'catName',
+      条码: 'barcode',
+      规格: 'spec',
+      进价: 'purchasePrice',
+      售价: 'salePrice',
+      零售价: 'retailPrice',
+      批发价: 'wholePrice',
+      安全库存: 'lowQty',
+      备注: 'remark',
+    };
     /* 预览行数上限：粘贴 1 万行直接渲染 1 万个 tr 会冻结 UI；全量数据仍在导入时提交 */
     const IMP_PREVIEW_MAX = 200;
     const impRowsAll = computed(() => {
       const out = [];
-      const lines = imp.text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const lines = imp.text
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       for (const [i, line] of lines.entries()) {
         const cells = (line.includes('\t') ? line.split('\t') : line.split(/[,，]/)).map((s) => s.trim());
         const r = {
-          name: cells[0] || '', unit: cells[1] || '', catName: cells[2] || '', barcode: cells[3] || '',
-          spec: cells[4] || '', purchasePrice: cells[5] || '', salePrice: cells[6] || '',
-          retailPrice: cells[7] || '', wholePrice: cells[8] || '', lowQty: cells[9] || '', remark: cells[10] || '',
-          _line: i + 1, _err: cells[0] ? '' : '名称为空',
+          name: cells[0] || '',
+          unit: cells[1] || '',
+          catName: cells[2] || '',
+          barcode: cells[3] || '',
+          spec: cells[4] || '',
+          purchasePrice: cells[5] || '',
+          salePrice: cells[6] || '',
+          retailPrice: cells[7] || '',
+          wholePrice: cells[8] || '',
+          lowQty: cells[9] || '',
+          remark: cells[10] || '',
+          _line: i + 1,
+          _err: cells[0] ? '' : '名称为空',
         };
         out.push(r);
       }
@@ -118,10 +186,38 @@ const ProductPage = {
     const impRows = computed(() => impRowsAll.value.slice(0, IMP_PREVIEW_MAX));
     /* 下载导入模板：带表头 + 2 行示例，用 Excel 打开即填（不要改动第一行表头） */
     function downloadImpTemplate() {
-      exportCsv('商品导入模板.csv', [
-        { 名称: '可口可乐', 单位: '件', 分类: '饮料', 条码: '6901234567890', 规格: '500ml', 进价: '1.50', 售价: '3.00', 零售价: '3.50', 批发价: '2.80', 安全库存: '24', 备注: '示例行，可删除' },
-        { 名称: '农夫山泉', 单位: '件', 分类: '饮料', 条码: '6909876543210', 规格: '550ml', 进价: '0.90', 售价: '2.00', 零售价: '2.50', 批发价: '1.80', 安全库存: '48', 备注: '' },
-      ], IMP_COLS.map((label) => ({ key: IMP_MAP[label], label })));
+      exportCsv(
+        '商品导入模板.csv',
+        [
+          {
+            名称: '可口可乐',
+            单位: '件',
+            分类: '饮料',
+            条码: '6901234567890',
+            规格: '500ml',
+            进价: '1.50',
+            售价: '3.00',
+            零售价: '3.50',
+            批发价: '2.80',
+            安全库存: '24',
+            备注: '示例行，可删除',
+          },
+          {
+            名称: '农夫山泉',
+            单位: '件',
+            分类: '饮料',
+            条码: '6909876543210',
+            规格: '550ml',
+            进价: '0.90',
+            售价: '2.00',
+            零售价: '2.50',
+            批发价: '1.80',
+            安全库存: '48',
+            备注: '',
+          },
+        ],
+        IMP_COLS.map((label) => ({ key: IMP_MAP[label], label })),
+      );
     }
     async function doImport() {
       if (!isAdmin.value) return toast('仅管理员可批量导入商品', 'error');
@@ -133,34 +229,100 @@ const ProductPage = {
         const r = await api.post('/product/import', { teamId: store.teamId, rows });
         imp.result = r;
         // B-前1：导入可能自动新建分类，刷新商品 + 分类两个集合；导入的商品在末页
-        if (r.success > 0) { toast(`成功导入 ${r.success} 个商品`); await refreshBase(['products', 'cats']); await load(); if (page.value !== pages.value) { page.value = pages.value; await load(); } }
+        if (r.success > 0) {
+          toast(`成功导入 ${r.success} 个商品`);
+          await refreshBase(['products', 'cats']);
+          await load();
+          if (page.value !== pages.value) {
+            page.value = pages.value;
+            await load();
+          }
+        }
         if (!r.errors.length) imp.open = false;
-      } catch (e) { toast(/403|Forbidden|仅管理员|权限不足/.test(e.message || '') ? '权限不足：仅管理员可批量导入商品' : e.message, 'error'); }
-      finally { imp.busy = false; }
+      } catch (e) {
+        toast(
+          /403|Forbidden|仅管理员|权限不足/.test(e.message || '') ? '权限不足：仅管理员可批量导入商品' : e.message,
+          'error',
+        );
+      } finally {
+        imp.busy = false;
+      }
     }
     /** B-前2：列表已分页，导出要拉全量（不带 page 参数走旧数组口径），否则只导出当前页 */
     async function doExport() {
       try {
         const all = await api.get('/product', { teamId: store.teamId, kw: kw.value });
-        const rowsAll = Array.isArray(all) ? all : (all.rows || []);
+        const rowsAll = Array.isArray(all) ? all : all.rows || [];
         if (!rowsAll.length) return toast('没有可导出的数据', 'warning');
-        exportCsv('商品列表.csv', rowsAll.map((p) => moneyRow({ ...p, catName: catLabel(p.catId) }, ['purchasePrice', 'salePrice', 'retailPrice', 'wholePrice'], false)), [
-          { key: 'name', label: '名称' }, { key: 'catName', label: '分类' }, { key: 'spec', label: '规格' },
-          { key: 'barcode', label: '条码' }, { key: 'unit', label: '单位' },
-          { key: 'purchasePrice', label: '进价(元)' }, { key: 'salePrice', label: '售价(元)' },
-          { key: 'retailPrice', label: '零售价(元)' }, { key: 'wholePrice', label: '批发价(元)' },
-          { key: 'lowQty', label: '安全库存' }, { key: 'remark', label: '备注' },
-        ]);
-      } catch (e) { toast('导出失败：' + e.message, 'error'); }
+        exportCsv(
+          '商品列表.csv',
+          rowsAll.map((p) =>
+            moneyRow(
+              { ...p, catName: catLabel(p.catId) },
+              ['purchasePrice', 'salePrice', 'retailPrice', 'wholePrice'],
+              false,
+            ),
+          ),
+          [
+            { key: 'name', label: '名称' },
+            { key: 'catName', label: '分类' },
+            { key: 'spec', label: '规格' },
+            { key: 'barcode', label: '条码' },
+            { key: 'unit', label: '单位' },
+            { key: 'purchasePrice', label: '进价(元)' },
+            { key: 'salePrice', label: '售价(元)' },
+            { key: 'retailPrice', label: '零售价(元)' },
+            { key: 'wholePrice', label: '批发价(元)' },
+            { key: 'lowQty', label: '安全库存' },
+            { key: 'remark', label: '备注' },
+          ],
+        );
+      } catch (e) {
+        toast('导出失败：' + e.message, 'error');
+      }
     }
-        /** 商品单位候选：优先取单位档案，退化为内置常用单位 */
+    /** 商品单位候选：优先取单位档案，退化为内置常用单位 */
     const unitOpts = computed(() => {
       const fromStore = (store.units || []).map((u) => u.name).filter(Boolean);
       const builtin = ['个', '件', '箱', '瓶', '包', '袋', '公斤', '米', '台', '套'];
       return Array.from(new Set([...fromStore, ...builtin]));
     });
 
-    return { kw, list, loading, editor, load, search, openNew, openEdit, save, del, busy, busyDel, fmtMoney, catLabel, store, exportCsv, imp, IMP_COLS, IMP_MAP, impRows, impRowsAll, doImport, unitOpts, IMP_PREVIEW_MAX, downloadImpTemplate, isAdmin, page, rows, total, pages, pageBtns, onRowsChange, doExport };
+    return {
+      kw,
+      list,
+      loading,
+      editor,
+      load,
+      search,
+      openNew,
+      openEdit,
+      save,
+      del,
+      busy,
+      busyDel,
+      fmtMoney,
+      catLabel,
+      store,
+      exportCsv,
+      imp,
+      IMP_COLS,
+      IMP_MAP,
+      impRows,
+      impRowsAll,
+      doImport,
+      unitOpts,
+      IMP_PREVIEW_MAX,
+      downloadImpTemplate,
+      isAdmin,
+      page,
+      rows,
+      total,
+      pages,
+      pageBtns,
+      onRowsChange,
+      doExport,
+    };
   },
   template: `
   <div>
@@ -293,4 +455,3 @@ const ProductPage = {
   </div>
 </div>`,
 };
-

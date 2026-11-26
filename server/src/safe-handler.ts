@@ -7,12 +7,14 @@
  * 内部错误信息回吐给客户端（A-安4）。
  */
 import type { Request, Response } from 'express';
+import { sendError } from './infra/errors';
+import { logger } from './infra/logger';
 
 export function safeHandler(fn: (req: Request, res: Response) => unknown) {
   return (req: Request, res: Response): void => {
     Promise.resolve(fn(req, res)).catch((e) => {
-      console.error('[api] 路由内部错误:', e);
-      if (!res.headersSent) res.status(500).json({ error: '服务器内部错误' });
+      logger.error('Unhandled async route error', { method: req.method, path: req.originalUrl, err: e });
+      if (!res.headersSent) sendError(req, res, 500, '服务器内部错误', 'INTERNAL_ERROR');
       else res.end();
     });
   };

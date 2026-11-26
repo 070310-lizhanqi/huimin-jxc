@@ -13,10 +13,17 @@ const StatementPage = {
     const data = ref(null);
 
     /* 从菜单进入时按 query.mode 切换（客户/供应商两个入口共用本页） */
-    watch(() => route.q.mode, (m) => {
-      const next = m === 'ap' ? 'ap' : 'ar';
-      if (next !== mode.value) { mode.value = next; partnerId.value = null; data.value = null; }
-    });
+    watch(
+      () => route.q.mode,
+      (m) => {
+        const next = m === 'ap' ? 'ap' : 'ar';
+        if (next !== mode.value) {
+          mode.value = next;
+          partnerId.value = null;
+          data.value = null;
+        }
+      },
+    );
 
     const partners = computed(() => (mode.value === 'ar' ? store.customers : store.vendors));
     const guard = seqGuard();
@@ -28,32 +35,52 @@ const StatementPage = {
       const my = guard.begin();
       try {
         const r = await api.get('/report/statement', {
-          teamId: store.teamId, mode: mode.value, partnerId: partnerId.value,
-          from: range[0], to: range[1],
+          teamId: store.teamId,
+          mode: mode.value,
+          partnerId: partnerId.value,
+          from: range[0],
+          to: range[1],
         });
         if (!guard.isCurrent(my)) return;
         data.value = r;
       } catch (e) {
-        if (guard.isCurrent(my)) { toast(e.message, 'error'); data.value = null; }
-      } finally { if (guard.isCurrent(my)) loading.value = false; }
+        if (guard.isCurrent(my)) {
+          toast(e.message, 'error');
+          data.value = null;
+        }
+      } finally {
+        if (guard.isCurrent(my)) loading.value = false;
+      }
     }
-    function switchMode() { partnerId.value = null; data.value = null; }
+    function switchMode() {
+      partnerId.value = null;
+      data.value = null;
+    }
 
     function doExport() {
       if (!data.value) return toast('请先查询', 'error');
       const isAr = mode.value === 'ar';
-      exportCsv(`对账单_${data.value.partner.name}_${range[0]}_${range[1]}.csv`,
+      exportCsv(
+        `对账单_${data.value.partner.name}_${range[0]}_${range[1]}.csv`,
         data.value.lines.map((l) => ({
-          日期: l.date, 单据号: l.billNo, 类型: l.label,
+          日期: l.date,
+          单据号: l.billNo,
+          类型: l.label,
           [isAr ? '应收' : '应付']: l.debit ? (l.debit / 100).toFixed(2) : '',
           [isAr ? '收款' : '付款']: l.credit ? (l.credit / 100).toFixed(2) : '',
-          余额: (l.balance / 100).toFixed(2), 备注: l.remark || '',
-        })), [
-          { key: '日期', label: '日期' }, { key: '单据号', label: '单据号' }, { key: '类型', label: '类型' },
+          余额: (l.balance / 100).toFixed(2),
+          备注: l.remark || '',
+        })),
+        [
+          { key: '日期', label: '日期' },
+          { key: '单据号', label: '单据号' },
+          { key: '类型', label: '类型' },
           { key: isAr ? '应收' : '应付', label: isAr ? '应收' : '应付' },
           { key: isAr ? '收款' : '付款', label: isAr ? '收款' : '付款' },
-          { key: '余额', label: '余额' }, { key: '备注', label: '备注' },
-        ]);
+          { key: '余额', label: '余额' },
+          { key: '备注', label: '备注' },
+        ],
+      );
     }
 
     function doPrint() {
@@ -62,11 +89,15 @@ const StatementPage = {
       const isAr = d.mode === 'ar';
       // 打印抬头里的公司名（功能设置 → 打印抬头），对账单给对方看，抬头必须有
       const company = (store.print?.company || '').trim();
-      const rowsHtml = d.lines.map((l) => `<tr>
+      const rowsHtml = d.lines
+        .map(
+          (l) => `<tr>
         <td>${escapeHtml(l.date)}</td><td>${escapeHtml(l.billNo)}</td><td>${escapeHtml(l.label)}</td>
         <td class="r">${l.debit ? fmtMoney(l.debit) : ''}</td>
         <td class="r">${l.credit ? fmtMoney(l.credit) : ''}</td>
-        <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`).join('');
+        <td class="r">${fmtMoney(l.balance)}</td><td>${escapeHtml(l.remark || '')}</td></tr>`,
+        )
+        .join('');
       // 日期 from/to 来自服务端 safeRange，理论上合法 YYYY-MM-DD；此处仍显式转义兜底（防后端被注入异常值）
       const html = `<!doctype html><html><head><meta charset="utf-8"><title>对账单</title>
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; font-src 'none'">
@@ -168,4 +199,3 @@ const StatementPage = {
     </div>
   </div>`,
 };
-

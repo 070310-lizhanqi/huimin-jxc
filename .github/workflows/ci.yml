@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "feat/*"
+      - "fix/*"
+  pull_request:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, Typecheck, Build, Tests & Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pnpm 12
+        run: npm install -g pnpm@12.23.0
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Security audit (high severity and above)
+        run: pnpm audit --audit-level=high
+
+      - name: Lint source code
+        run: pnpm run lint
+
+      - name: TypeScript type check
+        run: pnpm run typecheck
+
+      - name: Formatting check (Prettier)
+        run: pnpm run format:check
+
+      - name: Build server bundle
+        run: pnpm run build
+
+      - name: Run unit tests
+        run: pnpm run test:unit
+
+      - name: Run integration tests
+        run: pnpm run test:integration
+
+      - name: Verify database migrations and idempotent seeding
+        env:
+          ORANGE_DATA_DIR: /tmp/ci-db-smoke
+          SEED_ADMIN_PASS: CiSmoke!2026#Zx
+        run: |
+          rm -rf /tmp/ci-db-smoke
+          pnpm run db:migrate
+          pnpm run db:seed
+          pnpm run db:seed
+          rm -rf /tmp/ci-db-smoke
+
+      - name: Install Playwright Chromium for UI E2E
+        run: npx playwright install --with-deps chromium
+
+      - name: Run full 45-script API/E2E regression and live health smoke
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const cp = require("node:child_process");
+            const path = require("node:path");
+            const dir = "/tmp/ci-regression-data";
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.mkdirSync(dir, { recursive: true });
+            const srv = cp.spawn(process.execPath, ["dist/server/index.js"], {
+              env: { ...process.env, ORANGE_DATA_DIR: dir, PORT: "7741" },
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            srv.stderr.on("data", (d) => process.stderr.write(d));
+            (async () => {
+              let ready = false;
+              for (let i = 0; i < 60; i++) {
+                try {
+                  const [h, r] = await Promise.all([
+                    fetch("http://127.0.0.1:7741/health"),
+                    fetch("http://127.0.0.1:7741/ready"),
+                  ]);
+                  if (h.ok && r.ok) { ready = true; break; }
+                } catch {}
+                await new Promise((r) => setTimeout(r, 250));
+              }
+              if (!ready) {
+                console.error("Server failed readiness probe");
+                srv.kill("SIGTERM");
+                process.exit(1);
+              }
+              const res = cp.spawnSync(process.execPath, ["tools/run-tests.cjs"], {
+                env: { ...process.env, ORANGE_DATA_DIR: dir, OC_BASE: "http://127.0.0.1:7741/api" },
+                stdio: "inherit",
+              });
+              try {
+                const lockPid = Number(fs.readFileSync(path.join(dir, "server.lock"), "utf8").trim());
+                if (lockPid && lockPid !== srv.pid) process.kill(lockPid, "SIGTERM");
+              } catch {}
+              try { srv.kill("SIGTERM"); } catch {}
+              fs.rmSync(dir, { recursive: true, force: true });
+              process.exit(res.status ?? 1);
+            })();
+          '

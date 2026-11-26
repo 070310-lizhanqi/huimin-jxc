@@ -9,8 +9,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
-import { allocateDocDiscounts, type DiscountableLine } from './report';
-// 无循环引用：report.ts 只 import ./db，与 dashboard.ts 引用 allocateDocDiscounts 的方式相同。
+import { sendError } from './infra/errors';
+import { allocateDocDiscounts, lineAmount, roundQty, type DiscountableLine } from './shared/money';
 
 function rangeOf(req: Request): { from: string; to: string; error: string | null } {
   const d = new Date();
@@ -19,20 +19,16 @@ function rangeOf(req: Request): { from: string; to: string; error: string | null
   const to = String(req.query.to ?? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`);
   // 日期参数校验：脏日期（格式错/不存在的日历日）会让字符串比较静默输出错账报表
   // （如 '2026-01-01' < '2026/1/1' 恒真 → 期初吞下全部历史），必须拒绝而不是猜
-  for (const [label, v] of [['from', from], ['to', to]] as const) {
+  for (const [label, v] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
     const err = validBizDate(v);
     if (err) return { from, to, error: `${label} 参数非法：${err}` };
   }
   if (from > to) return { from, to, error: 'from 不能晚于 to' };
   return { from, to, error: null };
 }
-
-/** 单据类型归类：正负方向用于进销存统计
- *  - 入库：采购入库 / 其它入库 / 销售退货 / 期初库存 / 生产组装产出行
- *  - 出库：销售出库 / 其它出库 / 采购退货 / 生产组装耗用行
- */
-const IN_TYPES = ['stockin', 'otherin', 'sret', 'stockinit'];
-const OUT_TYPES = ['stockout', 'otherout', 'pin'];
 
 export function mountJxcReports(router: Router, db: DatabaseSync): void {
   /**
@@ -41,13 +37,13 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/jxc-stat', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const range = rangeOf(req);
     if (range.error) {
-      res.status(400).json({ error: range.error });
+      sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = range;
@@ -131,10 +127,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       };
       const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
       if (IN_TYPES.has(l.type)) {
-        a.inQty += l.qty;
+        a.inQty = roundQty(a.inQty + l.qty);
         a.inAmount += net;
       } else {
-        a.outQty += l.qty;
+        a.outQty = roundQty(a.outQty + l.qty);
         a.outAmount += net;
       }
       aggMap.set(l.productId, a);
@@ -145,9 +141,9 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
 
     const totals = rows.reduce(
       (s, r) => ({
-        inQty: s.inQty + r.inQty,
+        inQty: roundQty(s.inQty + r.inQty),
         inAmount: s.inAmount + r.inAmount,
-        outQty: s.outQty + r.outQty,
+        outQty: roundQty(s.outQty + r.outQty),
         outAmount: s.outAmount + r.outAmount,
       }),
       { inQty: 0, inAmount: 0, outQty: 0, outAmount: 0 },
@@ -174,8 +170,8 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/stock-forecast', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     // days 参数守护：Number('abc')=NaN 会让 Math.max(1,NaN)=NaN → startD 变 Invalid Date，
@@ -241,7 +237,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       const outQty = outMap.get(p.id) ?? 0;
       const avgDailyOut = outQty / windowDays;
       const unitCost = Math.round(costMap.get(p.id) ?? p.purchasePrice);
-      const amount = Math.round(qty * unitCost);
+      const amount = lineAmount(qty, unitCost);
       // 可售天数：无出库记录时视为无限
       const saleableDays = avgDailyOut > 0 ? Math.floor(qty / avgDailyOut) : null;
       // 建议补货：可售天数 < 15 天时补到 30 天用量
@@ -282,17 +278,17 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const teamId = Number(req.query.teamId);
     const partnerId = Number(req.query.partnerId);
     const mode = String(req.query.mode ?? 'ar') === 'ap' ? 'ap' : 'ar';
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
-    if (!partnerId) {
-      res.status(400).json({ error: 'partnerId 不能为空' });
+    if (!Number.isInteger(partnerId) || partnerId <= 0) {
+      sendError(req, res, 400, 'partnerId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const range = rangeOf(req);
     if (range.error) {
-      res.status(400).json({ error: range.error });
+      sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
       return;
     }
     const { from, to } = range;
@@ -311,10 +307,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT type, COALESCE(SUM(totalAmount), 0) AS amt FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND date < ?
+           AND partnerType = ? AND partnerId = ? AND date < ?
          GROUP BY type`,
       )
-      .all(teamId, partnerId, from) as Array<{ type: string; amt: number }>;
+      .all(teamId, partnerType, partnerId, from) as Array<{ type: string; amt: number }>;
     const beforeDocs = beforeRows.reduce((s, r) => s + r.amt * signOf(r.type), 0);
     // 期初结算净额：正向收款冲减，反向类型（AR 的 payment=现退客户 / AP 的 receipt=供应商退款）
     // 是退货单审核时落账、bump 往来为正——期初不把它加回去就与 partner_balance 对不上。
@@ -332,10 +328,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT id, billNo, date, type, totalAmount, remark FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND date >= ? AND date <= ?
+           AND partnerType = ? AND partnerId = ? AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, partnerId, from, to) as Array<{
+      .all(teamId, partnerType, partnerId, from, to) as Array<{
       id: number;
       billNo: string;
       date: string;
@@ -381,9 +377,9 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
         `SELECT COALESCE(SUM(CASE WHEN type = 'sret' THEN -deposit WHEN type = 'pin' THEN -deposit ELSE deposit END), 0) AS amt
          FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND deposit > 0 AND date < ?`,
+           AND partnerType = ? AND partnerId = ? AND deposit > 0 AND date < ?`,
       )
-      .get(teamId, partnerId, from) as { amt: number };
+      .get(teamId, partnerType, partnerId, from) as { amt: number };
     const openingFinal = opening - beforeDep.amt;
     let balance = openingFinal;
     // 同日排序：单据行 → 收付款行 → 订金抵扣行。
@@ -417,7 +413,7 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
           kind: 'settle',
           // 收付款记录无单号体系，用 收-/付- 前缀代替裸 #id（打印件可读）
           billNo: `${settleType === 'receipt' ? '收' : '付'}-${r.id}`,
-          label: isReverse ? '退款' : (settleType === 'receipt' ? '收款' : '付款'),
+          label: isReverse ? '退款' : settleType === 'receipt' ? '收款' : '付款',
           // 退款（退货单当场退款，审核时 bump 往来为正）在应收/应付上都是「加回」，渲染为借方
           debit: isReverse ? r.amount : 0,
           credit: isReverse ? 0 : r.amount,
@@ -431,10 +427,10 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT id, date, billNo, deposit, type FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId = ? AND deposit > 0 AND date >= ? AND date <= ?
+           AND partnerType = ? AND partnerId = ? AND deposit > 0 AND date >= ? AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, partnerId, from, to) as Array<{
+      .all(teamId, partnerType, partnerId, from, to) as Array<{
       id: number;
       date: string;
       billNo: string;
@@ -473,10 +469,13 @@ export function mountJxcReports(router: Router, db: DatabaseSync): void {
     const table = partnerType === 'cus' ? 'customer' : 'vendor';
     const partner = db
       .prepare(`SELECT id, name, mobile, address FROM ${table} WHERE id = ? AND teamId = ?`)
-      .get(partnerId, teamId) as { id: number; name: string; mobile: string | null; address: string | null } | undefined;
+      .get(partnerId, teamId) as
+      { id: number; name: string; mobile: string | null; address: string | null } | undefined;
 
     res.json({
-      mode, from, to,
+      mode,
+      from,
+      to,
       partner: partner ?? { id: partnerId, name: `#${partnerId}`, mobile: null, address: null },
       opening: openingFinal,
       periodDebit,

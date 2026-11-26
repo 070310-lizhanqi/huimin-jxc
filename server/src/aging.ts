@@ -15,6 +15,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
+import { sendError } from './infra/errors';
+import { roundHalfAwayFromZero, roundQty } from './shared/money';
 
 /** 账龄分桶边界（天）。最后一段为「超过 720 天」。 */
 const BUCKETS = [30, 60, 90, 180, 360, 720] as const;
@@ -135,8 +137,7 @@ export function mountAging(router: Router, db: DatabaseSync): void {
   ): { asOf: string; totals: Record<string, number>; rows: AgingBucketRow[] } => {
     const partnerType = mode === 'ar' ? 'cus' : 'ven';
     const chargeTypes = mode === 'ar' ? "('stockout', 'sret')" : "('stockin', 'pin')";
-    const signOf = (type: string) =>
-      mode === 'ar' ? (type === 'sret' ? -1 : 1) : type === 'pin' ? -1 : 1;
+    const signOf = (type: string) => (mode === 'ar' ? (type === 'sret' ? -1 : 1) : type === 'pin' ? -1 : 1);
     const settleType = mode === 'ar' ? 'receipt' : 'payment';
     const reverseType = mode === 'ar' ? 'payment' : 'receipt';
     const now = today();
@@ -153,10 +154,10 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       .prepare(
         `SELECT id, partnerId, date, type, totalAmount, COALESCE(deposit, 0) AS deposit FROM doc
          WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
-           AND partnerId IS NOT NULL AND date <= ?
+           AND partnerType = ? AND partnerId IS NOT NULL AND date <= ?
          ORDER BY date ASC, id ASC`,
       )
-      .all(teamId, now) as Array<{
+      .all(teamId, partnerType, now) as Array<{
       id: number;
       partnerId: number;
       date: string;
@@ -189,7 +190,11 @@ export function mountAging(router: Router, db: DatabaseSync): void {
         `SELECT partnerId, date, SUM(CASE WHEN type = ? THEN amount ELSE -amount END) AS amt FROM settlement
          WHERE ${settleWhere} GROUP BY partnerId, date ORDER BY date ASC`,
       )
-      .all(settleType, teamId, settleType, reverseType, partnerType, now) as Array<{ partnerId: number; date: string; amt: number }>;
+      .all(settleType, teamId, settleType, reverseType, partnerType, now) as Array<{
+      partnerId: number;
+      date: string;
+      amt: number;
+    }>;
     const settleEventMap = new Map<number, SettleEvent[]>();
     for (const r of settleEventRows) {
       const list = settleEventMap.get(r.partnerId) ?? [];
@@ -202,7 +207,12 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     for (const d of docs) {
       const list = byPartner.get(d.partnerId) ?? [];
       // 订金按单归属：sign*(total - deposit)；合计口径与旧汇总口径一致，只改桶归属
-      list.push({ id: d.id, partnerId: d.partnerId, date: d.date, amount: signOf(d.type) * (d.totalAmount - d.deposit) });
+      list.push({
+        id: d.id,
+        partnerId: d.partnerId,
+        date: d.date,
+        amount: signOf(d.type) * (d.totalAmount - d.deposit),
+      });
       byPartner.set(d.partnerId, list);
     }
 
@@ -220,24 +230,33 @@ export function mountAging(router: Router, db: DatabaseSync): void {
         db
           .prepare(
             `SELECT DISTINCT partnerId FROM doc
-             WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes} AND partnerId IS NOT NULL`,
+             WHERE teamId = ? AND status = 'audit' AND type IN ${chargeTypes}
+               AND partnerType = ? AND partnerId IS NOT NULL`,
           )
-          .all(teamId) as Array<{ partnerId: number }>
+          .all(teamId, partnerType) as Array<{ partnerId: number }>
       ).map((r) => r.partnerId),
     );
 
     const names = new Map<number, string>();
     if (byPartner.size > 0 || advanceBalances.length > 0) {
       const table = partnerType === 'cus' ? 'customer' : 'vendor';
-      const rows = db
-        .prepare(`SELECT id, name FROM ${table} WHERE teamId = ?`)
-        .all(teamId) as Array<{ id: number; name: string }>;
+      const rows = db.prepare(`SELECT id, name FROM ${table} WHERE teamId = ?`).all(teamId) as Array<{
+        id: number;
+        name: string;
+      }>;
       for (const r of rows) names.set(r.id, r.name);
     }
 
     const rows: AgingBucketRow[] = [];
     const totals: Record<string, number> = {
-      d30: 0, d60: 0, d90: 0, d180: 0, d360: 0, d720: 0, over720: 0, total: 0,
+      d30: 0,
+      d60: 0,
+      d90: 0,
+      d180: 0,
+      d360: 0,
+      d720: 0,
+      over720: 0,
+      total: 0,
     };
 
     for (const [partnerId, list] of byPartner) {
@@ -246,7 +265,13 @@ export function mountAging(router: Router, db: DatabaseSync): void {
         partnerId,
         partnerName: names.get(partnerId) ?? `#${partnerId}`,
         partnerType,
-        d30: 0, d60: 0, d90: 0, d180: 0, d360: 0, d720: 0, over720: 0,
+        d30: 0,
+        d60: 0,
+        d90: 0,
+        d180: 0,
+        d360: 0,
+        d720: 0,
+        over720: 0,
         total: 0,
         oldestDate: null,
       };
@@ -275,7 +300,13 @@ export function mountAging(router: Router, db: DatabaseSync): void {
         partnerId: ab.partnerId,
         partnerName: names.get(ab.partnerId) ?? `#${ab.partnerId}`,
         partnerType,
-        d30: 0, d60: 0, d90: 0, d180: 0, d360: 0, d720: 0, over720: 0,
+        d30: 0,
+        d60: 0,
+        d90: 0,
+        d180: 0,
+        d360: 0,
+        d720: 0,
+        over720: 0,
         total: ab.balance,
         oldestDate: null,
         advance: true,
@@ -290,8 +321,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
   router.get('/report/aging', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
     const mode = String(req.query.mode ?? 'ar') === 'ap' ? 'ap' : 'ar';
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { asOf, totals, rows } = computeAging(teamId, mode);
@@ -305,8 +336,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     // limit 守护：Number('abc')=NaN 时 slice(0, NaN) 静默返回空排行
     const rawLimit = Number(req.query.limit ?? 5);
     const limit = Number.isFinite(rawLimit) ? Math.min(20, Math.max(1, Math.floor(rawLimit))) : 5;
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const { rows } = computeAging(teamId, mode);
@@ -319,8 +350,8 @@ export function mountAging(router: Router, db: DatabaseSync): void {
    */
   router.get('/report/stock-aging', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) {
-      res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
       return;
     }
     const now = today();
@@ -386,7 +417,15 @@ export function mountAging(router: Router, db: DatabaseSync): void {
     }>;
 
     const totals: Record<string, number> = {
-      d30: 0, d60: 0, d90: 0, d180: 0, d360: 0, d720: 0, over720: 0, total: 0, qty: 0,
+      d30: 0,
+      d60: 0,
+      d90: 0,
+      d180: 0,
+      d360: 0,
+      d720: 0,
+      over720: 0,
+      total: 0,
+      qty: 0,
     };
     const items: Array<{
       productId: number;
@@ -406,10 +445,10 @@ export function mountAging(router: Router, db: DatabaseSync): void {
       const days = firstDate ? daysBetween(firstDate, now) : 0;
       const bucket = bucketOf(days);
       const unitCost = costMap.get(s.productId) ?? s.purchasePrice;
-      const amount = Math.round(s.qty * unitCost);
+      const amount = roundHalfAwayFromZero(s.qty * unitCost);
       totals[bucket] += amount;
       totals.total += amount;
-      totals.qty += s.qty;
+      totals.qty = roundQty(totals.qty + s.qty);
       items.push({
         productId: s.productId,
         prodName: s.prodName,

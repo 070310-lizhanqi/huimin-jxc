@@ -13,10 +13,13 @@ const DocImport = {
     const MAX_FILE_BYTES = 12 * 1024 * 1024;
     const ALLOW_EXT = /\.(xlsx|csv)$/i;
     function onImpFile(ev) {
-      const f = ev.target.files && ev.target.files[0] || null;
+      const f = (ev.target.files && ev.target.files[0]) || null;
       // 同一文件连续选：input change 只在 value 变化时触发，选完清空才能再选同一文件
       ev.target.value = '';
-      if (!f) { imp.file = null; return; }
+      if (!f) {
+        imp.file = null;
+        return;
+      }
       if (!ALLOW_EXT.test(f.name || '')) {
         imp.file = null;
         toast('只支持 .xlsx 或 .csv 文件', 'error');
@@ -28,7 +31,8 @@ const DocImport = {
         return;
       }
       imp.file = f;
-      imp.result = null; imp.done = null;
+      imp.result = null;
+      imp.done = null;
     }
     async function impUpload(dryRun) {
       if (!imp.file) return toast('请先选择 .xlsx 或 .csv 文件', 'error');
@@ -36,39 +40,89 @@ const DocImport = {
       try {
         const buf = await imp.file.arrayBuffer();
         const qs = new URLSearchParams({ dryRun: dryRun ? '1' : '0', autoCreate: imp.autoCreate ? '1' : '0' });
-        const r = await fetch('/api/doc/import?' + qs, {
-          method: 'POST',
-          // B-前5：同源 fetch 默认带 httpOnly Cookie，不再手动拼 Bearer 头
-          headers: { 'content-type': 'application/octet-stream' },
-          body: buf,
-        });
+        const requestId = nextRequestId();
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 120000);
+        let r;
+        try {
+          r = await fetch('/api/doc/import?' + qs, {
+            method: 'POST',
+            signal: ctl.signal,
+            // B-前5：同源 fetch 默认带 httpOnly Cookie，不再手动拼 Bearer 头
+            headers: { 'content-type': 'application/octet-stream', 'X-Request-Id': requestId },
+            body: buf,
+          });
+        } catch (err) {
+          clearTimeout(timer);
+          if (err && err.name === 'AbortError') throw new Error('导入请求超时，请检查网络或稍后重试', { cause: err });
+          throw new Error('网络异常，请检查服务是否可用', { cause: err });
+        }
+        clearTimeout(timer);
         const data = await r.json().catch(() => ({}));
-        if (r.status === 401) { logout(); return; }
-        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-        if (dryRun) { imp.result = data; toast('识别完成，请确认后导入'); }
-        else {
+        if (r.status === 401) {
+          handle401();
+          return;
+        }
+        if (!r.ok) {
+          const err = new Error(data.error || 'HTTP ' + r.status);
+          err.status = r.status;
+          err.code = data.code;
+          err.requestId = data.requestId || r.headers.get('X-Request-Id') || requestId;
+          throw err;
+        }
+        if (dryRun) {
+          imp.result = data;
+          toast('识别完成，请确认后导入');
+        } else {
           imp.done = data;
           toast(`已导入 ${data.summary.imported} 张草稿单据`);
           emit('imported');
         }
-      } catch (e) { toast(e.message, 'error'); }
-      finally { imp.busy = false; }
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        imp.busy = false;
+      }
     }
     function close() {
       // 释放 File 对象引用：弹窗关闭后 imp.file 还持有二进制，长会话内存累积
-      imp.file = null; imp.result = null; imp.done = null;
+      imp.file = null;
+      imp.result = null;
+      imp.done = null;
       emit('close');
     }
     const impTypeName = (t) => (DOC_META[t] ? DOC_META[t].label : t);
     /* 下载单据导入模板：通用列 + 一行示例，识别按列名智能匹配 */
     function downloadTemplate() {
-      exportCsv('单据导入模板.csv', [
-        { 单号: 'SO-001', 类型: '销售出库', 日期: '2026-10-24', 客户: '示例客户', 供应商: '', 仓库: '主仓库', 商品: '示例商品', 数量: '10', 单价: '12.80', 备注: '示例行，可删除' },
-      ], [
-        { key: '单号', label: '单号' }, { key: '类型', label: '类型' }, { key: '日期', label: '日期' },
-        { key: '客户', label: '客户' }, { key: '供应商', label: '供应商' }, { key: '仓库', label: '仓库' },
-        { key: '商品', label: '商品' }, { key: '数量', label: '数量' }, { key: '单价', label: '单价' }, { key: '备注', label: '备注' },
-      ]);
+      exportCsv(
+        '单据导入模板.csv',
+        [
+          {
+            单号: 'SO-001',
+            类型: '销售出库',
+            日期: '2026-10-24',
+            客户: '示例客户',
+            供应商: '',
+            仓库: '主仓库',
+            商品: '示例商品',
+            数量: '10',
+            单价: '12.80',
+            备注: '示例行，可删除',
+          },
+        ],
+        [
+          { key: '单号', label: '单号' },
+          { key: '类型', label: '类型' },
+          { key: '日期', label: '日期' },
+          { key: '客户', label: '客户' },
+          { key: '供应商', label: '供应商' },
+          { key: '仓库', label: '仓库' },
+          { key: '商品', label: '商品' },
+          { key: '数量', label: '数量' },
+          { key: '单价', label: '单价' },
+          { key: '备注', label: '备注' },
+        ],
+      );
     }
     return { imp, onImpFile, impUpload, close, impTypeName, fmtMoney, downloadTemplate };
   },

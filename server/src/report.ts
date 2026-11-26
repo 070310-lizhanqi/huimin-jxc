@@ -6,6 +6,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Request, Response, Router } from 'express';
 import { validBizDate } from './db';
+import { sendError } from './infra/errors';
+import { parseOptionalPositiveInt } from './infra/validate';
+import { allocateDocDiscounts, roundHalfAwayFromZero, roundQty, type DiscountableLine } from './shared/money';
+
+export { allocateDocDiscounts, roundHalfAwayFromZero, type DiscountableLine };
 
 type Value = string | number | null;
 
@@ -60,7 +65,10 @@ function rangeOf(req: Request): { from: string; to: string } {
  *  不做静默回落（回落会把错账伪装成「本月没数据」，用户无从察觉参数没生效）。 */
 function strictRange(req: Request): { from: string; to: string; error: string | null } {
   const { from, to } = rangeOf(req);
-  for (const [label, v] of [['from', from], ['to', to]] as const) {
+  for (const [label, v] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
     const err = validBizDate(v);
     if (err) return { from, to, error: `${label} 参数非法：${err}` };
   }
@@ -68,79 +76,32 @@ function strictRange(req: Request): { from: string; to: string; error: string | 
   return { from, to, error: null };
 }
 
-/** (docId, productId) 级的明细聚合行，用于整单折扣分摊 */
-export interface DiscountableLine {
-  docId: number;
-  productId: number;
-  type: string;
-  discount: number | null;
-  qty: number;
-  amount: number;
-}
-
-/** 对称舍入（round half away from zero）：-1.5 → -2，与 +1.5 → 2 对称；-0.5 → -1。
- *  Math.round 是向 +∞ 取整，负数 -1.5 会得 -1，造成行级 1 分偏差。
- *  与 docs.ts 的 lineAmount 同口径（B 组负责 docs.ts 侧，同样用对称舍入，
- *  公式逐字相同：Math.sign(n) * Math.round(Math.abs(n))）。 */
-export function roundHalfAwayFromZero(n: number): number {
-  return Math.sign(n) * Math.round(Math.abs(n));
-}
-
-/**
- * 按行金额占比把整单折扣分摊到各 (docId, productId) 行，尾差归该单金额最大的行，
- * 保证单内 Σ分摊 = 整单折扣。返回 `docId:productId` → 扣折扣后的净额。
- * 折扣 ≤ 0 或毛额 ≤ 0 的单按原毛额返回。
- * 供 /report/product 与工作台 /stats/sales-summary 共用——两处毛利必须同一口径，
- * 否则带折扣的销售在报表页和工作台会算出两个不同的毛利。
- */
-export function allocateDocDiscounts(lines: DiscountableLine[]): Map<string, number> {
-  const byDoc = new Map<number, DiscountableLine[]>();
-  for (const l of lines) {
-    const arr = byDoc.get(l.docId) ?? [];
-    arr.push(l);
-    byDoc.set(l.docId, arr);
-  }
-  const net = new Map<string, number>();
-  for (const arr of byDoc.values()) {
-    const discount = Math.max(0, Math.round(Number(arr[0].discount ?? 0)));
-    const gross = arr.reduce((s, l) => s + l.amount, 0);
-    if (discount <= 0 || gross <= 0) {
-      for (const l of arr) net.set(`${l.docId}:${l.productId}`, l.amount);
-      continue;
-    }
-    let allocated = 0;
-    let maxLine = arr[0];
-    for (const l of arr) {
-      // 负数行用对称舍入：-1.5 → -2，与 +1.5 → 2 对称（Math.round(-1.5) 得 -1，行级差 1 分）
-      const share = roundHalfAwayFromZero((discount * l.amount) / gross);
-      net.set(`${l.docId}:${l.productId}`, l.amount - share);
-      allocated += share;
-      if (l.amount > maxLine.amount) maxLine = l;
-    }
-    // 尾差补给金额最大的行，保证单内 Σ分摊 = 整单折扣
-    const tail = discount - allocated;
-    if (tail !== 0) {
-      const k = `${maxLine.docId}:${maxLine.productId}`;
-      net.set(k, (net.get(k) ?? maxLine.amount) - tail);
-    }
-  }
-  return net;
-}
+/** 报表日期参数校验：与 jxc-report 的 rangeOf 同口径——脏日期直接 400 拒绝 */
 
 export function mountReports(router: Router, db: DatabaseSync): void {
   // 按日销售汇总（销售出库 + 销售退货）
   // partnerId 可选过滤：按单个客户看日销售（测试与「看某客户当日成交」场景共用）
   router.get('/report/sales', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
+    const partnerRes = parseOptionalPositiveInt(req.query.partnerId, 'partnerId');
+    if (!partnerRes.ok) return sendError(req, res, 400, partnerRes.error, 'VALIDATION_ERROR');
     const { from, to } = range;
-    const conds = ['d.teamId = ?', "d.status = 'audit'", "d.type IN ('stockout', 'sret')", 'd.date >= ?', 'd.date <= ?'];
+    const conds = [
+      'd.teamId = ?',
+      "d.status = 'audit'",
+      "d.type IN ('stockout', 'sret')",
+      'd.date >= ?',
+      'd.date <= ?',
+    ];
     const args: Value[] = [teamId, from, to];
-    if (req.query.partnerId) {
-      conds.push('d.partnerId = ?');
-      args.push(Number(req.query.partnerId));
+    if (partnerRes.value !== null) {
+      conds.push("d.partnerId = ? AND (d.partnerType = 'cus' OR d.partnerType IS NULL)");
+      args.push(partnerRes.value);
     }
     const days = db
       .prepare(
@@ -159,8 +120,8 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       (s, r) => ({
         saleAmount: s.saleAmount + r.saleAmount,
         retAmount: s.retAmount + r.retAmount,
-        saleQty: s.saleQty + r.saleQty,
-        retQty: s.retQty + r.retQty,
+        saleQty: roundQty(s.saleQty + r.saleQty),
+        retQty: roundQty(s.retQty + r.retQty),
         orderCount: s.orderCount + r.orderCount,
       }),
       { saleAmount: 0, retAmount: 0, saleQty: 0, retQty: 0, orderCount: 0 },
@@ -173,9 +134,11 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   // 折扣按行金额占比分摊，单内尾差归该单金额最大的行，保证 Σ行分摊 = 整单折扣。
   router.get('/report/product', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
     const { from, to } = range;
     // 按 (单据, 商品) 聚合，带上整单折扣用于分摊（毛额由各分摊行合计得出，无需子查询）
     const lines = db
@@ -210,10 +173,7 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       number,
       { prodName: string; unit: string | null; spec: string | null; purchasePrice: number }
     >();
-    const aggMap = new Map<
-      number,
-      { saleQty: number; retQty: number; saleAmount: number; retAmount: number }
-    >();
+    const aggMap = new Map<number, { saleQty: number; retQty: number; saleAmount: number; retAmount: number }>();
     for (const l of lines) {
       if (!prodMeta.has(l.productId)) {
         prodMeta.set(l.productId, {
@@ -226,10 +186,10 @@ export function mountReports(router: Router, db: DatabaseSync): void {
       const a = aggMap.get(l.productId) ?? { saleQty: 0, retQty: 0, saleAmount: 0, retAmount: 0 };
       const net = netLineAmount.get(`${l.docId}:${l.productId}`) ?? l.amount;
       if (l.type === 'stockout') {
-        a.saleQty += l.qty;
+        a.saleQty = roundQty(a.saleQty + l.qty);
         a.saleAmount += net;
       } else {
-        a.retQty += l.qty;
+        a.retQty = roundQty(a.retQty + l.qty);
         a.retAmount += net;
       }
       aggMap.set(l.productId, a);
@@ -259,9 +219,9 @@ export function mountReports(router: Router, db: DatabaseSync): void {
     const costMap = new Map<number, number>(costs.map((c) => [c.productId, c.avgCost]));
     const out: ProductReportRow[] = rows.map((r) => {
       const avgCost = costMap.get(r.productId) ?? r.purchasePrice;
-      const netQty = r.saleQty - r.retQty;
+      const netQty = roundQty(r.saleQty - r.retQty);
       const netAmount = r.saleAmount - r.retAmount;
-      const estCost = Math.round(netQty * avgCost);
+      const estCost = roundHalfAwayFromZero(netQty * avgCost);
       return {
         productId: r.productId,
         prodName: r.prodName,
@@ -286,9 +246,11 @@ export function mountReports(router: Router, db: DatabaseSync): void {
   // 保证客户排行合计 = 净销售额，与按日/商品口径一致）
   router.get('/report/customer', (req: Request, res: Response) => {
     const teamId = Number(req.query.teamId);
-    if (!teamId) return res.status(400).json({ error: 'teamId 不能为空' });
+    if (!Number.isInteger(teamId) || teamId <= 0) {
+      return sendError(req, res, 400, 'teamId 不能为空', 'VALIDATION_ERROR');
+    }
     const range = strictRange(req);
-    if (range.error) return res.status(400).json({ error: range.error });
+    if (range.error) return sendError(req, res, 400, range.error, 'VALIDATION_ERROR');
     const { from, to } = range;
     const rows = db
       .prepare(
@@ -296,8 +258,9 @@ export function mountReports(router: Router, db: DatabaseSync): void {
                 SUM(CASE WHEN d.type = 'stockout' THEN d.totalAmount ELSE 0 END) AS saleAmount,
                 SUM(CASE WHEN d.type = 'sret' THEN d.totalAmount ELSE 0 END) AS retAmount,
                 COUNT(CASE WHEN d.type = 'stockout' THEN 1 END) AS orderCount
-         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId
+         FROM doc d LEFT JOIN customer c ON c.id = d.partnerId AND c.teamId = d.teamId AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
          WHERE d.teamId = ? AND d.status = 'audit' AND d.type IN ('stockout', 'sret')
+           AND (d.partnerType = 'cus' OR d.partnerType IS NULL)
            AND d.date >= ? AND d.date <= ?
          GROUP BY d.partnerId ORDER BY saleAmount DESC`,
       )
