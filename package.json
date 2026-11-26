@@ -1,6 +1,6 @@
 {
   "name": "zhanhui-jxc",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "description": "展惠进销存系统：面向小微批发 / 零售的商品、采购、销售、库存与往来账管理（独立原创实现）",
   "license": "MIT",
@@ -64,7 +64,8 @@
     "asarUnpack": [
       "dist/**",
       "web/**",
-      "node_modules/**"
+      "node_modules/**",
+      "package.json"
     ],
     "win": {
       "target": "nsis",
@@ -86,7 +87,7 @@
       }
     ],
     "releaseInfo": {
-      "releaseName": "展惠进销存 v0.5.3"
+      "releaseName": "展惠进销存 v0.6.0"
     }
   }
 }

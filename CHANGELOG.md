@@ -2,6 +2,16 @@
 
 本项目遵循「版本 = 一轮审查 + 修复」的节奏。带 ⚠️ 的条目为影响账务正确性或安全性的修复。
 
+## v0.6.0（2026-11-26）
+
+企业级工程全面升级（`feat/enterprise-upgrade` 并入 `master`）：
+
+- ⚠️ **配置与密钥安全**：彻底消除源码硬编码 JWT 密钥，引入 `server/src/config/env.ts` 启动强校验与 `.env.example`；生产与非回环绑定缺失或弱密钥即快速失败，本机回环开发/桌面端自动持久化 `0o600` `.jwt-secret`。
+- ⚠️ **核心精度、并发与原子事务**：拆分 `routes/`、`services/`、`infra/`、`middleware/`、`shared/` 分层架构；统一数量 `10_000` 倍整型缩放与整单折扣守恒；统一 `withImmediateTx`（`BEGIN IMMEDIATE`）覆盖单据过账/作废、盘点空单元格精准扣减与零差额作废、收付款与 Excel 导入建档；`doc/create`、`doc/audit`、`doc/void`、`settlement/create` 支持 24h `Idempotency-Key`。
+- ⚠️ **RBAC、审计与热备份根治**：补齐 `/api/admin/shutdown` 与 `doc/import?autoCreate=1` 管理员权限校验、防 `X-Forwarded-For` 伪造的多跳代理 IP 解析、`audit_log` 操作审计与 `GET /api/audit-logs`；`backup.ts` 改用 SQLite 原生 `VACUUM INTO` 彻底解决热备份引发的 POSIX 锁丢失与 WAL 分裂；新增 `schema_migrations`（`V1–V3`）与 `db:migrate`/`db:seed` CLI。
+- **可观测性、容器化与质量门禁**：新增 `AsyncLocalStorage` 结构化脱敏日志与 `/health`、`/ready` 探针；补齐多阶段非 root `Dockerfile`、`docker-compose.yml`、`.github/workflows/ci.yml`、ESLint + Prettier + 严格 TypeScript 与 `25` 项单元 + `16` 项集成测试（联合回归 `--with-rounds` `49/49` 全通过）。
+- **桌面发布与安装包**：升级版本号至 `0.6.0`（`展惠进销存-Setup-0.6.0.exe`），`package.json` `asarUnpack` 补充 `package.json` 使桌面端 `/health` / `/ready` 准确返回版本号，修复 `.github/workflows/release.yml` 回归阶段 `server.lock` 重启进程清理并接入全套门禁。
+
 ## v0.5.2（2026-10-24）
 
 紧急修复：双击桌面图标弹多个浏览器窗口。

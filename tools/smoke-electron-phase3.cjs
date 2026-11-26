@@ -12,7 +12,7 @@
  *
  * 更新源：本脚本自带一个本地 HTTP 服务，模拟 electron-updater 的 generic
  * provider（latest.yml 三种场景）：
- *   /same/latest.yml    版本 = 当前版（0.5.3）→ 无更新
+ *   /same/latest.yml    版本 = 当前版（见 package.json）→ 无更新
  *   /new/latest.yml     版本 9.9.9 → 有新版（只测到“发现新版”，不真下载）
  *   /missing/latest.yml 404 → 检查失败
  * 探针 setUpdateFeed(url) 在运行时切换更新源；生产环境的更新源是 GitHub

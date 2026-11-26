@@ -4,7 +4,7 @@
 
 An enterprise-hardened inventory, purchasing, sales, stock, and cash-settlement management system for small wholesale and retail businesses: master data catalog, purchase receiving, sales shipping, transfers, stocktaking, FIFO batch costing, receipts/payments, reconciled reports, and audit logging.
 
-**v0.5.3** · **MIT License** · SQLite WAL transactional consistency · Zero external database · Offline zero-build frontend · Docker & Electron ready
+**v0.6.0** · **MIT License** · SQLite WAL transactional consistency · Zero external database · Offline zero-build frontend · Docker & Electron ready
 
 ---
 
